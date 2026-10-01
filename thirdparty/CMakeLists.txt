@@ -25,6 +25,7 @@ macro(add_definitions)
 endmacro()
 add_subdirectory(opengv EXCLUDE_FROM_ALL)
 
+if(GRANITE_BUILD_GUI)
 # Hack to disable CPack in Pangolin.
 macro(include)
   if(NOT ${ARGV0} STREQUAL "CPack")
@@ -33,6 +34,8 @@ macro(include)
 endmacro()
 add_subdirectory(Pangolin EXCLUDE_FROM_ALL)
 
+
+endif()
 
 # fix aprilgrid
 target_compile_options(apriltag PRIVATE "-Wno-unused-private-field")
@@ -48,6 +51,7 @@ target_compile_options(opengv PRIVATE
   -march=${CXX_MARCH}
   ${GRANITE_PASSED_CXX_FLAGS})
 
+if(GRANITE_BUILD_GUI)
 # TODO: enable once mpark issue is fixed upstream pangolin
 #set_target_properties(pangolin PROPERTIES
 #  CXX_STANDARD 17)
@@ -120,3 +124,17 @@ endif()
 
 
 
+
+endif()
+
+# opengv also exports Eigen paths in headless builds.
+get_target_property(_opengv_dirs opengv INTERFACE_INCLUDE_DIRECTORIES)
+set(_opengv_build_dirs "")
+foreach(_dir IN LISTS _opengv_dirs)
+  if(_dir MATCHES "^${CMAKE_SOURCE_DIR}/")
+    list(APPEND _opengv_build_dirs "$<BUILD_INTERFACE:${_dir}>")
+  else()
+    list(APPEND _opengv_build_dirs "${_dir}")
+  endif()
+endforeach()
+set_target_properties(opengv PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${_opengv_build_dirs}")

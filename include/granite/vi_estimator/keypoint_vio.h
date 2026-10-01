@@ -69,6 +69,10 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 namespace granite {
 
+class KeypointVoEstimator;
+struct MonoVioAlignment;
+struct MonoVioFrame;
+
 class KeypointVioEstimator : public VioEstimatorBase,
                              public BundleAdjustmentBase {
  public:
@@ -88,6 +92,10 @@ class KeypointVioEstimator : public VioEstimatorBase,
                   const Eigen::Vector3d& ba);
 
   void initialize(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba);
+
+  void initializeFromMonoMap(const KeypointVoEstimator& visual,
+      const MonoVioAlignment& alignment, const std::vector<MonoVioFrame>& frames,
+      const Eigen::aligned_map<int64_t, OpticalFlowResult::Ptr>& history);
 
   virtual ~KeypointVioEstimator() { join(); }
 
@@ -196,7 +204,7 @@ class KeypointVioEstimator : public VioEstimatorBase,
   const Sophus::SE3d& getT_w_i_init() { return T_w_i_init; }
 
   void join() {
-    if (processing_thread->joinable()) processing_thread->join();
+    if (processing_thread && processing_thread->joinable()) processing_thread->join();
   }
 
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -225,6 +233,7 @@ class KeypointVioEstimator : public VioEstimatorBase,
 
   Sophus::SE3d T_w_i_init;
 
+  OpticalFlowResult::Ptr seed_frame;
   bool initialized;
   bool opt_started;
 

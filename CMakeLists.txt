@@ -166,10 +166,16 @@ if(NOT EIGEN3_INCLUDE_DIR MATCHES "^${EIGEN_ROOT}")
   message(WARNING "Found Eigen headers are outside of specified EIGEN_ROOT '${EIGEN_ROOT}'")
 endif()
 
-find_package(TBB REQUIRED)
+find_package(TBB CONFIG QUIET)
+if(TBB_FOUND)
+  set(TBB_LIBRARIES TBB::tbb)
+  get_target_property(TBB_INCLUDE_DIR TBB::tbb INTERFACE_INCLUDE_DIRECTORIES)
+else()
+  find_package(TBB REQUIRED MODULE)
+endif()
 include_directories(${TBB_INCLUDE_DIR})
 message(STATUS "TBB_INTERFACE_VERSION: ${TBB_INTERFACE_VERSION}")
-if (TBB_INTERFACE_VERSION LESS 11004)
+if (DEFINED TBB_INTERFACE_VERSION AND TBB_INTERFACE_VERSION LESS 11004)
   # enable global_control header for earlier TBB versions (Ubuntu 16.04, 18.04)
   add_definitions(-DTBB_PREVIEW_GLOBAL_CONTROL)
 endif()
@@ -180,6 +186,8 @@ message(STATUS "Found OpenCV headers in: ${OpenCV_INCLUDE_DIR}")
 message(STATUS "Found OpenCV_LIBS: ${OpenCV_LIBS}")
 
 
+option(GRANITE_BUILD_GUI "Build Pangolin GUI applications" ON)
+option(GRANITE_BUILD_REALSENSE "Build T265 live VIO examples" OFF)
 add_subdirectory(thirdparty)
 
 
@@ -200,6 +208,8 @@ add_library(granite SHARED
   src/calibration/vignette.cpp
   src/utils/vio_config.cpp
   src/optical_flow/optical_flow.cpp
+  src/vi_estimator/mono_vio.cpp
+  src/vi_estimator/mono_vio_alignment.cpp
   src/vi_estimator/keypoint_vio.cpp
   src/vi_estimator/keypoint_vio_linearize.cpp
   src/vi_estimator/keypoint_vo.cpp
@@ -213,6 +223,7 @@ add_library(granite SHARED
 target_link_libraries(granite PUBLIC ${TBB_LIBRARIES} ${STD_CXX_FS} ${OpenCV_LIBS} PRIVATE rosbag apriltag opengv)
 
 
+if(GRANITE_BUILD_GUI)
 add_executable(granite_calibrate src/calibrate.cpp src/calibration/cam_calib.cpp)
 target_link_libraries(granite_calibrate granite pangolin)
 
@@ -252,6 +263,30 @@ install(TARGETS granite_calibrate granite_calibrate_imu granite_vio_sim granite_
   RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin
   LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}/lib
   ARCHIVE DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
+
+else()
+  install(TARGETS granite LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
+endif()
+
+if(GRANITE_BUILD_REALSENSE)
+  find_package(realsense2 REQUIRED)
+  add_library(granite_t265 src/device/rs_t265.cpp)
+  target_link_libraries(granite_t265 PUBLIC granite realsense2::realsense2)
+  foreach(_mode vio mono_vio vo mono_vo)
+    add_executable(granite_rs_t265_${_mode} src/rs_t265_vio.cpp)
+    target_link_libraries(granite_rs_t265_${_mode} granite_t265)
+    if(_mode MATCHES "^mono")
+      target_compile_definitions(granite_rs_t265_${_mode} PRIVATE GRANITE_T265_MONO_DEFAULT=1)
+    endif()
+    if(_mode MATCHES "vo$")
+      target_compile_definitions(granite_rs_t265_${_mode} PRIVATE GRANITE_T265_VO_DEFAULT=1)
+    endif()
+  endforeach()
+  install(TARGETS granite_t265 granite_rs_t265_vio granite_rs_t265_mono_vio granite_rs_t265_vo granite_rs_t265_mono_vo
+    RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin
+    LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}/lib
+    ARCHIVE DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
+endif()
 
 file(GLOB SCRIPTS_TO_INSTALL "${CMAKE_CURRENT_SOURCE_DIR}/scripts/granite_*.py")
 install(PROGRAMS ${SCRIPTS_TO_INSTALL} DESTINATION ${CMAKE_INSTALL_PREFIX}/bin)

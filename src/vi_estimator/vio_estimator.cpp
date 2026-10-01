@@ -52,6 +52,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <granite/vi_estimator/vio_estimator.h>
 
 #include <granite/vi_estimator/keypoint_vio.h>
+#include <granite/vi_estimator/mono_vio.h>
 #include <granite/vi_estimator/keypoint_vo.h>
 
 namespace granite {
@@ -61,7 +62,9 @@ VioEstimatorBase::Ptr VioEstimatorFactory::getVioEstimator(
     const Eigen::Vector3d& g, bool use_imu) {
   VioEstimatorBase::Ptr res;
 
-  if (use_imu) {
+  if (use_imu && cam.intrinsics.size() == 1) {
+    res = std::make_shared<MonoVioEstimator>(g, cam, config);
+  } else if (use_imu) {
     res.reset(new KeypointVioEstimator(g, cam, config));
   } else {
     res.reset(new KeypointVoEstimator(cam, config));

@@ -62,6 +62,8 @@ struct VioStateData {
 
   PoseVelBiasState state;
   size_t map_idx;
+  size_t num_landmarks = 0;
+  size_t num_finite_landmarks = 0;
 
   double scale_variance = std::numeric_limits<double>::quiet_NaN();
   double drift_variance = std::numeric_limits<double>::quiet_NaN();

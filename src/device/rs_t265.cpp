@@ -50,61 +50,52 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
 #include <granite/device/rs_t265.h>
-
-std::string get_date();
+#include <granite/device/t265_image.h>
 
 namespace granite {
 
 RsT265Device::RsT265Device(bool manual_exposure, int skip_frames,
-                           int webp_quality, double exposure_value)
-    : manual_exposure(manual_exposure),
-      skip_frames(skip_frames),
-      webp_quality(webp_quality) {
+                           int webp_quality, double exposure_value,
+                           int mono_camera, bool resize_half)
+    : manual_exposure(manual_exposure), skip_frames(skip_frames),
+      webp_quality(webp_quality), exposure_value(exposure_value),
+      mono_camera(mono_camera), resize_half(resize_half), pipe(context) {
+  if (skip_frames < 1 || mono_camera < 0 || mono_camera > 2 || exposure_value < 0) {
+    throw std::invalid_argument("Invalid T265 capture options");
+  }
   rs2::log_to_console(RS2_LOG_SEVERITY_ERROR);
-  pipe = rs2::pipeline(context);
-
+  bool found = false;
+  for (auto device : context.query_devices()) {
+    if (std::string(device.get_info(RS2_CAMERA_INFO_NAME)).find("T265") != std::string::npos) {
+      config.enable_device(device.get_info(RS2_CAMERA_INFO_SERIAL_NUMBER));
+      found = true;
+      break;
+    }
+  }
+  if (!found) throw std::runtime_error("No Intel RealSense T265 connected");
   config.enable_stream(RS2_STREAM_ACCEL, RS2_FORMAT_MOTION_XYZ32F);
   config.enable_stream(RS2_STREAM_GYRO, RS2_FORMAT_MOTION_XYZ32F);
   config.enable_stream(RS2_STREAM_FISHEYE, 1, RS2_FORMAT_Y8);
   config.enable_stream(RS2_STREAM_FISHEYE, 2, RS2_FORMAT_Y8);
-  if (!manual_exposure) {
-    config.enable_stream(RS2_STREAM_POSE, RS2_FORMAT_6DOF);
-  }
+  // Keep firmware tracking disabled: Granite consumes raw images and IMU.
+}
 
-  if (context.query_devices().size() == 0) {
-    std::cout << "Waiting for device to be connected" << std::endl;
-    rs2::device_hub hub(context);
-    hub.wait_for_device();
-  }
-
-  for (auto& s : context.query_devices()[0].query_sensors()) {
-    std::cout << "Sensor " << s.get_info(RS2_CAMERA_INFO_NAME)
-              << ". Supported options:" << std::endl;
-
-    for (const auto& o : s.get_supported_options()) {
-      std::cout << "\t" << rs2_option_to_string(o) << std::endl;
-    }
-  }
-
-  auto device = context.query_devices()[0];
-  device.hardware_reset();
-
-  std::cout << "Device " << device.get_info(RS2_CAMERA_INFO_NAME)
-            << " connected" << std::endl;
-  sensor = device.query_sensors()[0];
-
-  if (manual_exposure) {
-    std::cout << "Enabling manual exposure control" << std::endl;
-    sensor.set_option(rs2_option::RS2_OPTION_ENABLE_AUTO_EXPOSURE, 0);
-    sensor.set_option(rs2_option::RS2_OPTION_EXPOSURE, exposure_value * 1000);
+RsT265Device::~RsT265Device() {
+  if (running) {
+    capturing = false;
+    try { pipe.stop(); } catch (const rs2::error&) {}
   }
 }
 
-RsT265Device::~RsT265Device(){};
+std::string RsT265Device::errorMessage() const {
+  std::lock_guard<std::mutex> lock(error_mutex);
+  return error_message;
+}
 
 void RsT265Device::start() {
   auto callback = [&](const rs2::frame& frame) {
-    exportCalibration();
+    if (!capturing.load()) return;
+    try {
 
     if (auto fp = frame.as<rs2::motion_frame>()) {
       auto motion = frame.as<rs2::motion_frame>();
@@ -128,7 +119,7 @@ void RsT265Device::start() {
         if (!prev_accel_data.get()) {
           prev_accel_data.reset(new RsIMUData(d));
         } else {
-          GRANITE_ASSERT(d.timestamp > prev_accel_data->timestamp);
+          if (d.timestamp <= prev_accel_data->timestamp) return;
 
           while (!gyro_data_queue.empty() && gyro_data_queue.front().timestamp <
                                                  prev_accel_data->timestamp) {
@@ -157,43 +148,43 @@ void RsT265Device::start() {
             data->accel = accel_interpolated;
             data->gyro = gyro_data.data;
 
-            if (imu_data_queue) imu_data_queue->push(data);
+            if (imu_data_queue) {
+              imu_data_queue->push(data);
+              ++imu_samples;
+            }
           }
 
           prev_accel_data.reset(new RsIMUData(d));
         }
       }
     } else if (auto fs = frame.as<rs2::frameset>()) {
-      if (frame_counter++ % skip_frames != 0) return;
+      auto left = fs.get_fisheye_frame(1);
+      auto right = fs.get_fisheye_frame(2);
+      if ((mono_camera != 2 && !left) || (mono_camera != 1 && !right)) return;
+      const auto reference = mono_camera == 2 ? right : left;
+      last_image_t_ns = static_cast<int64_t>(reference.get_timestamp() * 1e6);
+      ++image_frames;
+      if (frame_counter++ % skip_frames.load() != 0) return;
 
       OpticalFlowInput::Ptr data(new OpticalFlowInput);
-      data->img_data.resize(NUM_CAMS);
-
-      for (int i = 0; i < NUM_CAMS; i++) {
-        auto f = fs[i];
-        if (!f.as<rs2::video_frame>()) {
-          std::cout << "Weird Frame, skipping" << std::endl;
-          continue;
+      data->t_ns = last_image_t_ns.load();
+      const int first = mono_camera == 0 ? 1 : mono_camera;
+      const int count = mono_camera == 0 ? 2 : 1;
+      data->img_data.resize(count);
+      for (int i = 0; i < count; ++i) {
+        const auto vf = fs.get_fisheye_frame(first + i);
+        if (vf.supports_frame_metadata(RS2_FRAME_METADATA_ACTUAL_EXPOSURE)) {
+          data->img_data[i].exposure =
+              vf.get_frame_metadata(RS2_FRAME_METADATA_ACTUAL_EXPOSURE) * 1e-6;
         }
-        auto vf = f.as<rs2::video_frame>();
-
-        data->t_ns = vf.get_timestamp() * 1e6;
-
-        data->img_data[i].exposure =
-            vf.get_frame_metadata(RS2_FRAME_METADATA_ACTUAL_EXPOSURE) * 1e-6;
-
-        data->img_data[i].img.reset(new granite::ManagedImage<PixelType>(
-            vf.get_width(), vf.get_height()));
-
-        const uint8_t* data_in = (const uint8_t*)vf.get_data();
-        PixelType* data_out = data->img_data[i].img->ptr;
-
-        convert_copy_gray_image(vf.get_width(), vf.get_height(), data_in,
-                                data_out);
+        cv::Mat pixels(vf.get_height(), vf.get_width(), CV_8UC1,
+                       const_cast<void*>(vf.get_data()), vf.get_stride_in_bytes());
+        data->img_data[i].img = copyT265Image(pixels, resize_half);
       }
-
-      last_img_data = data;
-      if (image_data_queue) image_data_queue->push(data);
+      if (image_data_queue) {
+        if (image_data_queue->try_push(data)) ++queued_frames;
+        else ++dropped_frames;
+      }
 
     } else if (auto pf = frame.as<rs2::pose_frame>()) {
       auto data = pf.get_pose_data();
@@ -210,12 +201,33 @@ void RsT265Device::start() {
 
       if (pose_data_queue) pose_data_queue->push(pdata);
     }
+    } catch (const std::exception& error) {
+      std::lock_guard<std::mutex> lock(error_mutex);
+      error_message = error.what();
+      failed = true;
+      capturing = false;
+    }
   };
 
   profile = pipe.start(config, callback);
+  running = true;
+  sensor = profile.get_device().first<rs2::sensor>();
+  if (manual_exposure) {
+    sensor.set_option(RS2_OPTION_ENABLE_AUTO_EXPOSURE, 0);
+    setExposure(exposure_value);
+  }
+  exportCalibration();
 }
 
-void RsT265Device::stop() {
+void RsT265Device::enableCapture() { capturing = true; }
+
+void RsT265Device::stop(bool send_end_of_stream) {
+  capturing = false;
+  if (running) {
+    pipe.stop();
+    running = false;
+  }
+  if (!send_end_of_stream) return;
   if (image_data_queue) image_data_queue->push(nullptr);
   if (imu_data_queue) imu_data_queue->push(nullptr);
 }
@@ -227,7 +239,10 @@ bool RsT265Device::setExposure(double exposure) {
   return true;
 }
 
-void RsT265Device::setSkipFrames(int skip) { skip_frames = skip; }
+void RsT265Device::setSkipFrames(int skip) {
+  if (skip < 1) throw std::invalid_argument("Frame stride must be positive");
+  skip_frames = skip;
+}
 
 void RsT265Device::setWebpQuality(int quality) { webp_quality = quality; }
 
@@ -238,6 +253,7 @@ std::shared_ptr<granite::Calibration<double>> RsT265Device::exportCalibration() 
 
   calib.reset(new granite::Calibration<Scalar>);
   calib->imu_update_rate = IMU_RATE;
+  calib->cam_update_rate = 30;
 
   auto accel_stream = profile.get_stream(RS2_STREAM_ACCEL);
   auto gyro_stream = profile.get_stream(RS2_STREAM_GYRO);
@@ -347,6 +363,7 @@ std::shared_ptr<granite::Calibration<double>> RsT265Device::exportCalibration() 
     }
   }
 
+  prepareT265Calibration(*calib, mono_camera, resize_half);
   return calib;
 }
 

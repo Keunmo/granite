@@ -53,6 +53,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <granite/vi_estimator/keypoint_vio.h>
 
 #include <granite/optimization/accumulator.h>
+#include <granite/vi_estimator/keypoint_vo.h>
+#include <granite/vi_estimator/mono_vio_alignment.h>
 
 #include <tbb/blocked_range.h>
 #include <tbb/parallel_for.h>
@@ -98,6 +100,72 @@ KeypointVioEstimator::KeypointVioEstimator(
   opt_started = false;
 }
 
+void KeypointVioEstimator::initializeFromMonoMap(
+    const KeypointVoEstimator& visual, const MonoVioAlignment& alignment,
+    const std::vector<MonoVioFrame>& frames,
+    const Eigen::aligned_map<int64_t, OpticalFlowResult::Ptr>& history) {
+  const Sophus::SO3d rotation(Eigen::Quaterniond::FromTwoVectors(alignment.gravity, g));
+  const Eigen::Vector3d lever = calib.T_i_c[0].translation();
+  auto metric_pose = [&](const Sophus::SE3d& pose) {
+    const Eigen::Vector3d camera = pose.translation() + pose.so3() * lever;
+    return Sophus::SE3d(rotation * pose.so3(), rotation *
+                       (alignment.scale * camera - pose.so3() * lever));
+  };
+  const Eigen::Vector3d origin = metric_pose(frames.front().T_v_i).translation();
+  auto poses = visual.getAllPosesMap();
+  this_state_t_ns = frames.back().t_ns;
+  lmdb = visual.lmdb;
+  for (auto host : lmdb.getHostKfs()) {
+    kf_ids.insert(host.frame_id);
+    const auto landmarks = lmdb.getLandmarksForHost(host);
+    num_points_kf[host.frame_id] = landmarks.size();
+  }
+  for (const auto& entry : poses) {
+    auto pose = metric_pose(entry.second);
+    pose.translation() -= origin;
+    if (entry.first == this_state_t_ns) {
+      T_w_i_init = pose;
+      frame_states[entry.first] = PoseVelBiasStateWithLin(entry.first, pose,
+          rotation * alignment.velocities.back(), alignment.gyro_bias,
+          Eigen::Vector3d::Zero(), true);
+    } else {
+      frame_poses[entry.first] = PoseStateWithLin(entry.first, pose, true);
+    }
+    const auto found = history.find(entry.first);
+    if (found != history.end()) prev_opt_flow_res[entry.first] = found->second;
+  }
+  for (auto host : lmdb.getHostKfs()) {
+    const auto observations = lmdb.getObservations(host);
+    for (const auto& observation : observations) {
+      auto& point = lmdb.getLandmark(observation.kpt_id);
+      if (point.kf_id == host) point.id /= alignment.scale;
+    }
+  }
+  marg_order.clear();
+  for (const auto& entry : frame_poses) {
+    marg_order.abs_order_map[entry.first] = {marg_order.total_size, se3_SIZE};
+    marg_order.total_size += se3_SIZE;
+    ++marg_order.items;
+  }
+  const size_t state_offset = marg_order.total_size;
+  marg_order.abs_order_map[this_state_t_ns] = {state_offset, se3_VEL_BIAS_SIZE};
+  marg_order.total_size += se3_VEL_BIAS_SIZE;
+  ++marg_order.items;
+  marg_H.setZero(marg_order.total_size, marg_order.total_size);
+  marg_b.setZero(marg_order.total_size);
+  // Anchor the transferred visual gauge and the initial IMU bias estimates.
+  marg_H.diagonal().head<6>().setConstant(config.vio_init_pose_weight);
+  marg_H.diagonal().segment<3>(state_offset + 9).setConstant(config.vio_init_ba_weight);
+  marg_H.diagonal().segment<3>(state_offset + 12).setConstant(config.vio_init_bg_weight);
+  seed_frame = history.at(this_state_t_ns);
+  prev_state_t_ns = this_state_t_ns;
+  take_kf = false;
+  opt_started = true;
+  initialized = true;
+  tracking_state = TrackingState::TRACKING;
+  initialize(alignment.gyro_bias, Eigen::Vector3d::Zero());
+}
+
 void KeypointVioEstimator::initialize(int64_t t_ns, const Sophus::SE3d& T_w_i,
                                       const Eigen::Vector3d& vel_w_i,
                                       const Eigen::Vector3d& bg,
@@ -125,7 +193,7 @@ void KeypointVioEstimator::initialize(const Eigen::Vector3d& bg,
   }
 
   auto proc_func = [&, bg, ba] {
-    OpticalFlowResult::Ptr prev_frame, curr_frame;
+    OpticalFlowResult::Ptr prev_frame = seed_frame, curr_frame;
     IntegratedImuMeasurement::Ptr meas;
 
     const Eigen::Vector3d accel_cov =
@@ -135,6 +203,11 @@ void KeypointVioEstimator::initialize(const Eigen::Vector3d& bg,
 
     ImuData::Ptr data;
     imu_data_queue->pop(data);
+    if (!data) {
+      if (out_state_queue) out_state_queue->push(nullptr);
+      finished = true;
+      return;
+    }
     data->accel = calib.calib_accel_bias.getCalibrated(data->accel);
     data->gyro = calib.calib_gyro_bias.getCalibrated(data->gyro);
 
@@ -389,6 +462,7 @@ bool KeypointVioEstimator::measure(const OpticalFlowResult::Ptr& opt_flow_meas,
           kpt_pos.kf_id = tcidl;
           kpt_pos.dir = StereographicParam<double>::project(p0_triangulated);
           kpt_pos.id = p0_triangulated[3];
+          kpt_pos.weight = 1.0;
           lmdb.addLandmark(lm_id, kpt_pos);
 
           num_points_added++;
@@ -420,6 +494,13 @@ bool KeypointVioEstimator::measure(const OpticalFlowResult::Ptr& opt_flow_meas,
     data->state = PoseVelBiasState(p.getState());
 
     data->map_idx = 0;
+    data->num_landmarks = lmdb.numLandmarks();
+    for (const auto& host : lmdb.getObservations()) {
+      for (const auto& observation : lmdb.getObservations(host.first)) {
+        const auto& point = lmdb.getLandmark(observation.kpt_id);
+        if (point.kf_id == host.first && point.id > 1e-6) ++data->num_finite_landmarks;
+      }
+    }
 
     // PoseVelBiasState::Ptr data(new PoseVelBiasState(p.getState()));
 

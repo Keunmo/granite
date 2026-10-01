@@ -34,3 +34,15 @@ gtest_add_tests(TARGET test_vio AUTO)
 gtest_add_tests(TARGET test_nfr AUTO)
 gtest_add_tests(TARGET test_mono_map_initialization AUTO)
 gtest_add_tests(TARGET test_rel_pose_constraint AUTO)
+
+add_executable(test_t265_image src/test_t265_image.cpp)
+target_link_libraries(test_t265_image gtest gtest_main granite)
+gtest_add_tests(TARGET test_t265_image AUTO)
+
+add_executable(test_mono_vio src/test_mono_vio.cpp)
+target_link_libraries(test_mono_vio gtest gtest_main granite)
+gtest_add_tests(TARGET test_mono_vio AUTO)
+
+add_executable(test_mono_vio_alignment src/test_mono_vio_alignment.cpp)
+target_link_libraries(test_mono_vio_alignment gtest gtest_main granite)
+gtest_add_tests(TARGET test_mono_vio_alignment AUTO)
