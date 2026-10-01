@@ -195,6 +195,11 @@ int main(int argc, char** argv) {
           if (imu && (!imu->accel.allFinite() || !imu->gyro.allFinite())) invalid_state = true;
         }
       } else {
+        if (!use_imu) {
+          // VO has no IMU consumer; do not accumulate an unused stream.
+          granite::ImuData::Ptr sample;
+          while (imu_queue.try_pop(sample)) {}
+        }
         granite::VioStateData::Ptr result;
         while (state_queue.try_pop(result)) {
           if (!result) continue;
