@@ -52,6 +52,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <granite/device/rs_t265.h>
 #include <granite/device/t265_image.h>
 
+#include <chrono>
+#include <thread>
+
 namespace granite {
 
 RsT265Device::RsT265Device(bool manual_exposure, int skip_frames,
@@ -68,6 +71,11 @@ RsT265Device::RsT265Device(bool manual_exposure, int skip_frames,
   for (auto device : context.query_devices()) {
     if (std::string(device.get_info(RS2_CAMERA_INFO_NAME)).find("T265") != std::string::npos) {
       config.enable_device(device.get_info(RS2_CAMERA_INFO_SERIAL_NUMBER));
+      // T265 can retain a stalled video state across repeated raw-stream
+      // sessions while IMU continues. Start each example with fresh firmware,
+      // as the original device example did, then resolve the new device handle.
+      device.hardware_reset();
+      std::this_thread::sleep_for(std::chrono::seconds(5));
       found = true;
       break;
     }
