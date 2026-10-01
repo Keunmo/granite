@@ -208,116 +208,124 @@ void KeypointVioEstimator::initialize(const Eigen::Vector3d& bg,
   }
 
   auto proc_func = [&, bg, ba] {
-    OpticalFlowResult::Ptr prev_frame = seed_frame, curr_frame;
-    IntegratedImuMeasurement::Ptr meas;
+    try {
+      OpticalFlowResult::Ptr prev_frame = seed_frame, curr_frame;
+      IntegratedImuMeasurement::Ptr meas;
 
-    const Eigen::Vector3d accel_cov =
-        calib.dicrete_time_accel_noise_std().array().square();
-    const Eigen::Vector3d gyro_cov =
-        calib.dicrete_time_gyro_noise_std().array().square();
+      const Eigen::Vector3d accel_cov =
+          calib.dicrete_time_accel_noise_std().array().square();
+      const Eigen::Vector3d gyro_cov =
+          calib.dicrete_time_gyro_noise_std().array().square();
 
-    ImuData::Ptr data;
-    imu_data_queue->pop(data);
-    if (!data) {
-      if (out_state_queue) out_state_queue->push(nullptr);
-      finished = true;
-      return;
+      ImuData::Ptr data;
+      imu_data_queue->pop(data);
+      if (!data) {
+        if (out_vis_queue) out_vis_queue->push(nullptr);
+        if (out_marg_queue) out_marg_queue->push(nullptr);
+        if (out_state_queue) out_state_queue->push(nullptr);
+        finished = true;
+        return;
+      }
+      data->accel = calib.calib_accel_bias.getCalibrated(data->accel);
+      data->gyro = calib.calib_gyro_bias.getCalibrated(data->gyro);
+
+      while (!should_quit) {
+        try {
+          vision_data_queue->pop(curr_frame);
+        } catch (const tbb::user_abort&) {
+          break;
+        };
+
+        if (config.vio_enforce_realtime) {
+          // drop current frame if another frame is already in the queue.
+          while (!vision_data_queue->empty()) vision_data_queue->pop(curr_frame);
+        }
+
+        if (!curr_frame.get()) {
+          break;
+        }
+
+        this_state_t_ns = curr_frame->t_ns;
+
+        // Correct camera time offset
+        // curr_frame->t_ns += calib.cam_time_offset_ns;
+
+        if (!initialized) {
+          while (data->t_ns < this_state_t_ns) {
+            imu_data_queue->pop(data);
+            if (!data.get()) break;
+            data->accel = calib.calib_accel_bias.getCalibrated(data->accel);
+            data->gyro = calib.calib_gyro_bias.getCalibrated(data->gyro);
+            // std::cout << "Skipping IMU data.." << std::endl;
+          }
+
+          if (!data) break;
+          Eigen::Vector3d vel_w_i_init;
+          vel_w_i_init.setZero();
+
+          T_w_i_init.setQuaternion(Eigen::Quaterniond::FromTwoVectors(
+              data->accel, Eigen::Vector3d::UnitZ()));
+
+          imu_meas[this_state_t_ns] =
+              IntegratedImuMeasurement(this_state_t_ns, bg, ba);
+          frame_states[this_state_t_ns] = PoseVelBiasStateWithLin(
+              this_state_t_ns, T_w_i_init, vel_w_i_init, bg, ba, true);
+
+          marg_order.abs_order_map[this_state_t_ns] =
+              std::make_pair(0, se3_VEL_BIAS_SIZE);
+          marg_order.total_size = se3_VEL_BIAS_SIZE;
+          marg_order.items = 1;
+
+          std::cout << "Setting up filter: t_ns " << this_state_t_ns << std::endl;
+          std::cout << "T_w_i\n" << T_w_i_init.matrix() << std::endl;
+          std::cout << "vel_w_i " << vel_w_i_init.transpose() << std::endl;
+
+          initialized = true;
+        }
+
+        if (prev_frame) {
+          // preintegrate measurements
+
+          auto last_state = frame_states.at(prev_state_t_ns);
+
+          meas.reset(new IntegratedImuMeasurement(
+              prev_frame->t_ns, last_state.getState().bias_gyro,
+              last_state.getState().bias_accel));
+
+          while (data->t_ns <= prev_frame->t_ns) {
+            imu_data_queue->pop(data);
+            if (!data.get()) break;
+            data->accel = calib.calib_accel_bias.getCalibrated(data->accel);
+            data->gyro = calib.calib_gyro_bias.getCalibrated(data->gyro);
+          }
+
+          if (!data) break;
+          while (data->t_ns <= curr_frame->t_ns) {
+            meas->integrate(*data, accel_cov, gyro_cov);
+            imu_data_queue->pop(data);
+            if (!data.get()) break;
+            data->accel = calib.calib_accel_bias.getCalibrated(data->accel);
+            data->gyro = calib.calib_gyro_bias.getCalibrated(data->gyro);
+          }
+
+          if (meas->get_start_t_ns() + meas->get_dt_ns() < curr_frame->t_ns) {
+            if (!data.get()) break;
+            int64_t tmp = data->t_ns;
+            data->t_ns = curr_frame->t_ns;
+            meas->integrate(*data, accel_cov, gyro_cov);
+            data->t_ns = tmp;
+          }
+        }
+
+        measure(curr_frame, meas);
+        prev_frame = curr_frame;
+        prev_state_t_ns = this_state_t_ns;
+        last_processed_t_ns = this_state_t_ns;
+      }
+
+    } catch (const tbb::user_abort&) {
+      // Cancellation may interrupt any IMU or vision queue operation.
     }
-    data->accel = calib.calib_accel_bias.getCalibrated(data->accel);
-    data->gyro = calib.calib_gyro_bias.getCalibrated(data->gyro);
-
-    while (!should_quit) {
-      try {
-        vision_data_queue->pop(curr_frame);
-      } catch (const tbb::user_abort&) {
-        break;
-      };
-
-      if (config.vio_enforce_realtime) {
-        // drop current frame if another frame is already in the queue.
-        while (!vision_data_queue->empty()) vision_data_queue->pop(curr_frame);
-      }
-
-      if (!curr_frame.get()) {
-        break;
-      }
-
-      this_state_t_ns = curr_frame->t_ns;
-
-      // Correct camera time offset
-      // curr_frame->t_ns += calib.cam_time_offset_ns;
-
-      if (!initialized) {
-        while (data->t_ns < this_state_t_ns) {
-          imu_data_queue->pop(data);
-          if (!data.get()) break;
-          data->accel = calib.calib_accel_bias.getCalibrated(data->accel);
-          data->gyro = calib.calib_gyro_bias.getCalibrated(data->gyro);
-          // std::cout << "Skipping IMU data.." << std::endl;
-        }
-
-        Eigen::Vector3d vel_w_i_init;
-        vel_w_i_init.setZero();
-
-        T_w_i_init.setQuaternion(Eigen::Quaterniond::FromTwoVectors(
-            data->accel, Eigen::Vector3d::UnitZ()));
-
-        imu_meas[this_state_t_ns] =
-            IntegratedImuMeasurement(this_state_t_ns, bg, ba);
-        frame_states[this_state_t_ns] = PoseVelBiasStateWithLin(
-            this_state_t_ns, T_w_i_init, vel_w_i_init, bg, ba, true);
-
-        marg_order.abs_order_map[this_state_t_ns] =
-            std::make_pair(0, se3_VEL_BIAS_SIZE);
-        marg_order.total_size = se3_VEL_BIAS_SIZE;
-        marg_order.items = 1;
-
-        std::cout << "Setting up filter: t_ns " << this_state_t_ns << std::endl;
-        std::cout << "T_w_i\n" << T_w_i_init.matrix() << std::endl;
-        std::cout << "vel_w_i " << vel_w_i_init.transpose() << std::endl;
-
-        initialized = true;
-      }
-
-      if (prev_frame) {
-        // preintegrate measurements
-
-        auto last_state = frame_states.at(prev_state_t_ns);
-
-        meas.reset(new IntegratedImuMeasurement(
-            prev_frame->t_ns, last_state.getState().bias_gyro,
-            last_state.getState().bias_accel));
-
-        while (data->t_ns <= prev_frame->t_ns) {
-          imu_data_queue->pop(data);
-          if (!data.get()) break;
-          data->accel = calib.calib_accel_bias.getCalibrated(data->accel);
-          data->gyro = calib.calib_gyro_bias.getCalibrated(data->gyro);
-        }
-
-        while (data->t_ns <= curr_frame->t_ns) {
-          meas->integrate(*data, accel_cov, gyro_cov);
-          imu_data_queue->pop(data);
-          if (!data.get()) break;
-          data->accel = calib.calib_accel_bias.getCalibrated(data->accel);
-          data->gyro = calib.calib_gyro_bias.getCalibrated(data->gyro);
-        }
-
-        if (meas->get_start_t_ns() + meas->get_dt_ns() < curr_frame->t_ns) {
-          if (!data.get()) break;
-          int64_t tmp = data->t_ns;
-          data->t_ns = curr_frame->t_ns;
-          meas->integrate(*data, accel_cov, gyro_cov);
-          data->t_ns = tmp;
-        }
-      }
-
-      measure(curr_frame, meas);
-      prev_frame = curr_frame;
-      prev_state_t_ns = this_state_t_ns;
-      last_processed_t_ns = this_state_t_ns;
-    }
-
     if (out_vis_queue) out_vis_queue->push(nullptr);
     if (out_marg_queue) out_marg_queue->push(nullptr);
     if (out_state_queue) out_state_queue->push(nullptr);

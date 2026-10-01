@@ -158,6 +158,7 @@ void RsT265Device::start() {
         }
       }
     } else if (auto fs = frame.as<rs2::frameset>()) {
+      ++raw_image_callbacks;
       auto left = fs.get_fisheye_frame(1);
       auto right = fs.get_fisheye_frame(2);
       if ((mono_camera != 2 && !left) || (mono_camera != 1 && !right)) return;
@@ -166,7 +167,12 @@ void RsT265Device::start() {
       const int64_t right_ns = right ? static_cast<int64_t>(right.get_timestamp() * 1e6) : 0;
       if (!isFreshT265Frame(left ? left.get_frame_number() : 0, left_ns,
                            right ? right.get_frame_number() : 0, right_ns,
-                           mono_camera, last_image_t_ns.load())) return;
+                           mono_camera, last_image_t_ns.load())) {
+        if (mono_camera == 0 && left.get_frame_number() != right.get_frame_number())
+          ++unmatched_pairs;
+        else ++nonmonotonic_images;
+        return;
+      }
       last_image_t_ns = static_cast<int64_t>(reference.get_timestamp() * 1e6);
       ++image_frames;
       if (frame_counter++ % skip_frames.load() != 0) return;
@@ -214,13 +220,20 @@ void RsT265Device::start() {
     }
   };
 
-  profile = pipe.start(config, callback);
-  running = true;
+  // T265 forbids changing exposure mode while streaming. Resolve the actual
+  // pipeline device first so the option and pipeline share the same sensor.
+  profile = config.resolve(pipe);
   sensor = profile.get_device().first<rs2::sensor>();
   if (manual_exposure) {
-    sensor.set_option(RS2_OPTION_ENABLE_AUTO_EXPOSURE, 0);
-    setExposure(exposure_value);
+    const auto range = sensor.get_option_range(RS2_OPTION_EXPOSURE);
+    const double value_us = exposure_value * 1000;
+    if (value_us < range.min || value_us > range.max)
+      throw std::invalid_argument("Exposure is outside the T265 sensor range");
   }
+  sensor.set_option(RS2_OPTION_ENABLE_AUTO_EXPOSURE, manual_exposure ? 0 : 1);
+  if (manual_exposure) setExposure(exposure_value);
+  profile = pipe.start(config, callback);
+  running = true;
   exportCalibration();
 }
 

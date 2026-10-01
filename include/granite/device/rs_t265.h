@@ -95,6 +95,7 @@ class RsT265Device {
   tbb::concurrent_bounded_queue<RsPoseData>* pose_data_queue = nullptr;
   std::atomic<uint64_t> image_frames{0}, queued_frames{0}, dropped_frames{0}, imu_samples{0};
   std::atomic<int64_t> last_image_t_ns{0};
+  std::atomic<uint64_t> raw_image_callbacks{0}, unmatched_pairs{0}, nonmonotonic_images{0};
   std::atomic<bool> failed{false};
   std::string errorMessage() const;
 

@@ -68,18 +68,10 @@ volatile std::sig_atomic_t interrupted = 0;
 void interrupt(int) { interrupted = 1; }
 }
 
-int main(int argc, char** argv) {
-#ifdef GRANITE_T265_MONO_DEFAULT
-  int mono_camera = 1;
-#else
-  int mono_camera = 0;
-#endif
+int runT265(int argc, char** argv, int mono_default, bool use_imu_default) {
+  int mono_camera = mono_default;
+  bool use_imu = use_imu_default;
   bool resize_half = false, capture_only = false;
-#ifdef GRANITE_T265_VO_DEFAULT
-  bool use_imu = false;
-#else
-  bool use_imu = true;
-#endif
   int num_threads = 3, skip_frames = 1;
   double duration = 0, exposure = 0;
   std::string config_path, trajectory_path, calibration_path;
@@ -176,7 +168,9 @@ int main(int argc, char** argv) {
     uint64_t states = 0, previous_states = 0, previous_images = 0;
     int64_t last_state_ns = 0;
     double max_lag_ms = 0;
-    bool invalid_state = false;
+    bool invalid_state = false, stream_stalled = false;
+    auto last_image_time = start;
+    uint64_t watchdog_images = 0;
     const auto mono_vio = std::dynamic_pointer_cast<granite::MonoVioEstimator>(vio);
     size_t landmarks = 0, finite_landmarks = 0;
     auto report_time = start;
@@ -234,18 +228,44 @@ int main(int argc, char** argv) {
                   << " lag_ms=" << (last_state_ns ? (device.last_image_t_ns.load() - last_state_ns) * 1e-6 : 0)
                   << " image_drops=" << device.dropped_frames.load()
                   << " imu_queue=" << imu_queue.size()
+                  << " raw_images=" << device.raw_image_callbacks.load()
+                  << " pair_rejects=" << device.unmatched_pairs.load()
+                  << " time_rejects=" << device.nonmonotonic_images.load()
                   << " landmarks=" << landmarks << " finite=" << finite_landmarks
-                  << " metric_initialized=" << (mono_vio ? mono_vio->metricInitialized() : use_imu) << std::endl;
+                  << " metric_initialized=" << (mono_vio ? mono_vio->metricInitialized() : (!capture_only && use_imu)) << std::endl;
         previous_images = images;
         previous_states = states;
         report_time = now;
       }
       if (duration > 0 && elapsed >= duration) break;
-      if (elapsed > 5 && device.image_frames == 0) break;
+      if (device.image_frames.load() != watchdog_images) {
+        watchdog_images = device.image_frames.load();
+        last_image_time = now;
+      } else if (elapsed > 5 && now - last_image_time > std::chrono::seconds(3)) {
+        std::cerr << "T265 image stream stalled" << std::endl;
+        stream_stalled = true;
+        break;
+      }
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     // Join the SDK callbacks before sending end-of-stream markers.
-    device.stop(!capture_only);
+    bool stop_failed = false;
+    try { device.stop(false); }
+    catch (const std::exception& error) {
+      stop_failed = true;
+      std::cerr << "T265 stop failed: " << error.what() << std::endl;
+    }
+    // An IMU consumer may be waiting while the flow output is full. Cancel
+    // both flow queues and release the IMU wait without blocking on image EOF.
+    if (vio) vio->quit();
+    imu_queue.push(nullptr);
+    if (flow) {
+      flow->quit(true);
+      // abort releases pending waits; sentinels also cover a pop that starts
+      // just after the abort while its worker is leaving the processing loop.
+      flow->input_queue.try_push(nullptr);
+      flow->output_queue.try_push(nullptr);
+    }
     if (flow) flow->join();
     if (vio) vio->join();
     consume();
@@ -254,10 +274,10 @@ int main(int argc, char** argv) {
               << " queued=" << device.queued_frames.load() << " dropped=" << device.dropped_frames.load()
               << " imu=" << device.imu_samples.load() << " states=" << states
               << " avg_state_fps=" << states / elapsed << " max_lag_ms=" << max_lag_ms
-              << " metric_initialized=" << (mono_vio ? mono_vio->metricInitialized() : use_imu)
+              << " metric_initialized=" << (mono_vio ? mono_vio->metricInitialized() : (!capture_only && use_imu))
               << " valid=" << !invalid_state << std::endl;
     if (device.failed) std::cerr << device.errorMessage() << std::endl;
-    return device.failed || invalid_state || device.image_frames == 0 ||
+    return device.failed || invalid_state || stream_stalled || stop_failed || device.image_frames == 0 ||
                    device.imu_samples == 0 || (!capture_only && !mono_vio && states == 0) ? 1 : 0;
   } catch (const std::exception& error) {
     std::cerr << "T265 VIO: " << error.what() << std::endl;

@@ -129,3 +129,67 @@ TEST(MonoVio, PreservesInitialAccelerometerBias) {
   EXPECT_LT((result.first->state.bias_accel - bias).norm(), 0.01);
   EXPECT_LT(result.yaw_error, 0.04);
 }
+
+TEST(VioShutdown, ImuEofBeforeFirstImageDoesNotDereferenceNull) {
+  granite::VioConfig config;
+  auto vio = std::make_shared<granite::KeypointVioEstimator>(granite::constants::g, monoCalibration(), config);
+  tbb::concurrent_bounded_queue<granite::OpticalFlowResult::Ptr> vision;
+  tbb::concurrent_bounded_queue<granite::ImuData::Ptr> imu;
+  auto sample = std::make_shared<granite::ImuData>();
+  sample->t_ns = 1000000000;
+  sample->accel = -granite::constants::g;
+  sample->gyro.setZero();
+  imu.push(sample);
+  imu.push(nullptr);
+  auto frame = std::make_shared<granite::OpticalFlowResult>();
+  frame->t_ns = 1050000000;
+  frame->observations.resize(1);
+  vision.push(frame);
+  vision.push(nullptr);
+  vio->vision_data_queue = &vision;
+  vio->imu_data_queue = &imu;
+  vio->initialize(Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
+  vio->join();
+  EXPECT_TRUE(vio->isFinished());
+}
+
+TEST(VioShutdown, AbortUnblocksInitialImuWait) {
+  granite::VioConfig config;
+  auto vio = std::make_shared<granite::KeypointVioEstimator>(granite::constants::g, monoCalibration(), config);
+  tbb::concurrent_bounded_queue<granite::OpticalFlowResult::Ptr> vision;
+  tbb::concurrent_bounded_queue<granite::ImuData::Ptr> imu;
+  vio->vision_data_queue = &vision;
+  vio->imu_data_queue = &imu;
+  vio->initialize(Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
+  const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+  while (imu.size() >= 0 && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
+  const bool waiting = imu.size() < 0;
+  EXPECT_TRUE(waiting);
+  if (waiting) imu.abort();
+  else imu.push(nullptr);
+  vio->join();
+  EXPECT_TRUE(vio->isFinished());
+}
+
+TEST(VioShutdown, FirstImuEofSignalsEveryOutputConsumer) {
+  granite::VioConfig config;
+  auto vio = std::make_shared<granite::KeypointVioEstimator>(granite::constants::g, monoCalibration(), config);
+  tbb::concurrent_bounded_queue<granite::OpticalFlowResult::Ptr> vision;
+  tbb::concurrent_bounded_queue<granite::ImuData::Ptr> imu;
+  tbb::concurrent_bounded_queue<granite::VioVisualizationData::Ptr> visuals;
+  tbb::concurrent_bounded_queue<granite::MargData::Ptr> marginalization;
+  imu.push(nullptr);
+  vio->vision_data_queue = &vision;
+  vio->imu_data_queue = &imu;
+  vio->out_vis_queue = &visuals;
+  vio->out_marg_queue = &marginalization;
+  vio->initialize(Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
+  vio->join();
+  granite::VioVisualizationData::Ptr visual;
+  granite::MargData::Ptr marg;
+  EXPECT_TRUE(visuals.try_pop(visual));
+  EXPECT_FALSE(visual);
+  EXPECT_TRUE(marginalization.try_pop(marg));
+  EXPECT_FALSE(marg);
+}
