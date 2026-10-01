@@ -58,6 +58,17 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 namespace granite {
 
+// The SDK aggregator can publish (new left, previous right) before publishing
+// the matched pair, and repeat a selected monocular image in both callbacks.
+inline bool isFreshT265Frame(uint64_t left_frame, int64_t left_ns,
+                            uint64_t right_frame, int64_t right_ns,
+                            int mono_camera, int64_t previous_ns) {
+  if (mono_camera == 0 && left_frame != right_frame) return false;
+  const int64_t selected_ns = mono_camera == 2 ? right_ns : left_ns;
+  return selected_ns > previous_ns;
+}
+
+
 inline void prepareT265Calibration(Calibration<double>& calib, int mono_camera,
                                    bool resize_half) {
   if (mono_camera < 0 || mono_camera > 2 || calib.intrinsics.size() != 2 ||

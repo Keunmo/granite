@@ -127,3 +127,14 @@ TEST(T265Image, AreaResizeUsesPaddedRows) {
   EXPECT_EQ((*full)(0, 1), 4 * factor);
   EXPECT_EQ((*full)(3, 3), 24 * factor);
 }
+
+TEST(T265Capture, RejectsMixedStereoPairsAndRepeatedSelectedImages) {
+  EXPECT_FALSE(granite::isFreshT265Frame(2, 200, 1, 100, 0, 100));
+  EXPECT_TRUE(granite::isFreshT265Frame(2, 200, 2, 200, 0, 100));
+  EXPECT_FALSE(granite::isFreshT265Frame(2, 200, 2, 200, 0, 200));
+  EXPECT_TRUE(granite::isFreshT265Frame(2, 200, 1, 100, 1, 100));
+  EXPECT_FALSE(granite::isFreshT265Frame(2, 200, 2, 200, 1, 200));
+  EXPECT_FALSE(granite::isFreshT265Frame(2, 200, 1, 100, 2, 100));
+  EXPECT_TRUE(granite::isFreshT265Frame(2, 200, 2, 200, 2, 100));
+  EXPECT_FALSE(granite::isFreshT265Frame(1, 100, 1, 100, 0, 200));
+}

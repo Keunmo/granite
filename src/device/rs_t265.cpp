@@ -162,6 +162,11 @@ void RsT265Device::start() {
       auto right = fs.get_fisheye_frame(2);
       if ((mono_camera != 2 && !left) || (mono_camera != 1 && !right)) return;
       const auto reference = mono_camera == 2 ? right : left;
+      const int64_t left_ns = left ? static_cast<int64_t>(left.get_timestamp() * 1e6) : 0;
+      const int64_t right_ns = right ? static_cast<int64_t>(right.get_timestamp() * 1e6) : 0;
+      if (!isFreshT265Frame(left ? left.get_frame_number() : 0, left_ns,
+                           right ? right.get_frame_number() : 0, right_ns,
+                           mono_camera, last_image_t_ns.load())) return;
       last_image_t_ns = static_cast<int64_t>(reference.get_timestamp() * 1e6);
       ++image_frames;
       if (frame_counter++ % skip_frames.load() != 0) return;
