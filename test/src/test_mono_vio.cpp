@@ -45,13 +45,14 @@ struct Result {
   bool initialized = false;
 };
 
-Result run(bool moving) {
+Result run(bool moving, const Eigen::Vector3d& accel_bias = Eigen::Vector3d::Zero()) {
   tbb::global_control control(tbb::global_control::max_allowed_parallelism, 2);
   auto c = monoCalibration();
   granite::VioConfig config;
   config.vio_enforce_realtime = false;
   config.vio_use_lm = true;
   config.vio_max_iterations = 7;
+  config.vio_max_kfs = 2;
   config.vio_min_frames_after_kf = 2;
   tbb::concurrent_bounded_queue<granite::OpticalFlowResult::Ptr> vision;
   tbb::concurrent_bounded_queue<granite::ImuData::Ptr> imu;
@@ -66,7 +67,7 @@ Result run(bool moving) {
     double yaw = moving ? 0.15 * t : 0;
     Eigen::Vector3d acceleration(moving ? std::sin(omega * t) : 0, 0, 0);
     sample->accel = Sophus::SO3d::exp(Eigen::Vector3d(0, 0, yaw)).inverse() *
-                    (acceleration - granite::constants::g);
+                    (acceleration - granite::constants::g) + accel_bias;
     sample->gyro = Eigen::Vector3d(0, 0, moving ? 0.19 : 0.04);
     imu.push(sample);
   }
@@ -86,7 +87,7 @@ Result run(bool moving) {
   vio->vision_data_queue = &vision;
   vio->imu_data_queue = &imu;
   vio->out_state_queue = &states;
-  vio->initialize(Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
+  vio->initialize(Eigen::Vector3d::Zero(), accel_bias);
   vio->join();
   Result result;
   granite::VioStateData::Ptr state;
@@ -118,4 +119,13 @@ TEST(MonoVio, AcceleratedMotionUsesImuMetricScaleAndTemporalLandmarks) {
   EXPECT_NEAR(result.last->state.T_w_i.translation().x() - result.first->state.T_w_i.translation().x(),
               3.0 / omega - first_x, 0.08);
   EXPECT_LT(std::abs(result.last->state.T_w_i.translation().y()), 0.15);
+}
+
+TEST(MonoVio, PreservesInitialAccelerometerBias) {
+  const Eigen::Vector3d bias(0.12, -0.08, 0.04);
+  auto result = run(true, bias);
+  ASSERT_TRUE(result.initialized);
+  ASSERT_TRUE(result.first);
+  EXPECT_LT((result.first->state.bias_accel - bias).norm(), 0.01);
+  EXPECT_LT(result.yaw_error, 0.04);
 }

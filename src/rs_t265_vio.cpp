@@ -57,6 +57,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <CLI/CLI.hpp>
 #include <tbb/global_control.h>
 #include <granite/device/rs_t265.h>
+#include <opencv2/core.hpp>
 #include <granite/serialization/headers_serialization.h>
 #include <granite/vi_estimator/vio_estimator.h>
 #include <granite/vi_estimator/mono_vio.h>

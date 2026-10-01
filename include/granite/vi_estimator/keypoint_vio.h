@@ -95,7 +95,8 @@ class KeypointVioEstimator : public VioEstimatorBase,
 
   void initializeFromMonoMap(const KeypointVoEstimator& visual,
       const MonoVioAlignment& alignment, const std::vector<MonoVioFrame>& frames,
-      const Eigen::aligned_map<int64_t, OpticalFlowResult::Ptr>& history);
+      const Eigen::aligned_map<int64_t, OpticalFlowResult::Ptr>& history,
+      const Eigen::Vector3d& accel_bias);
 
   virtual ~KeypointVioEstimator() { join(); }
 

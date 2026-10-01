@@ -35,6 +35,7 @@ make -j8
 NOTE: It is possible to compile the code on Ubuntu 16.04, but you need to install cmake-3.10 or higher and gcc-7. See corresponding [Dockerfile](docker/b_image_xenial/Dockerfile) as an example.
 
 ## Usage
+* [Live T265 on Raspberry Pi 4: mono/stereo VO and VIO, half resolution.](doc/T265.md)
 * [Camera, IMU and Mocap calibration. (TUM-VI, Euroc, UZH-FPV and Kalibr datasets)](doc/Calibration.md)
 * [Visual odometry (no IMU). (MADMAX and KITTI dataset)](doc/Vo.md)
 * [Visual-inertial odometry and mapping. (TUM-VI and Euroc datasets)](doc/VioMapping.md)

@@ -103,7 +103,8 @@ KeypointVioEstimator::KeypointVioEstimator(
 void KeypointVioEstimator::initializeFromMonoMap(
     const KeypointVoEstimator& visual, const MonoVioAlignment& alignment,
     const std::vector<MonoVioFrame>& frames,
-    const Eigen::aligned_map<int64_t, OpticalFlowResult::Ptr>& history) {
+    const Eigen::aligned_map<int64_t, OpticalFlowResult::Ptr>& history,
+    const Eigen::Vector3d& accel_bias) {
   const Sophus::SO3d rotation(Eigen::Quaterniond::FromTwoVectors(alignment.gravity, g));
   const Eigen::Vector3d lever = calib.T_i_c[0].translation();
   auto metric_pose = [&](const Sophus::SE3d& pose) {
@@ -114,7 +115,21 @@ void KeypointVioEstimator::initializeFromMonoMap(
   const Eigen::Vector3d origin = metric_pose(frames.front().T_v_i).translation();
   auto poses = visual.getAllPosesMap();
   this_state_t_ns = frames.back().t_ns;
+  // Leave room for the seed state in the backend keyframe window. Transfer
+  // poses, observations and flow history as one consistent retained set.
+  std::set<int64_t> discarded;
+  while (poses.size() > std::max<size_t>(1, max_kfs)) {
+    discarded.insert(poses.begin()->first);
+    poses.erase(poses.begin());
+  }
+  for (auto it = poses.begin(); it != poses.end();) {
+    if (!history.count(it->first)) {
+      discarded.insert(it->first);
+      it = poses.erase(it);
+    } else ++it;
+  }
   lmdb = visual.lmdb;
+  lmdb.removeKeyframes(discarded, discarded, {});
   for (auto host : lmdb.getHostKfs()) {
     kf_ids.insert(host.frame_id);
     const auto landmarks = lmdb.getLandmarksForHost(host);
@@ -127,7 +142,7 @@ void KeypointVioEstimator::initializeFromMonoMap(
       T_w_i_init = pose;
       frame_states[entry.first] = PoseVelBiasStateWithLin(entry.first, pose,
           rotation * alignment.velocities.back(), alignment.gyro_bias,
-          Eigen::Vector3d::Zero(), true);
+          accel_bias, true);
     } else {
       frame_poses[entry.first] = PoseStateWithLin(entry.first, pose, true);
     }
@@ -163,7 +178,7 @@ void KeypointVioEstimator::initializeFromMonoMap(
   opt_started = true;
   initialized = true;
   tracking_state = TrackingState::TRACKING;
-  initialize(alignment.gyro_bias, Eigen::Vector3d::Zero());
+  initialize(alignment.gyro_bias, accel_bias);
 }
 
 void KeypointVioEstimator::initialize(int64_t t_ns, const Sophus::SE3d& T_w_i,

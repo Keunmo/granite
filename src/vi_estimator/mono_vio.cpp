@@ -121,7 +121,7 @@ void MonoVioEstimator::run(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba)
         pending = next;
         samples.push_back(*pending);
         if (metric && pending->t_ns > forwarded_imu_ns) {
-          metric_imu.push(pending);
+          metric_imu.push(std::make_shared<ImuData>(*pending));
           forwarded_imu_ns = pending->t_ns;
         }
       }
@@ -168,9 +168,9 @@ void MonoVioEstimator::run(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba)
       metric->out_state_queue = out_state_queue;
       metric->out_vis_queue = out_vis_queue;
       metric->out_marg_queue = out_marg_queue;
-      metric_imu.push(pending);
+      metric_imu.push(std::make_shared<ImuData>(*pending));
       forwarded_imu_ns = pending->t_ns;
-      metric->initializeFromMonoMap(*visual, *alignment, frames, history);
+      metric->initializeFromMonoMap(*visual, *alignment, frames, history, ba);
       initial_pose = metric->getT_w_i_init();
       metric_scale = alignment->scale;
       metric_initialized = true;
