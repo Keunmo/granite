@@ -211,6 +211,21 @@ class KeypointVioEstimator : public VioEstimatorBase,
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
 
  private:
+  void recoverMonoPose(const OpticalFlowResult::Ptr& frame);
+  int64_t mono_last_supported_t_ns = -1;
+  int64_t mono_last_orientation_supported_t_ns = -1;
+  int64_t mono_last_image_t_ns = -1;
+  void updateMonoLandmarks(const OpticalFlowResult::Ptr& frame, bool create_new);
+  void updateMonoSupport(const OpticalFlowResult::Ptr& frame,
+                         std::map<FrameId, int>& connected);
+  void considerMonoKeyframe(const Eigen::MatrixXd& visual_hessian, int pose_offset);
+  std::unordered_set<int> mono_rejected_tracks;
+  size_t connected_finite = 0, connected_infinite = 0;
+  double mono_negative_entropy = 0, mono_average_entropy = 0;
+  size_t mono_entropy_samples = 0;
+  int mono_entropy_dimension = 0;
+  MonoVioSupport mono_support = MonoVioSupport::INERTIAL_ONLY;
+
   bool take_kf;
   int frames_after_kf;
 

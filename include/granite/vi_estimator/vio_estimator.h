@@ -57,6 +57,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 namespace granite {
 
+enum class MonoVioSupport { NOT_APPLICABLE, METRIC, BEARING_ONLY, INERTIAL_ONLY };
+
 struct VioStateData {
   typedef std::shared_ptr<VioStateData> Ptr;
 
@@ -64,6 +66,9 @@ struct VioStateData {
   size_t map_idx;
   size_t num_landmarks = 0;
   size_t num_finite_landmarks = 0;
+  size_t num_connected_finite_landmarks = 0;
+  size_t num_connected_infinite_landmarks = 0;
+  MonoVioSupport mono_vio_support = MonoVioSupport::NOT_APPLICABLE;
 
   double scale_variance = std::numeric_limits<double>::quiet_NaN();
   double drift_variance = std::numeric_limits<double>::quiet_NaN();

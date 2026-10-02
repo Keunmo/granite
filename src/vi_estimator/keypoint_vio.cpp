@@ -76,6 +76,9 @@ KeypointVioEstimator::KeypointVioEstimator(
       min_lambda(config.vio_lm_lambda_min),
       max_lambda(config.vio_lm_lambda_max),
       lambda_vee(2) {
+  // Infinity bearings carry no visual translation information. In mono VIO
+  // translation must come from IMU, never the VO no-motion regularizer.
+  if (calib.intrinsics.size() == 1) this->config.vio_no_motion_reg_weight = 0;
   // Setup marginalization
   marg_H.setZero(se3_VEL_BIAS_SIZE, se3_VEL_BIAS_SIZE);
   marg_b.setZero(se3_VEL_BIAS_SIZE);
@@ -416,16 +419,30 @@ bool KeypointVioEstimator::measure(const OpticalFlowResult::Ptr& opt_flow_meas,
               << unconnected_obs0.size() << std::endl;
   }
 
+  if (calib.intrinsics.size() == 1) updateMonoLandmarks(opt_flow_meas, false);
+
+  // Preserve metric map hosts during image outages; empty keyframes would
+  // evict the very geometry needed for later metric reacquisition.
+  if (calib.intrinsics.size() == 1 && opt_flow_meas->observations[0].empty()) take_kf = false;
   if (take_kf) {
     // Triangulate new points from stereo and make keyframe for camera 0
     take_kf = false;
     frames_after_kf = 0;
+    if (calib.intrinsics.size() == 1) {
+      mono_entropy_samples = 0;
+      mono_average_entropy = 0;
+    }
     kf_ids.emplace(this_state_t_ns);
 
     TimeCamId tcidl(opt_flow_meas->t_ns, 0);
 
     int num_points_added = 0;
+    if (calib.intrinsics.size() == 1) {
+      updateMonoLandmarks(opt_flow_meas, true);
+      num_points_added = num_points_kf[this_state_t_ns];
+    }
     for (int lm_id : unconnected_obs0) {
+      if (calib.intrinsics.size() == 1) break;
       // Find all observations
       std::map<TimeCamId, KeypointObservation> kp_obs;
 
@@ -506,7 +523,9 @@ bool KeypointVioEstimator::measure(const OpticalFlowResult::Ptr& opt_flow_meas,
     frames_after_kf++;
   }
 
+  if (calib.intrinsics.size() == 1) updateMonoSupport(opt_flow_meas, num_points_connected);
   optimize(num_points_connected);
+  if (calib.intrinsics.size() == 1) updateMonoSupport(opt_flow_meas, num_points_connected);
   marginalize(num_points_connected);
 
   if (out_state_queue) {
@@ -518,6 +537,11 @@ bool KeypointVioEstimator::measure(const OpticalFlowResult::Ptr& opt_flow_meas,
 
     data->map_idx = 0;
     data->num_landmarks = lmdb.numLandmarks();
+    if (calib.intrinsics.size() == 1) {
+      data->num_connected_finite_landmarks = connected_finite;
+      data->num_connected_infinite_landmarks = connected_infinite;
+      data->mono_vio_support = mono_support;
+    }
     for (const auto& host : lmdb.getObservations()) {
       for (const auto& observation : lmdb.getObservations(host.first)) {
         const auto& point = lmdb.getLandmark(observation.kpt_id);
@@ -534,6 +558,11 @@ bool KeypointVioEstimator::measure(const OpticalFlowResult::Ptr& opt_flow_meas,
     VioVisualizationData::Ptr data(new VioVisualizationData);
 
     data->t_ns = this_state_t_ns;
+    if (calib.intrinsics.size() == 1) {
+      data->negative_entropy_last_frame = mono_negative_entropy;
+      data->average_negative_entropy_last_frame = mono_average_entropy;
+      data->take_kf = take_kf;
+    }
 
     for (const auto& kv : frame_states) {
       data->states_t_ns.push_back(kv.first);
@@ -629,8 +658,9 @@ void KeypointVioEstimator::marginalize(
         }
 
         for (size_t i = 0; i < ids.size() - 2; i++) {
-          if (num_points_connected.count(ids[i]) == 0 ||
-              (num_points_connected.at(ids[i]) / num_points_kf.at(ids[i]) <
+          if (num_points_kf.at(ids[i]) == 0 ||
+              num_points_connected.count(ids[i]) == 0 ||
+              (double(num_points_connected.at(ids[i])) / num_points_kf.at(ids[i]) <
                0.05)) {
             id_to_marg = ids[i];
             break;
@@ -938,6 +968,10 @@ void KeypointVioEstimator::optimize(
 
       tbb::parallel_reduce(range, lopt);
 
+      if (calib.intrinsics.size() == 1 &&
+          iter == 0)
+        considerMonoKeyframe(lopt.accum.getH(), aom.abs_order_map.at(this_state_t_ns).first);
+
       double marg_prior_error = 0;
       double imu_error = 0, bg_error = 0, ba_error = 0;
       linearizeAbsIMU(aom, lopt.accum.getH(), lopt.accum.getB(), imu_error,
@@ -1117,7 +1151,8 @@ void KeypointVioEstimator::optimize(
       }
 
       if (iter == config.vio_filter_iteration) {
-        filterOutliers(config.vio_outlier_threshold, 4, &num_points_connected);
+        if (calib.intrinsics.size() != 1)
+          filterOutliers(config.vio_outlier_threshold, 4, &num_points_connected);
       }
 
       if (converged) break;
@@ -1127,6 +1162,11 @@ void KeypointVioEstimator::optimize(
       // std::cerr << "inc\n" << inc.transpose() << std::endl;
     }
   }
+
+  // Early convergence must not skip mono outlier filtering. Recompute current
+  // connections in measure instead of using the VO pose-only bookkeeping.
+  if (calib.intrinsics.size() == 1)
+    filterOutliers(config.vio_outlier_threshold, 3, nullptr);
 
   if (config.vio_debug) {
     std::cout << "=================================" << std::endl;

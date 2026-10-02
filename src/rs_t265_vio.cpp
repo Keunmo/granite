@@ -49,6 +49,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <fstream>
@@ -57,25 +58,48 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <CLI/CLI.hpp>
 #include <tbb/global_control.h>
 #include <granite/device/rs_t265.h>
+#include <granite/device/t265_gui.h>
 #include <opencv2/core.hpp>
 #include <granite/serialization/headers_serialization.h>
 #include <granite/vi_estimator/vio_estimator.h>
 #include <granite/vi_estimator/mono_vio.h>
 #include <cereal/archives/json.hpp>
+#if defined(__linux__)
+#include <linux/netlink.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#endif
 
 namespace {
 volatile std::sig_atomic_t interrupted = 0;
 void interrupt(int) { interrupted = 1; }
+
+void checkUsbPermissions() {
+#if defined(__linux__)
+  const int descriptor = socket(AF_NETLINK, SOCK_RAW | SOCK_NONBLOCK | SOCK_CLOEXEC,
+                                NETLINK_KOBJECT_UEVENT);
+  if (descriptor >= 0) {
+    close(descriptor);
+    return;
+  }
+  // librealsense 2.53.1 dereferences a failed libusb context after this denial.
+  if (errno == EPERM || errno == EACCES) {
+    throw std::runtime_error("T265 USB access blocked: netlink permission denied. "
+                             "Run outside the restricted sandbox or allow "
+                             "AF_NETLINK/NETLINK_KOBJECT_UEVENT access.");
+  }
+#endif
+}
 }
 
 int runT265(int argc, char** argv, int mono_default, bool use_imu_default) {
   int mono_camera = mono_default;
   bool use_imu = use_imu_default;
-  bool resize_half = false, capture_only = false;
+  bool resize_half = false, capture_only = false, no_gui = false;
   int num_threads = 3, skip_frames = 1;
   double duration = 0, exposure = 0;
   std::string config_path, trajectory_path, calibration_path;
-  CLI::App app{"Granite T265 live stereo/mono visual-inertial odometry (headless)"};
+  CLI::App app{"Granite T265 live stereo/mono visual-inertial odometry"};
   app.add_flag("--resize-half", resize_half, "Resize 848x800 to 424x400 and adjust camera intrinsics");
   app.add_option("--use-imu", use_imu, "1: VIO, 0: visual odometry");
   app.add_option("--mono-camera", mono_camera, "0: stereo, 1: left fisheye, 2: right fisheye");
@@ -87,6 +111,7 @@ int runT265(int argc, char** argv, int mono_default, bool use_imu_default) {
   app.add_option("--trajectory", trajectory_path, "Output timestamp, pose and velocity CSV");
   app.add_option("--save-calib", calibration_path, "Export the selected/scaled calibration JSON");
   app.add_flag("--capture-only", capture_only, "Validate image and IMU delivery without running VIO");
+  app.add_flag("--no-gui", no_gui, "Disable live GUI (default: false)");
   CLI11_PARSE(app, argc, argv);
   if (mono_camera < 0 || mono_camera > 2 || num_threads < 1 || skip_frames < 1 ||
       !std::isfinite(duration) || duration < 0 || !std::isfinite(exposure) || exposure < 0) {
@@ -111,6 +136,13 @@ int runT265(int argc, char** argv, int mono_default, bool use_imu_default) {
       trajectory << "timestamp_ns,tx,ty,tz,qx,qy,qz,qw,vx,vy,vz\n" << std::setprecision(16);
     }
 
+    std::unique_ptr<granite::T265Gui> gui;
+    if (!no_gui) {
+      gui = std::make_unique<granite::T265Gui>();
+      gui->open();
+    }
+
+    checkUsbPermissions();
     granite::RsT265Device device(exposure > 0, skip_frames, 90, exposure,
                                 mono_camera, resize_half);
     device.start();
@@ -133,7 +165,10 @@ int runT265(int argc, char** argv, int mono_default, bool use_imu_default) {
     tbb::concurrent_bounded_queue<granite::ImuData::Ptr> imu_queue;
     tbb::concurrent_bounded_queue<granite::OpticalFlowInput::Ptr> capture_queue;
     tbb::concurrent_bounded_queue<granite::VioStateData::Ptr> state_queue;
+    tbb::concurrent_bounded_queue<granite::VioVisualizationData::Ptr> visualization_queue;
     capture_queue.set_capacity(2);
+    state_queue.set_capacity(8);
+    visualization_queue.set_capacity(2);
     granite::OpticalFlowBase::Ptr flow;
     granite::VioEstimatorBase::Ptr vio;
     if (!capture_only) {
@@ -162,6 +197,7 @@ int runT265(int argc, char** argv, int mono_default, bool use_imu_default) {
       vio->vision_data_queue = &flow->output_queue;
       vio->imu_data_queue = &imu_queue;
       vio->out_state_queue = &state_queue;
+      if (gui) vio->out_vis_queue = &visualization_queue;
       vio->initialize(Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
     }
 
@@ -173,12 +209,18 @@ int runT265(int argc, char** argv, int mono_default, bool use_imu_default) {
     uint64_t watchdog_images = 0;
     const auto mono_vio = std::dynamic_pointer_cast<granite::MonoVioEstimator>(vio);
     size_t landmarks = 0, finite_landmarks = 0;
+    size_t connected_finite_landmarks = 0, connected_infinite_landmarks = 0;
     auto report_time = start;
+    auto display_time = start - std::chrono::seconds(1);
+    double input_fps = 0, state_fps = 0;
+    bool gui_failed = false;
+    std::string support = capture_only ? "capture" : "initializing";
     auto consume = [&] {
       if (capture_only) {
         granite::OpticalFlowInput::Ptr image;
         while (capture_queue.try_pop(image)) {
           if (!image) continue;
+          if (gui) gui->setFrame(image);
           for (const auto& data : image->img_data) {
             if (!data.img || data.img->w != static_cast<size_t>(calib->resolution[0][0]) ||
                 data.img->h != static_cast<size_t>(calib->resolution[0][1])) invalid_state = true;
@@ -204,6 +246,15 @@ int runT265(int argc, char** argv, int mono_default, bool use_imu_default) {
           ++states;
           landmarks = result->num_landmarks;
           finite_landmarks = result->num_finite_landmarks;
+          connected_finite_landmarks = result->num_connected_finite_landmarks;
+          connected_infinite_landmarks = result->num_connected_infinite_landmarks;
+          if (gui && !invalid_state) gui->setState(result);
+          switch (result->mono_vio_support) {
+            case granite::MonoVioSupport::METRIC: support = "metric"; break;
+            case granite::MonoVioSupport::BEARING_ONLY: support = "bearing only"; break;
+            case granite::MonoVioSupport::INERTIAL_ONLY: support = "inertial only"; break;
+            case granite::MonoVioSupport::NOT_APPLICABLE: support = use_imu ? "visual-inertial" : "visual only"; break;
+          }
           max_lag_ms = std::max(max_lag_ms, (device.last_image_t_ns.load() - last_state_ns) * 1e-6);
           if (trajectory) {
             const auto& p = state.T_w_i.translation();
@@ -214,6 +265,10 @@ int runT265(int argc, char** argv, int mono_default, bool use_imu_default) {
           }
         }
       }
+      granite::VioVisualizationData::Ptr visualization;
+      while (visualization_queue.try_pop(visualization)) {
+        if (gui && visualization) gui->setVisualization(visualization);
+      }
     };
     while (!interrupted && !device.failed && !invalid_state) {
       consume();
@@ -222,9 +277,11 @@ int runT265(int argc, char** argv, int mono_default, bool use_imu_default) {
       const double interval = std::chrono::duration<double>(now - report_time).count();
       if (interval >= 1) {
         const auto images = device.image_frames.load();
+        input_fps = (images - previous_images) / interval;
+        state_fps = (states - previous_states) / interval;
         std::cout << std::fixed << std::setprecision(2)
-                  << "t=" << elapsed << " input_fps=" << (images - previous_images) / interval
-                  << " state_fps=" << (states - previous_states) / interval
+                  << "t=" << elapsed << " input_fps=" << input_fps
+                  << " state_fps=" << state_fps
                   << " lag_ms=" << (last_state_ns ? (device.last_image_t_ns.load() - last_state_ns) * 1e-6 : 0)
                   << " image_drops=" << device.dropped_frames.load()
                   << " imu_queue=" << imu_queue.size()
@@ -236,6 +293,39 @@ int runT265(int argc, char** argv, int mono_default, bool use_imu_default) {
         previous_images = images;
         previous_states = states;
         report_time = now;
+      }
+      if (gui && now - display_time >= std::chrono::milliseconds(33)) {
+        granite::T265GuiStatus status;
+        status.mode = std::string(mono_camera ? "MONO " : "STEREO ") + (use_imu ? "VIO" : "VO");
+        status.capture_only = capture_only;
+        status.metric_initialized = mono_vio ? mono_vio->metricInitialized() : (!capture_only && use_imu);
+        status.support = support;
+        if (vio) {
+          switch (vio->tracking_state.load()) {
+            case granite::VioEstimatorBase::TrackingState::UNINITIALIZED: status.tracking = "initializing"; break;
+            case granite::VioEstimatorBase::TrackingState::TRACKING: status.tracking = "tracking"; break;
+            case granite::VioEstimatorBase::TrackingState::LOST: status.tracking = "lost"; break;
+          }
+        } else status.tracking = "capture";
+        status.elapsed = elapsed;
+        status.input_fps = input_fps;
+        status.state_fps = state_fps;
+        status.lag_ms = last_state_ns ? (device.last_image_t_ns.load() - last_state_ns) * 1e-6 : 0;
+        status.images = device.image_frames.load();
+        status.states = states;
+        status.dropped = device.dropped_frames.load();
+        status.landmarks = landmarks;
+        status.finite_landmarks = finite_landmarks;
+        status.connected_finite_landmarks = connected_finite_landmarks;
+        status.connected_infinite_landmarks = connected_infinite_landmarks;
+        try {
+          if (!gui->draw(status)) break;
+        } catch (const cv::Exception& error) {
+          std::cerr << "T265 GUI: " << error.what() << std::endl;
+          gui_failed = true;
+          break;
+        }
+        display_time = now;
       }
       if (duration > 0 && elapsed >= duration) break;
       if (device.image_frames.load() != watchdog_images) {
@@ -266,6 +356,11 @@ int runT265(int argc, char** argv, int mono_default, bool use_imu_default) {
       flow->input_queue.try_push(nullptr);
       flow->output_queue.try_push(nullptr);
     }
+    // Output producers use bounded queues. Keep consuming during shutdown.
+    while (vio && !vio->isFinished()) {
+      consume();
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
     if (flow) flow->join();
     if (vio) vio->join();
     consume();
@@ -277,7 +372,7 @@ int runT265(int argc, char** argv, int mono_default, bool use_imu_default) {
               << " metric_initialized=" << (mono_vio ? mono_vio->metricInitialized() : (!capture_only && use_imu))
               << " valid=" << !invalid_state << std::endl;
     if (device.failed) std::cerr << device.errorMessage() << std::endl;
-    return device.failed || invalid_state || stream_stalled || stop_failed || device.image_frames == 0 ||
+    return device.failed || invalid_state || stream_stalled || stop_failed || gui_failed || device.image_frames == 0 ||
                    device.imu_samples == 0 || (!capture_only && !mono_vio && states == 0) ? 1 : 0;
   } catch (const std::exception& error) {
     std::cerr << "T265 VIO: " << error.what() << std::endl;

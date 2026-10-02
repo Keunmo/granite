@@ -88,6 +88,7 @@ void MonoVioEstimator::run(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba)
   auto visual = std::make_shared<KeypointVoEstimator>(calibration, bootstrap_config);
   visual->vision_data_queue = &bootstrap_vision;
   visual->out_state_queue = &bootstrap_states;
+  visual->out_vis_queue = out_vis_queue;
   visual->initialize(bg, ba);
 
   tbb::concurrent_bounded_queue<OpticalFlowResult::Ptr> metric_vision;
@@ -129,7 +130,7 @@ void MonoVioEstimator::run(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba)
       ++frames_processed;
       if (metric) {
         metric_vision.push(frame);
-        tracking_state = TrackingState::TRACKING;
+        tracking_state = metric->tracking_state.load();
         last_processed_t_ns = frame->t_ns;
         while (!samples.empty() && samples.front().t_ns < frame->t_ns - 1000000000LL) samples.pop_front();
         continue;

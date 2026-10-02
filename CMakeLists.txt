@@ -211,6 +211,7 @@ add_library(granite SHARED
   src/vi_estimator/mono_vio.cpp
   src/vi_estimator/mono_vio_alignment.cpp
   src/vi_estimator/keypoint_vio.cpp
+  src/vi_estimator/keypoint_vio_mono.cpp
   src/vi_estimator/keypoint_vio_linearize.cpp
   src/vi_estimator/keypoint_vo.cpp
   src/vi_estimator/vio_estimator.cpp
@@ -272,7 +273,7 @@ if(GRANITE_BUILD_REALSENSE)
   find_package(realsense2 REQUIRED)
   add_library(granite_t265 src/device/rs_t265.cpp)
   target_link_libraries(granite_t265 PUBLIC granite realsense2::realsense2)
-  add_library(granite_t265_runner STATIC src/rs_t265_vio.cpp)
+  add_library(granite_t265_runner STATIC src/rs_t265_vio.cpp src/device/t265_gui.cpp)
   target_link_libraries(granite_t265_runner PUBLIC granite_t265)
   foreach(_mode vio mono_vio vo mono_vo)
     add_executable(granite_rs_t265_${_mode} src/rs_t265_main.cpp)

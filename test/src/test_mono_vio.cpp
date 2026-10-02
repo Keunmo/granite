@@ -193,3 +193,286 @@ TEST(VioShutdown, FirstImuEofSignalsEveryOutputConsumer) {
   EXPECT_TRUE(marginalization.try_pop(marg));
   EXPECT_FALSE(marg);
 }
+
+namespace {
+// Metric trajectory: move, decelerate to a stop, rotate with all finite tracks
+// replaced, then accelerate again using the same replacement feature IDs.
+struct DegenerateResult {
+  std::vector<granite::VioStateData::Ptr> states;
+  granite::VioVisualizationData::Ptr last_visual;
+  size_t replacement_infinite = 0, replacement_finite = 0;
+};
+DegenerateResult runDegenerate(double end, bool bearings_only = false,
+                              double no_motion_weight = 1e-6,
+                              bool empty_gap = false, bool inject_outliers = false,
+                              const Eigen::Vector3d& seed_bg_error = Eigen::Vector3d::Zero(),
+                              int outlier_count = 8, bool delayed_recovery = false,
+                              double resumed_acceleration = 1.0) {
+  tbb::global_control control(tbb::global_control::max_allowed_parallelism, 2);
+  auto c = monoCalibration();
+  granite::VioConfig config;
+  config.vio_enforce_realtime = false;
+  config.vio_use_lm = true;
+  config.vio_max_iterations = 7;
+  config.vio_max_kfs = 4;
+  config.vio_min_frames_after_kf = 2;
+  config.vio_no_motion_reg_weight = no_motion_weight;
+  const Eigen::Vector3d bg(0, 0, 0.03), ba(0.02, -0.01, 0.03);
+  auto motion = [&](double t) {
+    Eigen::Vector3d p, v, a;
+    p.setZero(); v.setZero(); a.setZero();
+    if (bearings_only) { p.x() = 0.5*t; v.x() = 0.5; }
+    else if (t < 1) { p.x() = 0.5*t; v.x() = 0.5; }
+    else if (t < 2) { double u=t-1; p.x()=0.5+0.5*u-0.25*u*u; v.x()=0.5-0.5*u; a.x()=-0.5; }
+    else if (t < 4) p.x() = 0.75;
+    else { double u=t-4; p.x()=0.75+0.5*resumed_acceleration*u*u; v.x()=resumed_acceleration*u; a.x()=resumed_acceleration; }
+    return std::make_tuple(Sophus::SE3d(Sophus::SO3d::exp(Eigen::Vector3d(0,0,0.2*t)),p),v,a);
+  };
+  tbb::concurrent_bounded_queue<granite::OpticalFlowResult::Ptr> vision;
+  tbb::concurrent_bounded_queue<granite::ImuData::Ptr> imu;
+  tbb::concurrent_bounded_queue<granite::VioStateData::Ptr> states;
+  constexpr int64_t start = 1000000000;
+  for (int i=0; i<=int((end+0.1)*200); ++i) {
+    double t=i*0.005;
+    auto [pose,vel,acceleration]=motion(t);
+    auto sample=std::make_shared<granite::ImuData>();
+    sample->t_ns=start+i*5000000LL;
+    sample->accel=pose.so3().inverse()*(acceleration-granite::constants::g)+ba;
+    sample->gyro=Eigen::Vector3d(0,0,0.2)+bg;
+    if(delayed_recovery && t>=2) sample->gyro.z()+=0.02;
+    imu.push(sample);
+  }
+  for (int i=0; i<=int(end*30); ++i) {
+    double t=i/30.0;
+    auto [pose,vel,acceleration]=motion(t);
+    auto frame=observations(c,start+llround(t*1e9),pose);
+    if ((t>=2 && !delayed_recovery) || bearings_only) {
+      frame->observations[0].clear(); frame->pyramid_levels[0].clear();
+      for (int k=0;k<80;++k) {
+        Eigen::Vector3d point((k%10-4.5)*0.35+0.75,(k/10-3.5)*0.3,3+(k%7)*0.35);
+        Eigen::Vector3d local = (t<4 || bearings_only)
+            ? pose.so3().inverse()*(point-Eigen::Vector3d(0.75,0,0))
+            : pose.inverse()*point;
+        Eigen::Vector4d ray; ray << local,1;
+        Eigen::Vector2d pixel;
+        if (!c.intrinsics[0].project(ray,pixel)) continue;
+        if (inject_outliers && k<outlier_count && t>4.5) pixel+=Eigen::Vector2d(60,-40);
+        Eigen::AffineCompact2f affine=Eigen::AffineCompact2f::Identity();
+        affine.translation()=pixel.cast<float>();
+        frame->observations[0][100+k]=affine;
+        frame->pyramid_levels[0][100+k]=k%3;
+      }
+    }
+    if (empty_gap && (delayed_recovery ? (t>=2.2 && t<4) : (t>=2.7 && t<3.2))) {
+      frame->observations[0].clear(); frame->pyramid_levels[0].clear();
+    }
+    vision.push(frame);
+  }
+  vision.push(nullptr); imu.push(nullptr);
+  tbb::concurrent_bounded_queue<granite::VioVisualizationData::Ptr> visuals;
+  auto vio=std::make_shared<granite::KeypointVioEstimator>(granite::constants::g,c,config);
+  vio->vision_data_queue=&vision; vio->imu_data_queue=&imu; vio->out_state_queue=&states;
+  vio->out_vis_queue=&visuals;
+  vio->initialize(start,Sophus::SE3d(),Eigen::Vector3d(0.5,0,0),bg+seed_bg_error,ba);
+  vio->join();
+  DegenerateResult result;
+  granite::VioStateData::Ptr state;
+  while(states.try_pop(state)) if(state) result.states.push_back(state);
+  granite::VioVisualizationData::Ptr visual;
+  while(visuals.try_pop(visual)) if(visual) result.last_visual=visual;
+  for(int id=100;id<180;++id) if(vio->lmdb.landmarkExists(id)) {
+    if(vio->lmdb.getLandmark(id).id==0) ++result.replacement_infinite;
+    else ++result.replacement_finite;
+  }
+  return result;
+}
+}
+
+TEST(MonoVioRobustness, NewBearingsSurvivePureRotationWithoutFiniteDepth) {
+  auto result=runDegenerate(3.5);
+  ASSERT_FALSE(result.states.empty());
+  EXPECT_GE(result.replacement_infinite,40u);
+  EXPECT_EQ(result.replacement_finite,0u);
+  const auto& last=result.states.back()->state;
+  EXPECT_NEAR(last.T_w_i.translation().x(),0.75,0.03);
+  EXPECT_LT((last.T_w_i.so3().inverse()*Sophus::SO3d::exp(Eigen::Vector3d(0,0,0.7))).log().norm(),0.01);
+}
+
+TEST(MonoVioRobustness, ResumedTranslationRecoversSameTracksAtMetricScale) {
+  auto result=runDegenerate(6);
+  ASSERT_FALSE(result.states.empty());
+  EXPECT_GE(result.replacement_finite,30u);
+  const auto& last=result.states.back()->state;
+  EXPECT_NEAR(last.T_w_i.translation().x(),2.75,0.06);
+  EXPECT_NEAR(last.vel_w_i.x(),2,0.06);
+  EXPECT_LT((last.bias_gyro-Eigen::Vector3d(0,0,0.03)).norm(),0.01);
+  EXPECT_LT((last.bias_accel-Eigen::Vector3d(0.02,-0.01,0.03)).norm(),0.03);
+}
+
+TEST(MonoVioRobustness, InfinityBearingsDoNotForceZeroMetricVelocity) {
+  auto result=runDegenerate(3.5,true,100.0);
+  ASSERT_FALSE(result.states.empty());
+  EXPECT_GE(result.replacement_infinite,40u);
+  EXPECT_EQ(result.replacement_finite,0u);
+  const auto& last=result.states.back()->state;
+  EXPECT_NEAR(last.T_w_i.translation().x(),1.75,0.02);
+  EXPECT_NEAR(last.vel_w_i.x(),0.5,0.01);
+}
+
+TEST(MonoVioRobustness, InactiveOldDepthDoesNotClaimCurrentMetricVisualSupport) {
+  auto result=runDegenerate(3.5);
+  ASSERT_FALSE(result.states.empty());
+  const auto& last=*result.states.back();
+  EXPECT_GE(last.num_connected_infinite_landmarks,40u);
+  EXPECT_EQ(last.num_connected_finite_landmarks,0u);
+  EXPECT_EQ(last.mono_vio_support,granite::MonoVioSupport::BEARING_ONLY);
+}
+
+TEST(MonoVioRobustness, EmptyVisualGapPropagatesImuAndRecoversWithoutReset) {
+  auto result=runDegenerate(6,false,1e-6,true);
+  ASSERT_FALSE(result.states.empty());
+  bool saw_inertial=false, saw_bearings=false;
+  for(const auto& data:result.states) {
+    EXPECT_TRUE(data->state.T_w_i.matrix().allFinite());
+    EXPECT_EQ(data->map_idx,0u);
+    if(data->state.t_ns>=3800000000LL && data->state.t_ns<4200000000LL) {
+      EXPECT_EQ(data->mono_vio_support,granite::MonoVioSupport::INERTIAL_ONLY);
+      saw_inertial=true;
+    }
+    if(data->mono_vio_support==granite::MonoVioSupport::BEARING_ONLY) saw_bearings=true;
+  }
+  EXPECT_TRUE(saw_inertial); EXPECT_TRUE(saw_bearings);
+  const auto& last=*result.states.back();
+  EXPECT_EQ(last.mono_vio_support,granite::MonoVioSupport::METRIC);
+  EXPECT_GE(last.num_connected_finite_landmarks,30u);
+  EXPECT_NEAR(last.state.T_w_i.translation().x(),2.75,0.06);
+}
+
+TEST(MonoVioRobustness, BadReprojectionsDoNotCorruptRecoveryOrBookkeeping) {
+  auto result=runDegenerate(6,false,1e-6,false,true);
+  ASSERT_FALSE(result.states.empty());
+  const auto& last=*result.states.back();
+  EXPECT_GE(last.num_connected_finite_landmarks,30u);
+  EXPECT_NEAR(last.state.T_w_i.translation().x(),2.75,0.08);
+  EXPECT_NEAR(last.state.vel_w_i.x(),2,0.08);
+}
+
+TEST(MonoVioRobustness, BearingsCorrectInitialGyroscopeBiasError) {
+  auto result=runDegenerate(3.5,true,1e-6,false,false,Eigen::Vector3d(0,0,0.01));
+  ASSERT_FALSE(result.states.empty());
+  const auto& last=*result.states.back();
+  EXPECT_GE(last.num_connected_infinite_landmarks,40u);
+  EXPECT_LT((last.state.bias_gyro-Eigen::Vector3d(0,0,0.03)).norm(),0.005);
+  EXPECT_LT((last.state.T_w_i.so3().inverse()*Sophus::SO3d::exp(Eigen::Vector3d(0,0,0.7))).log().norm(),0.01);
+  EXPECT_NEAR(last.state.vel_w_i.x(),0.5,0.015);
+}
+
+TEST(MonoVioRobustness, CompleteOutlierReplacementKeepsFiniteInertialOutput) {
+  auto result=runDegenerate(6,false,1e-6,false,true,Eigen::Vector3d::Zero(),80);
+  ASSERT_FALSE(result.states.empty());
+  for(const auto& data:result.states) {
+    EXPECT_TRUE(data->state.T_w_i.matrix().allFinite());
+    EXPECT_TRUE(data->state.vel_w_i.allFinite());
+    EXPECT_EQ(data->map_idx,0u);
+  }
+  const auto& last=*result.states.back();
+  EXPECT_EQ(last.mono_vio_support,granite::MonoVioSupport::INERTIAL_ONLY);
+  // A sanity bound on metric continuity, not a claim of visual position
+  // accuracy while every association is corrupt and translation unobserved.
+  EXPECT_NEAR(last.state.T_w_i.translation().x(),2.75,0.25);
+  EXPECT_LT((last.state.bias_gyro-Eigen::Vector3d(0,0,0.03)).norm(),0.01);
+}
+
+TEST(MonoVioRobustness, VisualInformationRunsWhenOptimizerConvergesImmediately) {
+  auto result=runDegenerate(3.5,true);
+  ASSERT_TRUE(result.last_visual);
+  EXPECT_GT(result.last_visual->negative_entropy_last_frame,0);
+}
+
+TEST(MonoVioRobustness, RetainedMetricTracksRecoverAfterInertialYawDrift) {
+  auto result=runDegenerate(6,false,1e-6,true,false,Eigen::Vector3d::Zero(),8,true);
+  ASSERT_FALSE(result.states.empty());
+  const auto& last=*result.states.back();
+  EXPECT_EQ(last.mono_vio_support,granite::MonoVioSupport::METRIC);
+  EXPECT_GE(last.num_connected_finite_landmarks,30u);
+  EXPECT_LT((last.state.T_w_i.so3().inverse()*Sophus::SO3d::exp(Eigen::Vector3d(0,0,1.2))).log().norm(),0.03);
+  EXPECT_NEAR(last.state.T_w_i.translation().x(),2.75,0.1);
+}
+
+TEST(MonoVioRobustness, InfinityTracksRecoverRotationAfterVisualGapAndBiasDrift) {
+  auto result=runDegenerate(5,true,1e-6,true,false,Eigen::Vector3d::Zero(),8,true);
+  ASSERT_FALSE(result.states.empty());
+  const auto& last=*result.states.back();
+  EXPECT_GE(last.num_connected_infinite_landmarks,40u);
+  EXPECT_EQ(last.num_connected_finite_landmarks,0u);
+  EXPECT_LT((last.state.T_w_i.so3().inverse()*Sophus::SO3d::exp(Eigen::Vector3d(0,0,1.0))).log().norm(),0.02);
+  EXPECT_NEAR(last.state.T_w_i.translation().x(),2.5,0.05);
+}
+
+TEST(MonoVioRobustness, SmallTranslationParallaxDoesNotTriggerRotationRecovery) {
+  const auto result=runDegenerate(4.8,false,1e-6,false,false,Eigen::Vector3d::Zero(),8,false,0.1);
+  ASSERT_FALSE(result.states.empty());
+  const auto& last=*result.states.back();
+  EXPECT_EQ(last.num_connected_finite_landmarks,0u);
+  EXPECT_LT((last.state.T_w_i.so3().inverse()*Sophus::SO3d::exp(Eigen::Vector3d(0,0,0.96))).log().norm(),0.02);
+  EXPECT_NEAR(last.state.T_w_i.translation().x(),0.782,0.04);
+  EXPECT_NEAR(last.state.vel_w_i.x(),0.08,0.04);
+}
+
+TEST(MonoVioRobustness, NearPlaneTranslationDuringImageGapDoesNotFakeRotation) {
+  tbb::global_control control(tbb::global_control::max_allowed_parallelism,2);
+  const auto c=monoCalibration();
+  granite::VioConfig config;
+  config.vio_enforce_realtime=false; config.vio_use_lm=true;
+  config.vio_max_iterations=7; config.vio_max_kfs=4; config.vio_min_frames_after_kf=2;
+  tbb::concurrent_bounded_queue<granite::OpticalFlowResult::Ptr> vision;
+  tbb::concurrent_bounded_queue<granite::ImuData::Ptr> imu;
+  tbb::concurrent_bounded_queue<granite::VioStateData::Ptr> states;
+  constexpr int64_t start=1000000000;
+  auto motion=[](double t) {
+    Eigen::Vector3d p=Eigen::Vector3d::Zero(),a=Eigen::Vector3d::Zero();
+    if(t>=0.7) p.x()=0.005;
+    else if(t>=0.5) {
+      const double u=(t-0.5)/0.2;
+      p.x()=0.005*(10*std::pow(u,3)-15*std::pow(u,4)+6*std::pow(u,5));
+      a.x()=0.005/(0.2*0.2)*(60*u-180*u*u+120*u*u*u);
+    }
+    return std::make_pair(p,a);
+  };
+  for(int i=0;i<=220;++i) {
+    const double t=i*0.005;
+    auto sample=std::make_shared<granite::ImuData>();
+    sample->t_ns=start+i*5000000LL;
+    sample->accel=motion(t).second-granite::constants::g;
+    sample->gyro.setZero(); imu.push(sample);
+  }
+  for(int i=0;i<=30;++i) {
+    const double t=i/30.0;
+    auto frame=std::make_shared<granite::OpticalFlowResult>();
+    frame->t_ns=start+llround(t*1e9);
+    frame->observations.resize(1); frame->pyramid_levels.resize(1);
+    if(t<0.5 || t>=0.733) for(int k=0;k<80;++k) {
+      const Eigen::Vector3d point((k%10-4.5)*0.06,(k/10-3.5)*0.05,0.8);
+      Eigen::Vector4d ray;ray<<point-motion(t).first,1;
+      Eigen::Vector2d pixel;
+      if(!c.intrinsics[0].project(ray,pixel)) continue;
+      Eigen::AffineCompact2f observation=Eigen::AffineCompact2f::Identity();
+      observation.translation()=pixel.cast<float>();
+      frame->observations[0][k]=observation; frame->pyramid_levels[0][k]=0;
+    }
+    vision.push(frame);
+  }
+  vision.push(nullptr); imu.push(nullptr);
+  auto vio=std::make_shared<granite::KeypointVioEstimator>(granite::constants::g,c,config);
+  vio->vision_data_queue=&vision; vio->imu_data_queue=&imu; vio->out_state_queue=&states;
+  vio->initialize(start,Sophus::SE3d(),Eigen::Vector3d::Zero(),Eigen::Vector3d::Zero(),Eigen::Vector3d::Zero());
+  vio->join();
+  granite::VioStateData::Ptr state,last;
+  while(states.try_pop(state)) if(state) {
+    last=state;
+    EXPECT_LT(state->state.T_w_i.so3().log().norm(),0.001);
+    EXPECT_LT(state->state.bias_gyro.norm(),0.001);
+  }
+  ASSERT_TRUE(last);
+  EXPECT_NEAR(last->state.T_w_i.translation().x(),0.005,0.001);
+}
