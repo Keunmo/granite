@@ -130,6 +130,48 @@ TEST(MonoVio, PreservesInitialAccelerometerBias) {
   EXPECT_LT(result.yaw_error, 0.04);
 }
 
+TEST(MonoLandmarkLifecycle, MarginalizesLandmarkWithNoAcceptedObservations) {
+  granite::LandmarkDatabase database;
+  const granite::TimeCamId host(1000000000, 0), retained_host(2000000000, 0);
+  granite::KeypointPosition point;
+  point.kf_id = host;
+  point.dir = Eigen::Vector2d::Zero();
+  point.id = 0;
+  point.weight = 1;
+  // Mono reprojection gates can reject every observation of a newly born
+  // bearing. Its host must still be removable at the next marginalization.
+  database.addLandmark(1, point);
+  point.kf_id = retained_host;
+  point.id = 0.2;
+  database.addLandmark(2, point);
+  database.addObservation(retained_host, {2, Eigen::Vector2d(212, 200)});
+  database.removeKeyframes({host.frame_id}, {host.frame_id}, {});
+  EXPECT_FALSE(database.landmarkExists(1));
+  ASSERT_TRUE(database.landmarkExists(2));
+  EXPECT_EQ(database.numLandmarks(), 1u);
+  EXPECT_EQ(database.numObservations(), 1);
+  EXPECT_EQ(database.numObservations(2), 1);
+  EXPECT_EQ(database.getObservationsOfLandmark(2).size(), 1u);
+}
+
+TEST(MonoLandmarkLifecycle, RemovesLandmarkBeforeItsFirstObservation) {
+  granite::LandmarkDatabase database;
+  granite::KeypointPosition point;
+  point.kf_id = granite::TimeCamId(1000000000, 0);
+  point.dir = Eigen::Vector2d::Zero();
+  point.id = 0;
+  point.weight = 1;
+  database.addLandmark(1, point);
+  EXPECT_EQ(database.numObservations(1), 0);
+  EXPECT_TRUE(database.getObservationsOfLandmark(1).empty());
+  database.removeLandmark(1);
+  EXPECT_FALSE(database.landmarkExists(1));
+  EXPECT_EQ(database.numLandmarks(), 0u);
+  EXPECT_EQ(database.numObservations(), 0);
+  database.removeKeyframes({point.kf_id.frame_id}, {}, {});
+  EXPECT_TRUE(database.getHostKfs().empty());
+}
+
 TEST(VioShutdown, ImuEofBeforeFirstImageDoesNotDereferenceNull) {
   granite::VioConfig config;
   auto vio = std::make_shared<granite::KeypointVioEstimator>(granite::constants::g, monoCalibration(), config);

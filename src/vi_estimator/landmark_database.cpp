@@ -59,6 +59,10 @@ void LandmarkDatabase::addLandmark(int lm_id, const KeypointPosition &pos) {
 
   kpts[lm_id] = pos;
   host_to_kpts[pos.kf_id].emplace(lm_id);
+  // A mono landmark can be born before any observation passes reprojection
+  // gating. Keep its lifecycle valid even if its host is removed first.
+  kpts_num_obs[lm_id] = 0;
+  obs.try_emplace(pos.kf_id);
 }
 
 void LandmarkDatabase::removeFrame(const FrameId &frame) {

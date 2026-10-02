@@ -50,6 +50,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
 #include <granite/vi_estimator/mono_vio.h>
+#include <sstream>
+#include <iomanip>
 
 namespace granite {
 MonoVioEstimator::MonoVioEstimator(const Eigen::Vector3d& gravity,
@@ -176,10 +178,14 @@ void MonoVioEstimator::run(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba)
       metric_scale = alignment->scale;
       metric_initialized = true;
       tracking_state = TrackingState::TRACKING;
-      std::cout << "MONO_VIO_INITIALIZED scale=" << alignment->scale
-                << " gravity=" << alignment->gravity.transpose()
-                << " gyro_bias=" << alignment->gyro_bias.transpose()
-                << " residual=" << alignment->residual << std::endl;
+      std::ostringstream initialization;
+      initialization << std::setprecision(6)
+                     << "MONO_VIO_INITIALIZED scale=" << alignment->scale
+                     << " gravity=" << alignment->gravity.transpose()
+                     << " gyro_bias=" << alignment->gyro_bias.transpose()
+                     << " residual=" << alignment->residual
+                     << " relative_scale_std=" << alignment->relative_scale_std;
+      std::cout << initialization.str() << std::endl;
       visual.reset();
       history.clear();
     }

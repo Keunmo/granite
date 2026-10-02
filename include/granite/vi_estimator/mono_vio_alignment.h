@@ -69,6 +69,9 @@ struct MonoVioAlignment {
   Eigen::Vector3d gyro_bias;
   Eigen::aligned_vector<Eigen::Vector3d> velocities;
   double residual = 0;
+  // Free-gravity OLS noise propagation with visual poses held fixed. Bootstrap
+  // pose uncertainty and the shared estimated bias uncertainty are not modeled.
+  double relative_scale_std = 0;
 };
 
 std::optional<MonoVioAlignment> alignMonoVisualInertial(

@@ -59,6 +59,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <tbb/global_control.h>
 #include <granite/device/rs_t265.h>
 #include <granite/device/t265_gui.h>
+#include <granite/device/t265_session.h>
+#include <optional>
 #include <opencv2/core.hpp>
 #include <granite/serialization/headers_serialization.h>
 #include <granite/vi_estimator/vio_estimator.h>
@@ -96,7 +98,7 @@ int runT265(int argc, char** argv, int mono_default, bool use_imu_default) {
   int mono_camera = mono_default;
   bool use_imu = use_imu_default;
   bool resize_half = false, capture_only = false, no_gui = false;
-  int num_threads = 3, skip_frames = 1;
+  int num_threads = 3, skip_frames = 1, reconnect_attempts = 3;
   double duration = 0, exposure = 0;
   std::string config_path, trajectory_path, calibration_path;
   CLI::App app{"Granite T265 live stereo/mono visual-inertial odometry"};
@@ -112,14 +114,24 @@ int runT265(int argc, char** argv, int mono_default, bool use_imu_default) {
   app.add_option("--save-calib", calibration_path, "Export the selected/scaled calibration JSON");
   app.add_flag("--capture-only", capture_only, "Validate image and IMU delivery without running VIO");
   app.add_flag("--no-gui", no_gui, "Disable live GUI (default: false)");
+  app.add_option("--reconnect-attempts", reconnect_attempts, "Restart capture/estimator after a stream outage (default: 3, 0: fail immediately)");
   CLI11_PARSE(app, argc, argv);
-  if (mono_camera < 0 || mono_camera > 2 || num_threads < 1 || skip_frames < 1 ||
+  if (mono_camera < 0 || mono_camera > 2 || num_threads < 1 || skip_frames < 1 || reconnect_attempts < 0 ||
       !std::isfinite(duration) || duration < 0 || !std::isfinite(exposure) || exposure < 0) {
-    std::cerr << "Invalid camera, thread count, frame stride, duration or exposure" << std::endl;
+    std::cerr << "Invalid camera, thread count, frame stride, duration, exposure or reconnect count" << std::endl;
     return 2;
   }
   std::signal(SIGINT, interrupt);
   std::signal(SIGTERM, interrupt);
+  using Outcome = granite::T265SessionOutcome;
+  std::optional<std::chrono::steady_clock::time_point> overall_start;
+  const auto duration_expired = [&] {
+    return duration > 0 && overall_start &&
+        std::chrono::duration<double>(std::chrono::steady_clock::now()-*overall_start).count() >= duration;
+  };
+  auto run_session = [&](int segment, bool recovering) -> Outcome {
+  if (interrupted || duration_expired()) return Outcome::FINISHED;
+  bool starting = true;
   try {
     tbb::global_control threads(tbb::global_control::max_allowed_parallelism, num_threads);
     cv::setNumThreads(1);
@@ -131,7 +143,10 @@ int runT265(int argc, char** argv, int mono_default, bool use_imu_default) {
     if (!config_path.empty()) config.load(config_path);
     std::ofstream trajectory;
     if (!trajectory_path.empty()) {
-      trajectory.open(trajectory_path);
+      const std::string path = segment == 0 ? trajectory_path :
+          trajectory_path + ".segment-" + std::to_string(segment) + ".csv";
+      trajectory.open(path);
+      std::cout << "trajectory_segment=" << segment << " file=" << path << std::endl;
       if (!trajectory) throw std::runtime_error("Cannot open trajectory output");
       trajectory << "timestamp_ns,tx,ty,tz,qx,qy,qz,qw,vx,vy,vz\n" << std::setprecision(16);
     }
@@ -146,6 +161,12 @@ int runT265(int argc, char** argv, int mono_default, bool use_imu_default) {
     granite::RsT265Device device(exposure > 0, skip_frames, 90, exposure,
                                 mono_camera, resize_half);
     device.start();
+    const auto stop_capture = [&] {
+      return granite::stopT265Capture([&] { device.stop(false); },
+          [](const std::exception& error) {
+            std::cerr << "T265 stop failed: " << error.what() << std::endl;
+          });
+    };
     const auto calib = device.exportCalibration();
     if (!calibration_path.empty()) {
       std::ofstream output(calibration_path);
@@ -181,17 +202,21 @@ int runT265(int argc, char** argv, int mono_default, bool use_imu_default) {
     device.imu_data_queue = &imu_queue;
     device.enableCapture();
     const auto start = std::chrono::steady_clock::now();
+    if (!overall_start) overall_start = start;
     // The estimator expects its first IMU measurement to be present.
     if (!capture_only) {
-      while (imu_queue.empty() && !device.failed && !interrupted &&
+      while (imu_queue.empty() && !device.failed && !interrupted && !duration_expired() &&
              std::chrono::steady_clock::now() - start < std::chrono::seconds(5)) {
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
       }
       if (imu_queue.empty()) {
-        device.stop(false);
+        stop_capture();
         flow->quit(true);
+        flow->input_queue.try_push(nullptr);
+        flow->output_queue.try_push(nullptr);
         flow->join();
-        throw std::runtime_error("T265 did not deliver initial IMU data");
+        std::cerr << "T265 did not deliver initial IMU data" << std::endl;
+        return interrupted || duration_expired() ? Outcome::FINISHED : Outcome::TRANSPORT_ERROR;
       }
       vio = granite::VioEstimatorFactory::getVioEstimator(config, *calib, granite::constants::g, use_imu);
       vio->vision_data_queue = &flow->output_queue;
@@ -201,6 +226,7 @@ int runT265(int argc, char** argv, int mono_default, bool use_imu_default) {
       vio->initialize(Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
     }
 
+    starting = false;
     uint64_t states = 0, previous_states = 0, previous_images = 0;
     int64_t last_state_ns = 0;
     double max_lag_ms = 0;
@@ -327,24 +353,20 @@ int runT265(int argc, char** argv, int mono_default, bool use_imu_default) {
         }
         display_time = now;
       }
-      if (duration > 0 && elapsed >= duration) break;
+      if (duration_expired()) break;
       if (device.image_frames.load() != watchdog_images) {
         watchdog_images = device.image_frames.load();
         last_image_time = now;
       } else if (elapsed > 5 && now - last_image_time > std::chrono::seconds(3)) {
-        std::cerr << "T265 image stream stalled" << std::endl;
+        std::cerr << "T265 image stream stalled: no raw images for 3 seconds; "
+                     "check USB connection, power and firmware" << std::endl;
         stream_stalled = true;
         break;
       }
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
     // Join the SDK callbacks before sending end-of-stream markers.
-    bool stop_failed = false;
-    try { device.stop(false); }
-    catch (const std::exception& error) {
-      stop_failed = true;
-      std::cerr << "T265 stop failed: " << error.what() << std::endl;
-    }
+    const bool stop_failed = !stop_capture();
     // An IMU consumer may be waiting while the flow output is full. Cancel
     // both flow queues and release the IMU wait without blocking on image EOF.
     if (vio) vio->quit();
@@ -365,17 +387,39 @@ int runT265(int argc, char** argv, int mono_default, bool use_imu_default) {
     if (vio) vio->join();
     consume();
     const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-    std::cout << "SUMMARY seconds=" << elapsed << " images=" << device.image_frames.load()
+    std::cout << "SUMMARY segment=" << segment << " stream_stalled=" << stream_stalled
+              << " seconds=" << elapsed << " images=" << device.image_frames.load()
               << " queued=" << device.queued_frames.load() << " dropped=" << device.dropped_frames.load()
               << " imu=" << device.imu_samples.load() << " states=" << states
               << " avg_state_fps=" << states / elapsed << " max_lag_ms=" << max_lag_ms
               << " metric_initialized=" << (mono_vio ? mono_vio->metricInitialized() : (!capture_only && use_imu))
               << " valid=" << !invalid_state << std::endl;
     if (device.failed) std::cerr << device.errorMessage() << std::endl;
-    return device.failed || invalid_state || stream_stalled || stop_failed || gui_failed || device.image_frames == 0 ||
-                   device.imu_samples == 0 || (!capture_only && !mono_vio && states == 0) ? 1 : 0;
+    if (invalid_state || gui_failed || device.failed) return Outcome::ERROR;
+    if (stream_stalled) return Outcome::TRANSPORT_ERROR;
+    return stop_failed || device.image_frames == 0 || device.imu_samples == 0 ||
+                   (!capture_only && !mono_vio && states == 0) ? Outcome::ERROR : Outcome::FINISHED;
+  } catch (const rs2::error& error) {
+    std::cerr << "T265 SDK: " << error.what() << std::endl;
+    return starting && recovering ? Outcome::TRANSPORT_ERROR : Outcome::ERROR;
   } catch (const std::exception& error) {
     std::cerr << "T265 VIO: " << error.what() << std::endl;
-    return 1;
+    // A rebooted device may still be enumerating when a reconnect starts.
+    if (starting && recovering && std::string(error.what()) == "No Intel RealSense T265 connected")
+      return Outcome::TRANSPORT_ERROR;
+    return Outcome::ERROR;
   }
+  };
+  return granite::runT265Sessions(reconnect_attempts, run_session, [&] {
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < until) {
+      if (interrupted || duration_expired()) return false;
+      std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    return !interrupted && !duration_expired();
+  }, [&](int segment) {
+    std::cerr << "T265 reconnect " << segment << '/' << reconnect_attempts
+              << ": releasing the previous session and retrying in 5 seconds. "
+                 "The next session starts a new trajectory and metric initialization." << std::endl;
+  });
 }

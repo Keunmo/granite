@@ -46,3 +46,7 @@ gtest_add_tests(TARGET test_mono_vio AUTO)
 add_executable(test_mono_vio_alignment src/test_mono_vio_alignment.cpp)
 target_link_libraries(test_mono_vio_alignment gtest gtest_main granite)
 gtest_add_tests(TARGET test_mono_vio_alignment AUTO)
+
+add_executable(test_t265_session src/test_t265_session.cpp)
+target_link_libraries(test_t265_session gtest gtest_main)
+gtest_add_tests(TARGET test_t265_session AUTO)

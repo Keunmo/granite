@@ -51,7 +51,9 @@ state, including states skipped by the display refresh.
 ## Stop
 
 Press Escape or Q, or close the window, to stop the runner. SIGINT, SIGTERM,
-and `--duration` also stop it. Shutdown stops SDK callbacks, drains estimator
+and `--duration` also stop it. A stream outage can reopen a new capture/estimator
+session (three retries by default); its displayed trajectory starts over.
+`--reconnect-attempts 0` disables this recovery. Shutdown stops SDK callbacks, drains estimator
 output, and joins the workers before releasing the window.
 
 ## USB permission errors

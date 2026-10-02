@@ -50,6 +50,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
 #include <granite/vi_estimator/mono_vio_alignment.h>
+#include <Eigen/Cholesky>
 #include <Eigen/SVD>
 
 namespace granite {
@@ -90,6 +91,46 @@ bool solve(const Eigen::MatrixXd& A, const Eigen::VectorXd& b, Eigen::VectorXd& 
   if (svd.singularValues().tail<1>()[0] < svd.singularValues()[0] * 1e-6) return false;
   x = norms.cwiseInverse().asDiagonal() * svd.solve(b);
   return x.allFinite();
+}
+
+std::optional<double> scaleStandardDeviation(
+    const Eigen::MatrixXd& A, const std::vector<MonoVioFrame>& frames,
+    const std::vector<IntegratedImuMeasurement>& preintegrations) {
+  const Eigen::VectorXd norms = A.colwise().norm();
+  if (!norms.allFinite() || (norms.array() < 1e-12).any()) return std::nullopt;
+  const Eigen::MatrixXd normalized = A * norms.cwiseInverse().asDiagonal();
+  const Eigen::JacobiSVD<Eigen::MatrixXd> svd(normalized, Eigen::ComputeThinU | Eigen::ComputeThinV);
+  if (svd.singularValues().tail<1>()[0] < svd.singularValues()[0] * 1e-6) return std::nullopt;
+  // Use the scale row of the same column-normalized OLS pseudoinverse as
+  // solve(). Propagate noise as A+ C (A+)'; inverse weighted information would
+  // assume a GLS estimator and underestimate the noise of the actual OLS fit.
+  const Eigen::VectorXd scale_sensitivity = svd.matrixU() *
+      (svd.matrixV().row(A.cols() - 1).transpose().array() /
+       svd.singularValues().array()).matrix() / norms.tail<1>()[0];
+  double variance = 0;
+  for (size_t i = 0; i < preintegrations.size(); ++i) {
+    // Position and velocity share integrated accelerometer noise. Keep their
+    // cross-covariance, and express both in the visual world frame used by A.
+    const auto& cov = preintegrations[i].get_cov();
+    Eigen::Matrix<double, 6, 6> pv_cov;
+    pv_cov.topLeftCorner<3, 3>() = cov.topLeftCorner<3, 3>();
+    pv_cov.topRightCorner<3, 3>() = cov.block<3, 3>(0, 6);
+    pv_cov.bottomLeftCorner<3, 3>() = cov.block<3, 3>(6, 0);
+    pv_cov.bottomRightCorner<3, 3>() = cov.block<3, 3>(6, 6);
+    Eigen::Matrix<double, 6, 6> rotation = Eigen::Matrix<double, 6, 6>::Zero();
+    rotation.topLeftCorner<3, 3>() = frames[i].T_v_i.rotationMatrix();
+    rotation.bottomRightCorner<3, 3>() = frames[i].T_v_i.rotationMatrix();
+    const Eigen::Matrix<double, 6, 6> world_cov = rotation * pv_cov * rotation.transpose();
+    const Eigen::LLT<Eigen::Matrix<double, 6, 6>> llt(world_cov);
+    if (llt.info() != Eigen::Success) return std::nullopt;
+    const Eigen::Matrix<double, 6, 1> sensitivity = scale_sensitivity.segment<6>(6 * i);
+    variance += sensitivity.dot(world_cov * sensitivity);
+  }
+  // Leave all velocities and three gravity components free in this linear
+  // covariance model; the fixed-magnitude gravity refinement adds constraints.
+  const double std = std::sqrt(variance);
+  if (!std::isfinite(std)) return std::nullopt;
+  return std;
 }
 }
 
@@ -186,6 +227,12 @@ std::optional<MonoVioAlignment> alignMonoVisualInertial(
   x.segment<3>(3 * n) = result.gravity;
   result.residual = (A * x - b).norm() / std::sqrt(static_cast<double>(b.size()));
   if (result.scale <= 0 || !std::isfinite(result.scale) || result.residual > 0.05) return std::nullopt;
+  const auto scale_std = scaleStandardDeviation(A, frames, preintegrations);
+  if (!scale_std) return std::nullopt;
+  result.relative_scale_std = *scale_std / result.scale;
+  // Require a three-sigma relative scale interval within 30%. Unlike an
+  // absolute scale cap, this test is invariant to the bootstrap map's units.
+  if (result.relative_scale_std > 0.1) return std::nullopt;
   for (size_t i = 0; i < n; ++i) result.velocities.push_back(x.segment<3>(3 * i));
   return result;
 }
