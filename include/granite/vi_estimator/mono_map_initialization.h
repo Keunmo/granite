@@ -364,9 +364,10 @@ class ParallelRANSACIteration {
 
   void operator()(const tbb::blocked_range<size_t>& r) {
     RansacResult tmp_best_res = best_res;
-    auto gen = std::mt19937(std::random_device{}());
-
     for (size_t i = r.begin(); i != r.end(); ++i) {
+      // Seed by the iteration index: the samples do not depend on the run or
+      // on how TBB splits the range.
+      std::mt19937 gen(static_cast<std::mt19937::result_type>(0x9e3779b9u * (i + 1)));
       // sample N elements from bearing vectors
       std::vector<int> picked_indices(N);
       std::sample(indices.begin(), indices.end(), picked_indices.begin(), N,
