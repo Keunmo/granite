@@ -1,0 +1,33 @@
+diff --git a/src/vi_estimator/mono_vio.cpp b/src/vi_estimator/mono_vio.cpp
+index 0fd5047..edecf1a 100644
+--- a/src/vi_estimator/mono_vio.cpp
++++ b/src/vi_estimator/mono_vio.cpp
+@@ -52,6 +52,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ #include <granite/vi_estimator/mono_vio.h>
+ #include <sstream>
+ #include <iomanip>
++#include <cstdlib>
+ 
+ namespace granite {
+ MonoVioEstimator::MonoVioEstimator(const Eigen::Vector3d& gravity,
+@@ -159,7 +160,20 @@ void MonoVioEstimator::run(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba)
+         }
+       }
+       const auto alignment = alignMonoVisualInertial(frames, samples, calibration, bg, ba);
++      if (std::getenv("GRANITE_ALIGN_DEBUG")) {
++        std::cout << std::setprecision(6) << "ALIGN_TRY t=" << frame->t_ns << " n=" << frames.size()
++                  << " span=" << (frames.empty() ? 0.0 : (frames.back().t_ns - frames.front().t_ns) * 1e-9)
++                  << " ok=" << bool(alignment);
++        if (alignment)
++          std::cout << " scale=" << alignment->scale << " g=" << alignment->gravity.transpose()
++                    << " res=" << alignment->residual << " rss=" << alignment->relative_scale_std;
++        std::cout << std::endl;
++      }
+       if (!alignment) continue;
++      if (const char* hold = std::getenv("GRANITE_ALIGN_HOLD_S")) {
++        if (frame->t_ns - history.begin()->first < 0 ||
++            (frame->t_ns * 1e-9) < std::atof(hold)) continue;
++      }
+ 
+       // Stop the bootstrap worker before reading its optimized map.
+       bootstrap_vision.push(nullptr);

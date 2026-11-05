@@ -1,0 +1,8 @@
+results/
+results_*/
+bin/
+data/
+*.log
+jobs*.txt
+j[0-9]*.txt
+config/var/

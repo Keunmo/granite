@@ -1,0 +1,36 @@
+diff --git a/src/vi_estimator/mono_vio.cpp b/src/vi_estimator/mono_vio.cpp
+index 093c7ae..f2a4418 100644
+--- a/src/vi_estimator/mono_vio.cpp
++++ b/src/vi_estimator/mono_vio.cpp
+@@ -133,6 +133,31 @@ void MonoVioEstimator::run(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba)
+       }
+       if (imu_finished) break;
+       ++frames_processed;
++      static const char* reinit_env = std::getenv("GRANITE_REINIT_AT_S");
++      static bool reinit_done = false;
++      if (metric && reinit_env && !reinit_done && frame->t_ns * 1e-9 >= std::atof(reinit_env)) {
++        // EXPERIMENT: discard the metric estimator and restart the bootstrap.
++        reinit_done = true;
++        metric_vision.push(nullptr);
++        metric_imu.push(nullptr);
++        metric->join();
++        metric.reset();
++        metric_vision.clear();
++        metric_imu.clear();
++        metric_initialized = false;
++        bootstrap_vision.clear();
++        bootstrap_states.clear();
++        visual = std::make_shared<KeypointVoEstimator>(calibration, bootstrap_config);
++        visual->vision_data_queue = &bootstrap_vision;
++        visual->out_state_queue = &bootstrap_states;
++        visual->out_vis_queue = out_vis_queue;
++        visual->initialize(bg, ba);
++        visual_stopped = false;
++        visual_map = 0;
++        history.clear();
++        agreeing.clear();
++        std::cout << "MONO_VIO_REINIT t_ns=" << frame->t_ns << std::endl;
++      }
+       if (metric) {
+         metric_vision.push(frame);
+         tracking_state = metric->tracking_state.load();

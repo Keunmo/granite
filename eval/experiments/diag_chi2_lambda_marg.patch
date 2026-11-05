@@ -1,0 +1,121 @@
+diff --git a/include/granite/vi_estimator/vio_estimator.h b/include/granite/vi_estimator/vio_estimator.h
+index bfc4711..2866d85 100644
+--- a/include/granite/vi_estimator/vio_estimator.h
++++ b/include/granite/vi_estimator/vio_estimator.h
+@@ -70,6 +70,16 @@ struct VioStateData {
+   size_t num_connected_infinite_landmarks = 0;
+   MonoVioSupport mono_vio_support = MonoVioSupport::NOT_APPLICABLE;
+ 
++  // IMU factor consistency of the newest state after optimization (see
++  // KeypointVioEstimator::measure): full 9-dof and rotation-only Mahalanobis
++  // norms.
++  double imu_chi2 = std::numeric_limits<double>::quiet_NaN();
++  double imu_rot_chi2 = std::numeric_limits<double>::quiet_NaN();
++  // How much the optimization of this frame moved the previously published
++  // state [rad], [m].
++  double prev_correction_rot = std::numeric_limits<double>::quiet_NaN();
++  double prev_correction_pos = std::numeric_limits<double>::quiet_NaN();
++
+   double scale_variance = std::numeric_limits<double>::quiet_NaN();
+   double drift_variance = std::numeric_limits<double>::quiet_NaN();
+ 
+diff --git a/src/vi_estimator/keypoint_vio.cpp b/src/vi_estimator/keypoint_vio.cpp
+index a6cfa32..ec46a28 100644
+--- a/src/vi_estimator/keypoint_vio.cpp
++++ b/src/vi_estimator/keypoint_vio.cpp
+@@ -52,6 +52,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ #include <granite/utils/assert.h>
+ #include <granite/vi_estimator/keypoint_vio.h>
+ 
++#include <optional>
++
+ #include <granite/optimization/accumulator.h>
+ #include <granite/vi_estimator/keypoint_vo.h>
+ #include <granite/vi_estimator/mono_vio_alignment.h>
+@@ -172,7 +174,7 @@ void KeypointVioEstimator::initializeFromMonoMap(
+   marg_H.setZero(marg_order.total_size, marg_order.total_size);
+   marg_b.setZero(marg_order.total_size);
+   // Anchor the transferred visual gauge and the initial IMU bias estimates.
+-  marg_H.diagonal().head<6>().setConstant(config.vio_init_pose_weight);
++  marg_H.diagonal().head<6>().setConstant(std::getenv("GRANITE_ANCHOR_W") ? std::atof(std::getenv("GRANITE_ANCHOR_W")) : config.vio_init_pose_weight);
+   marg_H.diagonal().segment<3>(state_offset + 9).setConstant(config.vio_init_ba_weight);
+   marg_H.diagonal().segment<3>(state_offset + 12).setConstant(config.vio_init_bg_weight);
+   seed_frame = history.at(this_state_t_ns);
+@@ -524,8 +526,49 @@ bool KeypointVioEstimator::measure(const OpticalFlowResult::Ptr& opt_flow_meas,
+   }
+ 
+   if (calib.intrinsics.size() == 1) updateMonoSupport(opt_flow_meas, num_points_connected);
++  // The previous state was already published; remember it to measure how
++  // much this optimization moves it.
++  std::optional<Sophus::SE3d> published_prev;
++  {
++    const auto prev_state = frame_states.find(prev_state_t_ns);
++    if (prev_state_t_ns != this_state_t_ns && prev_state != frame_states.end())
++      published_prev = prev_state->second.getState().T_w_i;
++  }
+   optimize(num_points_connected);
+   if (calib.intrinsics.size() == 1) updateMonoSupport(opt_flow_meas, num_points_connected);
++  // Consistency of the optimized newest state with its IMU factor: the
++  // Mahalanobis norm of the preintegration residual (9 dof, mean 9 when the
++  // estimate agrees with the IMU noise model). The window optimum trades it
++  // against vision, so a persistently large value flags a state in which
++  // vision and IMU disagree.
++  double imu_chi2 = std::numeric_limits<double>::quiet_NaN();
++  double imu_rot_chi2 = std::numeric_limits<double>::quiet_NaN();
++  {
++    const auto prev_state = frame_states.find(prev_state_t_ns);
++    const auto curr_state = frame_states.find(this_state_t_ns);
++    const auto imu = imu_meas.find(prev_state_t_ns);
++    if (prev_state_t_ns != this_state_t_ns && prev_state != frame_states.end() &&
++        curr_state != frame_states.end() && imu != imu_meas.end() &&
++        imu->second.get_start_t_ns() + imu->second.get_dt_ns() == this_state_t_ns) {
++      const auto s0 = prev_state->second.getState();
++      const auto s1 = curr_state->second.getState();
++      const auto res = imu->second.residual(s0, g, s1, s0.bias_gyro, s0.bias_accel);
++      const auto& cov_inv = imu->second.get_cov_inv();
++      imu_chi2 = res.dot(cov_inv * res);
++      const Eigen::Vector3d r = res.segment<3>(3);
++      imu_rot_chi2 = r.dot(imu->second.get_cov().block<3, 3>(3, 3).inverse() * r);
++    }
++  }
++  double prev_correction_rot = std::numeric_limits<double>::quiet_NaN();
++  double prev_correction_pos = std::numeric_limits<double>::quiet_NaN();
++  if (published_prev) {
++    const auto prev_state = frame_states.find(prev_state_t_ns);
++    if (prev_state != frame_states.end()) {
++      const Sophus::SE3d delta = published_prev->inverse() * prev_state->second.getState().T_w_i;
++      prev_correction_rot = delta.so3().log().norm();
++      prev_correction_pos = delta.translation().norm();
++    }
++  }
+   marginalize(num_points_connected);
+ 
+   if (out_state_queue) {
+@@ -536,6 +579,27 @@ bool KeypointVioEstimator::measure(const OpticalFlowResult::Ptr& opt_flow_meas,
+     data->state = PoseVelBiasState(p.getState());
+ 
+     data->map_idx = 0;
++    data->imu_chi2 = imu_chi2;
++    data->imu_rot_chi2 = imu_rot_chi2;
++    data->prev_correction_rot = prev_correction_rot;
++    data->prev_correction_pos = prev_correction_pos;
++    data->scale_variance = lambda;  // EXPERIMENT: LM lambda after this frame
++    {
++      static int counter = 0;
++      if (std::getenv("GRANITE_MARG_DEBUG") && (counter++ % 15) == 0) {
++        std::cout << "MARG t=" << this_state_t_ns << " size=" << marg_H.rows();
++        for (const auto& kv : marg_order.abs_order_map) {
++          const int o = kv.second.first, n = kv.second.second;
++          std::cout << " [" << (n == int(se3_SIZE) ? "P" : "S") << " pos=" << marg_H.diagonal().segment<3>(o).maxCoeff()
++                    << " rot=" << marg_H.diagonal().segment<3>(o + 3).maxCoeff();
++          if (n > int(se3_SIZE)) std::cout << " vel=" << marg_H.diagonal().segment<3>(o + 6).maxCoeff()
++                                      << " bg=" << marg_H.diagonal().segment<3>(o + 9).maxCoeff()
++                                      << " ba=" << marg_H.diagonal().segment<3>(o + 12).maxCoeff();
++          std::cout << "]";
++        }
++        std::cout << std::endl;
++      }
++    }
+     data->num_landmarks = lmdb.numLandmarks();
+     if (calib.intrinsics.size() == 1) {
+       data->num_connected_finite_landmarks = connected_finite;

@@ -1,0 +1,32 @@
+diff --git a/src/vi_estimator/keypoint_vio.cpp b/src/vi_estimator/keypoint_vio.cpp
+index a6cfa32..aad98ad 100644
+--- a/src/vi_estimator/keypoint_vio.cpp
++++ b/src/vi_estimator/keypoint_vio.cpp
+@@ -964,9 +964,9 @@ void KeypointVioEstimator::optimize(
+           lopt(aom);
+ 
+       tbb::blocked_range<Eigen::aligned_vector<RelLinData<se3_SIZE>>::iterator>
+-          range(rld_vec.begin(), rld_vec.end());
++          range(rld_vec.begin(), rld_vec.end(), 4);
+ 
+-      tbb::parallel_reduce(range, lopt);
++      tbb::parallel_deterministic_reduce(range, lopt);
+ 
+       if (calib.intrinsics.size() == 1 &&
+           iter == 0)
+diff --git a/src/vi_estimator/keypoint_vo.cpp b/src/vi_estimator/keypoint_vo.cpp
+index dd69a09..95b2ab0 100644
+--- a/src/vi_estimator/keypoint_vo.cpp
++++ b/src/vi_estimator/keypoint_vo.cpp
+@@ -1162,9 +1162,9 @@ void KeypointVoEstimator::optimize(std::map<int64_t, int>& num_points_connected,
+           lopt(optim_order);
+ 
+       tbb::blocked_range<Eigen::aligned_vector<RelLinData<se3_SIZE>>::iterator>
+-          range(rld_vec.begin(), rld_vec.end());
++          range(rld_vec.begin(), rld_vec.end(), 4);
+ 
+-      tbb::parallel_reduce(range, lopt);
++      tbb::parallel_deterministic_reduce(range, lopt);
+ 
+       double rel_pose_constraint_error = 0;
+       linearizeRelTranslationConstraints(
