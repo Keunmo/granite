@@ -20,12 +20,14 @@ THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLI
 #include <granite/utils/eigen_utils.hpp>
 
 #include <tbb/blocked_range.h>
+#include <tbb/parallel_for.h>
 #include <tbb/parallel_reduce.h>
 #include <opengv/relative_pose/CentralRelativeAdapter.hpp>
 #include <opengv/relative_pose/methods.hpp>
 #include <sophus/se3.hpp>
 
 #include <optional>
+#include <random>
 
 namespace granite {
 
@@ -360,13 +362,16 @@ class ParallelRANSACIteration {
 
  public:
   const static size_t N = 5;
+  static constexpr uint32_t kSeed = 0x5eed2023u;
   RansacResult best_res;
 
   void operator()(const tbb::blocked_range<size_t>& r) {
     RansacResult tmp_best_res = best_res;
-    auto gen = std::mt19937(std::random_device{}());
 
     for (size_t i = r.begin(); i != r.end(); ++i) {
+      // One fixed seed per iteration index: the samples do not depend on the
+      // run, on the thread count or on how TBB splits the range.
+      std::mt19937 gen(kSeed + static_cast<uint32_t>(i));
       // sample N elements from bearing vectors
       std::vector<int> picked_indices(N);
       std::sample(indices.begin(), indices.end(), picked_indices.begin(), N,
@@ -436,11 +441,14 @@ class ParallelRANSACIteration {
         reprojection_threshold(other.reprojection_threshold),
         best_res(other.best_res) {}
 
-  void join(const ParallelRANSACIteration& other) {
-    if (other.best_res.inlier_idx.size() > best_res.inlier_idx.size() &&
-        other.best_res.avg_error <= best_res.avg_error) {
-      // TODO is std::move possible?
-      best_res = other.best_res;
+  void join(const ParallelRANSACIteration& other) { join(other.best_res); }
+
+  // The acceptance rule (more inliers and not a larger error) is not a total
+  // order, so its result depends on the order in which candidates are joined.
+  void join(const RansacResult& other) {
+    if (other.inlier_idx.size() > best_res.inlier_idx.size() &&
+        other.avg_error <= best_res.avg_error) {
+      best_res = other;
     }
   }
 
@@ -473,9 +481,24 @@ std::optional<Sophus::SE3d> relative_pose(
     indices.at(idx) = idx;
   }
 
+  // Evaluate the iterations in parallel, then join their results in index
+  // order. A parallel_reduce joins in the order of the dynamic range split,
+  // and the acceptance rule is order dependent (see join), so it made the
+  // initialization differ between runs.
+  std::vector<RansacResult> iteration_res(max_ransac_iter);
+  tbb::parallel_for(tbb::blocked_range<size_t>(0, max_ransac_iter),
+                    [&](const tbb::blocked_range<size_t>& r) {
+                      for (size_t i = r.begin(); i != r.end(); ++i) {
+                        auto it = ParallelRANSACIteration(
+                            indices, bearings_a, bearings_b,
+                            reprojection_threshold);
+                        it(tbb::blocked_range<size_t>(i, i + 1));
+                        iteration_res[i] = std::move(it.best_res);
+                      }
+                    });
   auto PRI = ParallelRANSACIteration(indices, bearings_a, bearings_b,
                                      reprojection_threshold);
-  tbb::parallel_reduce(tbb::blocked_range<size_t>(0, max_ransac_iter), PRI);
+  for (const auto& res : iteration_res) PRI.join(res);
   const RansacResult& best_res = PRI.best_res;
 
   // prepare OpenGV Adapter
