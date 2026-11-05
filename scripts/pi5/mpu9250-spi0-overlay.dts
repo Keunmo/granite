@@ -1,0 +1,41 @@
+// SPDX-License-Identifier: MIT
+// MPU-9250 on Raspberry Pi 5 SPI0 CE0 (GPIO 8), data-ready interrupt on GPIO 25.
+// Build: dtc -@ -I dts -O dtb -o mpu9250-spi0.dtbo mpu9250-spi0-overlay.dts
+// Use:   dtparam=spi=on and dtoverlay=mpu9250-spi0 in /boot/firmware/config.txt
+/dts-v1/;
+/plugin/;
+
+/ {
+	compatible = "brcm,bcm2712";
+
+	/* The kernel driver owns CE0; spidev keeps CE1. */
+	fragment@0 {
+		target = <&spidev0>;
+		__overlay__ {
+			status = "disabled";
+		};
+	};
+
+	fragment@1 {
+		target = <&spi0>;
+		__overlay__ {
+			#address-cells = <1>;
+			#size-cells = <0>;
+			status = "okay";
+
+			mpu9250: mpu9250@0 {
+				compatible = "invensense,mpu9250";
+				reg = <0>;
+				/* The MPU-9250 accepts register writes up to 1 MHz. */
+				spi-max-frequency = <1000000>;
+				interrupt-parent = <&rp1_gpio>;
+				interrupts = <25 1>; /* GPIO 25, rising edge */
+			};
+		};
+	};
+
+	__overrides__ {
+		int_pin = <&mpu9250>, "interrupts:0";
+		speed = <&mpu9250>, "spi-max-frequency:0";
+	};
+};

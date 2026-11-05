@@ -82,6 +82,13 @@ else()
       # These are disabled to avoid lot's of warnings in Eigen code with gcc-9
       set(GRANITE_CXX_FLAGS "${GRANITE_CXX_FLAGS} -Wno-error=deprecated-copy")
   endif()
+
+  if(CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 13)
+      # gcc-13 reports false array bounds in Eigen packet loads and TBB nodes,
+      # parentheses warnings in the Pangolin picojson header and missing
+      # template keywords in the granite-headers tests
+      set(GRANITE_CXX_FLAGS "${GRANITE_CXX_FLAGS} -Wno-error=array-bounds -Wno-error=parentheses -Wno-error=missing-template-keyword")
+  endif()
 endif()
 
 
@@ -188,6 +195,13 @@ message(STATUS "Found OpenCV_LIBS: ${OpenCV_LIBS}")
 
 option(GRANITE_BUILD_GUI "Build Pangolin GUI applications" ON)
 option(GRANITE_BUILD_REALSENSE "Build T265 live VIO examples" OFF)
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  set(GRANITE_BUILD_PI_CAMERA_DEFAULT ON)
+else()
+  set(GRANITE_BUILD_PI_CAMERA_DEFAULT OFF)
+endif()
+option(GRANITE_BUILD_PI_CAMERA "Build the Raspberry Pi 5 B0429 camera and MPU-9250 live VIO example"
+  ${GRANITE_BUILD_PI_CAMERA_DEFAULT})
 add_subdirectory(thirdparty)
 
 
@@ -289,6 +303,14 @@ if(GRANITE_BUILD_REALSENSE)
     RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin
     LIBRARY DESTINATION ${CMAKE_INSTALL_PREFIX}/lib
     ARCHIVE DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
+endif()
+
+if(GRANITE_BUILD_PI_CAMERA)
+  # The live window reuses the device-independent T265 GUI.
+  add_executable(granite_pi_cam_imu_vio src/pi_camera_imu_vio.cpp
+    src/device/pi_camera_imu.cpp src/device/t265_gui.cpp)
+  target_link_libraries(granite_pi_cam_imu_vio granite)
+  install(TARGETS granite_pi_cam_imu_vio RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin)
 endif()
 
 file(GLOB SCRIPTS_TO_INSTALL "${CMAKE_CURRENT_SOURCE_DIR}/scripts/granite_*.py")

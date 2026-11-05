@@ -46,10 +46,12 @@ set_target_properties(opengv PROPERTIES
   DEBUG_POSTFIX "")
 
 # fix opengv: compile options (CMAKE_CXX_FLAGS is overwritten by Opengv)
+# Split the flag string; one quoted option breaks with several passed flags.
+separate_arguments(GRANITE_PASSED_CXX_FLAGS_LIST UNIX_COMMAND "${GRANITE_PASSED_CXX_FLAGS}")
 target_compile_options(opengv PRIVATE
   -Wno-unused-private-field
   -march=${CXX_MARCH}
-  ${GRANITE_PASSED_CXX_FLAGS})
+  ${GRANITE_PASSED_CXX_FLAGS_LIST})
 
 if(GRANITE_BUILD_GUI)
 # TODO: enable once mpark issue is fixed upstream pangolin
@@ -59,6 +61,8 @@ if(GRANITE_BUILD_GUI)
 # fix pangolin: gcc
 if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
   target_compile_options(pangolin PRIVATE "-Wno-implicit-fallthrough")
+  # gcc >= 13 headers no longer include <cstdint> transitively
+  target_compile_options(pangolin PRIVATE "SHELL:-include cstdint")
 endif()
 
 # fix pangolin: macOS
