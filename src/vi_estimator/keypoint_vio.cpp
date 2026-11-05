@@ -184,6 +184,24 @@ void KeypointVioEstimator::initializeFromMonoMap(
   initialize(alignment.gyro_bias, accel_bias);
 }
 
+void KeypointVioEstimator::initializeFromInertialStart(
+    int64_t t_ns, const Sophus::SE3d& T_w_i, const Eigen::Vector3d& vel_w_i,
+    const Eigen::Vector3d& bg, const Eigen::Vector3d& ba,
+    const Eigen::Matrix<double, 15, 15>& prior_H) {
+  initialized = true;
+  T_w_i_init = T_w_i;
+  this_state_t_ns = t_ns;
+  imu_meas[t_ns] = IntegratedImuMeasurement(t_ns, bg, ba);
+  frame_states[t_ns] = PoseVelBiasStateWithLin(t_ns, T_w_i, vel_w_i, bg, ba, true);
+  marg_order.abs_order_map[t_ns] = std::make_pair(0, se3_VEL_BIAS_SIZE);
+  marg_order.total_size = se3_VEL_BIAS_SIZE;
+  marg_order.items = 1;
+  // The state order [p, theta, v, bg, ba] is the one of PoseVelBiasState::applyInc.
+  marg_H = prior_H;
+  marg_b.setZero(se3_VEL_BIAS_SIZE);
+  initialize(bg, ba);
+}
+
 void KeypointVioEstimator::initialize(int64_t t_ns, const Sophus::SE3d& T_w_i,
                                       const Eigen::Vector3d& vel_w_i,
                                       const Eigen::Vector3d& bg,
