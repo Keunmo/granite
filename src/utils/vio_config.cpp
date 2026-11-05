@@ -98,6 +98,24 @@ VioConfig::VioConfig() {
   vio_init_ba_weight = 1e1;
   vio_init_bg_weight = 1e2;
 
+  vio_mono_init_method = "vo_alignment";
+  vio_mono_init_window_time = 2.0;
+  vio_mono_init_excitation_accel_std = 1.0;
+  vio_mono_init_max_still_disparity = 8.7;
+  vio_mono_init_max_tracks = 50;
+  vio_mono_init_num_poses = 6;
+  vio_mono_init_min_rotation_deg = 10.0;
+  vio_mono_init_refine_max_iterations = 50;
+  vio_mono_init_pixel_sigma = 1.0;
+  vio_mono_init_prior_sigma_gyro_bias = 0.05;
+  vio_mono_init_prior_sigma_accel_bias = 0.10;
+  vio_mono_init_covariance_scale_orientation = 10.0;
+  vio_mono_init_covariance_scale_velocity = 1.0;
+  vio_mono_init_covariance_scale_gyro_bias = 10.0;
+  vio_mono_init_covariance_scale_accel_bias = 9.0;
+  vio_mono_init_rest_accel_bias_sigma = 0.03;
+  vio_mono_init_replay_window = false;
+
   mapper_obs_std_dev = 0.25;
   mapper_obs_huber_thresh = 1.5;
   mapper_detection_num_points = 800;
@@ -145,6 +163,16 @@ void VioConfig::load(const std::string& filename) {
 
 namespace cereal {
 
+template <class Archive, class T>
+void optionalNvp(Archive& ar, NameValuePair<T>&& nvp) {
+  try {
+    ar(std::move(nvp));
+  } catch (const cereal::Exception&) {
+    // A missing optional key keeps the default value
+  }
+}
+
+
 template <class Archive>
 void serialize(Archive& ar, granite::VioConfig& config) {
   ar(CEREAL_NVP(config.optical_flow_type));
@@ -184,6 +212,25 @@ void serialize(Archive& ar, granite::VioConfig& config) {
   ar(CEREAL_NVP(config.vio_mono_init_min_parallax));
   ar(CEREAL_NVP(config.vio_init_ba_weight));
   ar(CEREAL_NVP(config.vio_init_bg_weight));
+
+  // Optional: configs written before these options keep their defaults
+  optionalNvp(ar, CEREAL_NVP(config.vio_mono_init_method));
+  optionalNvp(ar, CEREAL_NVP(config.vio_mono_init_window_time));
+  optionalNvp(ar, CEREAL_NVP(config.vio_mono_init_excitation_accel_std));
+  optionalNvp(ar, CEREAL_NVP(config.vio_mono_init_max_still_disparity));
+  optionalNvp(ar, CEREAL_NVP(config.vio_mono_init_max_tracks));
+  optionalNvp(ar, CEREAL_NVP(config.vio_mono_init_num_poses));
+  optionalNvp(ar, CEREAL_NVP(config.vio_mono_init_min_rotation_deg));
+  optionalNvp(ar, CEREAL_NVP(config.vio_mono_init_refine_max_iterations));
+  optionalNvp(ar, CEREAL_NVP(config.vio_mono_init_pixel_sigma));
+  optionalNvp(ar, CEREAL_NVP(config.vio_mono_init_prior_sigma_gyro_bias));
+  optionalNvp(ar, CEREAL_NVP(config.vio_mono_init_prior_sigma_accel_bias));
+  optionalNvp(ar, CEREAL_NVP(config.vio_mono_init_covariance_scale_orientation));
+  optionalNvp(ar, CEREAL_NVP(config.vio_mono_init_covariance_scale_velocity));
+  optionalNvp(ar, CEREAL_NVP(config.vio_mono_init_covariance_scale_gyro_bias));
+  optionalNvp(ar, CEREAL_NVP(config.vio_mono_init_covariance_scale_accel_bias));
+  optionalNvp(ar, CEREAL_NVP(config.vio_mono_init_rest_accel_bias_sigma));
+  optionalNvp(ar, CEREAL_NVP(config.vio_mono_init_replay_window));
 
   ar(CEREAL_NVP(config.mapper_obs_std_dev));
   ar(CEREAL_NVP(config.mapper_obs_huber_thresh));

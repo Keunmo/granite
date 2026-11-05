@@ -98,6 +98,26 @@ struct VioConfig {
   double vio_init_ba_weight;
   double vio_init_bg_weight;
 
+  // Monocular VIO initialization: "vo_alignment" (bootstrap VO aligned to the
+  // IMU) or "inertial" (the visual-inertial initializer ported from openvio)
+  std::string vio_mono_init_method;
+  double vio_mono_init_window_time;
+  double vio_mono_init_excitation_accel_std;
+  double vio_mono_init_max_still_disparity;
+  int vio_mono_init_max_tracks;
+  int vio_mono_init_num_poses;
+  double vio_mono_init_min_rotation_deg;
+  int vio_mono_init_refine_max_iterations;
+  double vio_mono_init_pixel_sigma;
+  double vio_mono_init_prior_sigma_gyro_bias;
+  double vio_mono_init_prior_sigma_accel_bias;
+  double vio_mono_init_covariance_scale_orientation;
+  double vio_mono_init_covariance_scale_velocity;
+  double vio_mono_init_covariance_scale_gyro_bias;
+  double vio_mono_init_covariance_scale_accel_bias;
+  double vio_mono_init_rest_accel_bias_sigma;
+  bool vio_mono_init_replay_window;
+
   double mapper_obs_std_dev;
   double mapper_obs_huber_thresh;
   int mapper_detection_num_points;
