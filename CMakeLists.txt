@@ -224,6 +224,7 @@ add_library(granite SHARED
   src/optical_flow/optical_flow.cpp
   src/vi_estimator/mono_vio.cpp
   src/vi_estimator/mono_vio_alignment.cpp
+  src/vi_estimator/mono_inertial_initializer.cpp
   src/vi_estimator/keypoint_vio.cpp
   src/vi_estimator/keypoint_vio_mono.cpp
   src/vi_estimator/keypoint_vio_linearize.cpp
