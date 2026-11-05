@@ -98,6 +98,14 @@ struct VioConfig {
   double vio_init_ba_weight;
   double vio_init_bg_weight;
 
+  // Mono VIO: accept a visual-inertial alignment only after this many
+  // successive alignments of the same bootstrap map agree (1 accepts the
+  // first one). Agreement: scale ratio and gravity direction within the
+  // tolerances below for every pair in the run.
+  int vio_mono_init_consistent_alignments;
+  double vio_mono_init_consistency_scale;
+  double vio_mono_init_consistency_gravity_deg;
+
   double mapper_obs_std_dev;
   double mapper_obs_huber_thresh;
   int mapper_detection_num_points;

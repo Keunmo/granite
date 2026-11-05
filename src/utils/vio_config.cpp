@@ -98,6 +98,10 @@ VioConfig::VioConfig() {
   vio_init_ba_weight = 1e1;
   vio_init_bg_weight = 1e2;
 
+  vio_mono_init_consistent_alignments = 3;
+  vio_mono_init_consistency_scale = 0.02;
+  vio_mono_init_consistency_gravity_deg = 1.0;
+
   mapper_obs_std_dev = 0.25;
   mapper_obs_huber_thresh = 1.5;
   mapper_detection_num_points = 800;
@@ -145,6 +149,18 @@ void VioConfig::load(const std::string& filename) {
 
 namespace cereal {
 
+template <class Archive, class T>
+void optional_nvp(Archive& ar, const char* name, T& value) {
+  if constexpr (Archive::is_loading::value) {
+    try {
+      ar(cereal::make_nvp(name, value));
+    } catch (const cereal::Exception&) {
+    }
+  } else {
+    ar(cereal::make_nvp(name, value));
+  }
+}
+
 template <class Archive>
 void serialize(Archive& ar, granite::VioConfig& config) {
   ar(CEREAL_NVP(config.optical_flow_type));
@@ -184,6 +200,13 @@ void serialize(Archive& ar, granite::VioConfig& config) {
   ar(CEREAL_NVP(config.vio_mono_init_min_parallax));
   ar(CEREAL_NVP(config.vio_init_ba_weight));
   ar(CEREAL_NVP(config.vio_init_bg_weight));
+  // Newer options: configuration files without them keep the defaults.
+  optional_nvp(ar, "config.vio_mono_init_consistent_alignments",
+               config.vio_mono_init_consistent_alignments);
+  optional_nvp(ar, "config.vio_mono_init_consistency_scale",
+               config.vio_mono_init_consistency_scale);
+  optional_nvp(ar, "config.vio_mono_init_consistency_gravity_deg",
+               config.vio_mono_init_consistency_gravity_deg);
 
   ar(CEREAL_NVP(config.mapper_obs_std_dev));
   ar(CEREAL_NVP(config.mapper_obs_huber_thresh));

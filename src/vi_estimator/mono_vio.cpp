@@ -51,6 +51,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <granite/vi_estimator/mono_vio.h>
 #include <sstream>
+#include <cmath>
 #include <iomanip>
 
 namespace granite {
@@ -103,6 +104,8 @@ void MonoVioEstimator::run(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba)
   uint64_t frames_processed = 0;
   int64_t forwarded_imu_ns = -1;
   bool visual_stopped = false;
+  // Successive successful alignments of the current bootstrap map that agree.
+  std::vector<MonoVioAlignment> agreeing;
   try {
     while (!should_quit) {
       OpticalFlowResult::Ptr frame;
@@ -147,6 +150,7 @@ void MonoVioEstimator::run(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba)
         visual_map = visual_state->map_idx;
         history.clear();
         history[frame->t_ns] = frame;
+        agreeing.clear();
       }
       while (!samples.empty() && samples.front().t_ns < frame->t_ns - 15000000000LL) samples.pop_front();
       while (!history.empty() && history.begin()->first < frame->t_ns - 15000000000LL) history.erase(history.begin());
@@ -160,6 +164,35 @@ void MonoVioEstimator::run(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba)
       }
       const auto alignment = alignMonoVisualInertial(frames, samples, calibration, bg, ba);
       if (!alignment) continue;
+      if (configuration.vio_mono_init_consistent_alignments > 1) {
+        // The noise-only scale std of one alignment (about 0.3 % on the
+        // Unreal city sequence) does not cover bootstrap pose errors or the
+        // unknown accelerometer bias: the scale of the next window, 0.33 s
+        // later, differed by up to 8 %. Most first alignments 2 s after the
+        // motion onset gave a metric state that never recovered. Require that
+        // the estimate stays the same while the window slides.
+        const double cos_tolerance = std::cos(
+            configuration.vio_mono_init_consistency_gravity_deg * M_PI / 180.0);
+        bool agrees = true;
+        for (const auto& previous : agreeing) {
+          const double ratio = alignment->scale / previous.scale;
+          if (std::abs(std::log(ratio)) >
+                  std::log1p(configuration.vio_mono_init_consistency_scale) ||
+              alignment->gravity.normalized().dot(previous.gravity.normalized()) <
+                  cos_tolerance) {
+            agrees = false;
+            break;
+          }
+        }
+        if (!agrees) agreeing.clear();
+        agreeing.push_back(*alignment);
+        std::cout << std::setprecision(6) << "MONO_VIO_ALIGNMENT t_ns=" << frame->t_ns
+                  << " scale=" << alignment->scale << " agreeing=" << agreeing.size()
+                  << std::endl;
+        if (static_cast<int>(agreeing.size()) <
+            configuration.vio_mono_init_consistent_alignments)
+          continue;
+      }
 
       // Stop the bootstrap worker before reading its optimized map.
       bootstrap_vision.push(nullptr);
