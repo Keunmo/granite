@@ -1,0 +1,68 @@
+{
+    "value0": {
+        "T_imu_cam": [
+            {
+                "px": 0.0,
+                "py": 0.0,
+                "pz": 0.0,
+                "qx": 0.0,
+                "qy": 0.0,
+                "qz": 0.0,
+                "qw": 1.0
+            }
+        ],
+        "intrinsics": [
+            {
+                "camera_type": "kb4",
+                "intrinsics": {
+                    "fx": 700.0,
+                    "fy": 700.0,
+                    "cx": 639.5,
+                    "cy": 359.5,
+                    "k1": 0.0,
+                    "k2": 0.0,
+                    "k3": 0.0,
+                    "k4": 0.0
+                }
+            }
+        ],
+        "resolution": [
+            [
+                1280,
+                720
+            ]
+        ],
+        "main_cam_idx": [0],
+        "stereo_pairs": [],
+        "cam_update_rate": 30.0,
+        "vignette": [],
+        "calib_accel_bias": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "calib_gyro_bias": [0.0806, -0.1030, -0.0121, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "imu_update_rate": 200.0,
+        "accel_noise_std": [0.02, 0.02, 0.02],
+        "gyro_noise_std": [0.0005, 0.0005, 0.0005],
+        "accel_bias_std": [0.001, 0.001, 0.001],
+        "gyro_bias_std": [0.0001, 0.0001, 0.0001],
+        "T_mocap_world": {
+            "px": 0.0,
+            "py": 0.0,
+            "pz": 0.0,
+            "qx": 0.0,
+            "qy": 0.0,
+            "qz": 0.0,
+            "qw": 1.0
+        },
+        "T_imu_marker": {
+            "px": 0.0,
+            "py": 0.0,
+            "pz": 0.0,
+            "qx": 0.0,
+            "qy": 0.0,
+            "qz": 0.0,
+            "qw": 1.0
+        },
+        "mocap_time_offset_ns": 0,
+        "mocap_to_imu_offset_ns": 0,
+        "cam_time_offset_ns": 0
+    }
+}

@@ -618,7 +618,19 @@ void CamImuCalib::loadDataset() {
   granite::DatasetIoInterfacePtr dataset_io =
       granite::DatasetIoFactory::getDatasetIo(dataset_type);
 
-  dataset_io->read(dataset_path);
+  // load calibration if exist; its camera count decides how many cameras are
+  // read from the dataset (the dataset reader defaults to 2)
+  {
+    if (!calib_opt) calib_opt.reset(new SplineOptimization<5, double>);
+
+    calib_opt->loadCalib(cache_path);
+  }
+
+  if (calib_opt->calib && !calib_opt->calib->intrinsics.empty()) {
+    dataset_io->read(dataset_path, calib_opt->calib->intrinsics.size());
+  } else {
+    dataset_io->read(dataset_path);
+  }
 
   vio_dataset = dataset_io->get_data();
   setNumCameras(vio_dataset->get_num_cams());
@@ -672,12 +684,7 @@ void CamImuCalib::loadDataset() {
     }
   }
 
-  // load calibration if exist
   {
-    if (!calib_opt) calib_opt.reset(new SplineOptimization<5, double>);
-
-    calib_opt->loadCalib(cache_path);
-
     calib_opt->calib->accel_noise_std.setConstant(imu_noise[0]);
     calib_opt->calib->gyro_noise_std.setConstant(imu_noise[1]);
     calib_opt->calib->accel_bias_std.setConstant(imu_noise[2]);

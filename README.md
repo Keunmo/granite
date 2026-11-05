@@ -36,6 +36,7 @@ NOTE: It is possible to compile the code on Ubuntu 16.04, but you need to instal
 
 ## Usage
 * [Live T265 on Raspberry Pi 4: mono/stereo VO and VIO, half resolution.](doc/T265.md)
+* [Live mono VIO on Raspberry Pi 5 with Arducam B0429 and MPU-9250.](doc/Pi5_B0429_MPU9250.md)
 * [Camera, IMU and Mocap calibration. (TUM-VI, Euroc, UZH-FPV and Kalibr datasets)](doc/Calibration.md)
 * [Visual odometry (no IMU). (MADMAX and KITTI dataset)](doc/Vo.md)
 * [Visual-inertial odometry and mapping. (TUM-VI and Euroc datasets)](doc/VioMapping.md)
