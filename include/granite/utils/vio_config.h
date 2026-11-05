@@ -106,6 +106,22 @@ struct VioConfig {
   double vio_mono_init_consistency_scale;
   double vio_mono_init_consistency_gravity_deg;
 
+  // Mono VIO health monitor and re-initialization. After settle + window
+  // seconds from an initialization, the metric estimator is unhealthy when,
+  // over the last window, the rms correction of the previously published
+  // state exceeds health_rot_deg in rotation while staying below health_pos_m
+  // in translation. Then a new bootstrap runs beside it, and the new metric
+  // estimator takes over with the published position and heading. At most
+  // reinit_max re-initializations (0 disables them).
+  int vio_mono_reinit_max;
+  double vio_mono_health_settle_s;
+  double vio_mono_health_window_s;
+  double vio_mono_health_rot_deg;
+  double vio_mono_health_pos_m;
+  // Also unhealthy: a bias estimate above these norms [m/s^2], [rad/s].
+  double vio_mono_health_max_accel_bias;
+  double vio_mono_health_max_gyro_bias;
+
   double mapper_obs_std_dev;
   double mapper_obs_huber_thresh;
   int mapper_detection_num_points;

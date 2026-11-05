@@ -180,7 +180,7 @@ int main(int argc, char** argv) {
       thr(out_prefix + "_threads.log");
   tum << std::setprecision(19);
   csv << "t_ns,wall_s,x,y,z,qx,qy,qz,qw,vx,vy,vz,bgx,bgy,bgz,bax,bay,baz,support,connected_finite,connected_infinite,"
-         "landmarks,map_idx,prev_corr_rot,prev_corr_pos\n"
+         "landmarks,map_idx,prev_corr_rot,prev_corr_pos,healthy\n"
       << std::setprecision(12);
   size_t states = 0;
   double first_state_wall = -1;
@@ -206,7 +206,7 @@ int main(int argc, char** argv) {
           << ',' << s.bias_gyro.x() << ',' << s.bias_gyro.y() << ',' << s.bias_gyro.z() << ','
           << s.bias_accel.x() << ',' << s.bias_accel.y() << ',' << s.bias_accel.z() << ',' << support << ','
           << r->num_connected_finite_landmarks << ',' << r->num_connected_infinite_landmarks << ','
-          << r->num_landmarks << ',' << r->map_idx << ',' << r->prev_correction_rot << ',' << r->prev_correction_pos << '\n';
+          << r->num_landmarks << ',' << r->map_idx << ',' << r->prev_correction_rot << ',' << r->prev_correction_pos << ',' << r->healthy << '\n';
     }
   };
   bool flow_input_closed = false;

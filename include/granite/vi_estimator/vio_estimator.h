@@ -70,6 +70,10 @@ struct VioStateData {
   size_t num_connected_infinite_landmarks = 0;
   MonoVioSupport mono_vio_support = MonoVioSupport::NOT_APPLICABLE;
 
+  // Mono VIO: false after the health monitor flagged the metric estimator
+  // that produced this state (see MonoVioEstimator).
+  bool healthy = true;
+
   // How much the optimization of this frame moved the previously published
   // state: rotation [rad] and translation [m].
   double prev_correction_rot = std::numeric_limits<double>::quiet_NaN();

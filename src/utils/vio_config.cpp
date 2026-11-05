@@ -102,6 +102,14 @@ VioConfig::VioConfig() {
   vio_mono_init_consistency_scale = 0.02;
   vio_mono_init_consistency_gravity_deg = 1.0;
 
+  vio_mono_reinit_max = 0;
+  vio_mono_health_settle_s = 3.0;
+  vio_mono_health_window_s = 2.0;
+  vio_mono_health_rot_deg = 0.07;
+  vio_mono_health_pos_m = 0.005;
+  vio_mono_health_max_accel_bias = 2.0;
+  vio_mono_health_max_gyro_bias = 0.1;
+
   mapper_obs_std_dev = 0.25;
   mapper_obs_huber_thresh = 1.5;
   mapper_detection_num_points = 800;
@@ -207,6 +215,15 @@ void serialize(Archive& ar, granite::VioConfig& config) {
                config.vio_mono_init_consistency_scale);
   optional_nvp(ar, "config.vio_mono_init_consistency_gravity_deg",
                config.vio_mono_init_consistency_gravity_deg);
+  optional_nvp(ar, "config.vio_mono_reinit_max", config.vio_mono_reinit_max);
+  optional_nvp(ar, "config.vio_mono_health_settle_s", config.vio_mono_health_settle_s);
+  optional_nvp(ar, "config.vio_mono_health_window_s", config.vio_mono_health_window_s);
+  optional_nvp(ar, "config.vio_mono_health_rot_deg", config.vio_mono_health_rot_deg);
+  optional_nvp(ar, "config.vio_mono_health_pos_m", config.vio_mono_health_pos_m);
+  optional_nvp(ar, "config.vio_mono_health_max_accel_bias",
+               config.vio_mono_health_max_accel_bias);
+  optional_nvp(ar, "config.vio_mono_health_max_gyro_bias",
+               config.vio_mono_health_max_gyro_bias);
 
   ar(CEREAL_NVP(config.mapper_obs_std_dev));
   ar(CEREAL_NVP(config.mapper_obs_huber_thresh));

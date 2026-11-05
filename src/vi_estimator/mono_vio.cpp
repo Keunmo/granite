@@ -51,8 +51,15 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <granite/vi_estimator/mono_vio.h>
 #include <sstream>
+#include <chrono>
 #include <cmath>
+#include <deque>
 #include <iomanip>
+#include <limits>
+#include <mutex>
+#include <optional>
+#include <thread>
+#include <tuple>
 
 namespace granite {
 MonoVioEstimator::MonoVioEstimator(const Eigen::Vector3d& gravity,
@@ -82,30 +89,131 @@ void MonoVioEstimator::initialize(const Eigen::Vector3d& bg, const Eigen::Vector
   processing_thread = std::thread([this, bg, ba] { run(bg, ba); });
 }
 
+namespace {
+// One metric estimator and the thread that publishes its states in the output
+// world: T_out_w maps its world to the world of the first estimator (identity
+// for the first one), so a re-initialization does not move the output frame.
+struct MetricRun {
+  std::shared_ptr<KeypointVioEstimator> estimator;
+  tbb::concurrent_bounded_queue<OpticalFlowResult::Ptr> vision;
+  tbb::concurrent_bounded_queue<ImuData::Ptr> imu;
+  tbb::concurrent_bounded_queue<VioStateData::Ptr> states;
+  std::thread publisher;
+  Sophus::SE3d T_out_w;
+  int64_t init_t_ns = 0;
+  // Publish no state after this time (set when a successor takes over).
+  std::atomic<int64_t> publish_until_ns{std::numeric_limits<int64_t>::max()};
+  std::atomic<int64_t> last_seen_ns{-1};
+  std::atomic<bool> finished{false};
+  std::atomic<bool> unhealthy{false};
+  std::mutex mutex;
+  Eigen::aligned_map<int64_t, Sophus::SE3d> published;  // recent output poses
+};
+
+// Rotation about the gravity axis (world z) closest to R.
+Sophus::SO3d yawOnly(const Eigen::Matrix3d& R) {
+  const double yaw = std::atan2(R(1, 0) - R(0, 1), R(0, 0) + R(1, 1));
+  return Sophus::SO3d::rotZ(yaw);
+}
+}  // namespace
+
 void MonoVioEstimator::run(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba) {
   VioConfig bootstrap_config = configuration;
   bootstrap_config.vio_enforce_realtime = false;
   bootstrap_config.vio_max_kfs = std::max(bootstrap_config.vio_max_kfs, 8);
   tbb::concurrent_bounded_queue<OpticalFlowResult::Ptr> bootstrap_vision;
   tbb::concurrent_bounded_queue<VioStateData::Ptr> bootstrap_states;
-  auto visual = std::make_shared<KeypointVoEstimator>(calibration, bootstrap_config);
-  visual->vision_data_queue = &bootstrap_vision;
-  visual->out_state_queue = &bootstrap_states;
-  visual->out_vis_queue = out_vis_queue;
-  visual->initialize(bg, ba);
+  std::shared_ptr<KeypointVoEstimator> visual;
+  auto start_bootstrap = [&] {
+    bootstrap_vision.clear();
+    bootstrap_states.clear();
+    visual = std::make_shared<KeypointVoEstimator>(calibration, bootstrap_config);
+    visual->vision_data_queue = &bootstrap_vision;
+    visual->out_state_queue = &bootstrap_states;
+    // A shadow bootstrap must not close the visualization stream.
+    visual->out_vis_queue = metric_initialized ? nullptr : out_vis_queue;
+    visual->initialize(bg, ba);
+  };
+  start_bootstrap();
 
-  tbb::concurrent_bounded_queue<OpticalFlowResult::Ptr> metric_vision;
-  tbb::concurrent_bounded_queue<ImuData::Ptr> metric_imu;
-  std::shared_ptr<KeypointVioEstimator> metric;
+  std::unique_ptr<MetricRun> metric;
   Eigen::aligned_deque<ImuData> samples;
   Eigen::aligned_map<int64_t, OpticalFlowResult::Ptr> history;
   ImuData::Ptr pending;
   size_t visual_map = 0;
   uint64_t frames_processed = 0;
   int64_t forwarded_imu_ns = -1;
-  bool visual_stopped = false;
+  int reinitializations = 0;
   // Successive successful alignments of the current bootstrap map that agree.
   std::vector<MonoVioAlignment> agreeing;
+
+  const double settle_s = configuration.vio_mono_health_settle_s;
+  const double window_s = configuration.vio_mono_health_window_s;
+  const double rot_limit = configuration.vio_mono_health_rot_deg * M_PI / 180.0;
+  const double pos_limit = configuration.vio_mono_health_pos_m;
+  const double max_ba = configuration.vio_mono_health_max_accel_bias;
+  const double max_bg = configuration.vio_mono_health_max_gyro_bias;
+  auto publish = [this, settle_s, window_s, rot_limit, pos_limit, max_ba, max_bg](MetricRun* run) {
+    std::deque<std::tuple<int64_t, double, double>> recent;
+    VioStateData::Ptr data;
+    while (true) {
+      run->states.pop(data);
+      if (!data) break;
+      const int64_t t = data->state.t_ns;
+      run->last_seen_ns = t;
+      // Health: the optimization of every frame moved the previously
+      // published state by a large rotation but by almost no translation in
+      // the metric states that never recovered (bad initialization before a
+      // near-stop); healthy states move both by a little.
+      if (std::isfinite(data->prev_correction_rot) && std::isfinite(data->prev_correction_pos)) {
+        recent.emplace_back(t, data->prev_correction_rot, data->prev_correction_pos);
+        while (!recent.empty() && std::get<0>(recent.front()) < t - int64_t(window_s * 1e9)) recent.pop_front();
+        if ((t - run->init_t_ns) * 1e-9 >= settle_s + window_s && recent.size() >= 10) {
+          double rot2 = 0, pos2 = 0;
+          for (const auto& r : recent) {
+            rot2 += std::get<1>(r) * std::get<1>(r);
+            pos2 += std::get<2>(r) * std::get<2>(r);
+          }
+          const double rot = std::sqrt(rot2 / recent.size()), pos = std::sqrt(pos2 / recent.size());
+          if (rot > rot_limit && pos < pos_limit && !run->unhealthy) {
+            run->unhealthy = true;
+            std::cout << std::setprecision(6) << "MONO_VIO_UNHEALTHY t_ns=" << t << " correction_rot_deg="
+                      << rot * 180 / M_PI << " correction_pos_m=" << pos << std::endl;
+          }
+        }
+      }
+      // Plausibility: the bias estimates of a diverged estimator grow far
+      // beyond any IMU bias (a Cam0 run reached |ba| = 6 m/s^2, |bg| = 0.13
+      // rad/s at a true 0.45 m/s^2, 0.02 rad/s).
+      if (!run->unhealthy && (t - run->init_t_ns) * 1e-9 >= settle_s &&
+          (data->state.bias_accel.norm() > max_ba || data->state.bias_gyro.norm() > max_bg)) {
+        run->unhealthy = true;
+        std::cout << std::setprecision(6) << "MONO_VIO_UNHEALTHY t_ns=" << t
+                  << " bias_accel=" << data->state.bias_accel.norm()
+                  << " bias_gyro=" << data->state.bias_gyro.norm() << std::endl;
+      }
+      data->healthy = !run->unhealthy;
+      if (t > run->publish_until_ns) continue;
+      if (!run->T_out_w.matrix().isIdentity(0)) {
+        data->state.T_w_i = run->T_out_w * data->state.T_w_i;
+        data->state.vel_w_i = run->T_out_w.so3() * data->state.vel_w_i;
+      }
+      {
+        std::lock_guard<std::mutex> lock(run->mutex);
+        run->published[t] = data->state.T_w_i;
+        while (run->published.size() > 64) run->published.erase(run->published.begin());
+      }
+      if (out_state_queue) out_state_queue->push(data);
+    }
+    run->finished = true;
+  };
+  auto stop_metric = [](MetricRun* run) {
+    run->vision.push(nullptr);
+    run->imu.push(nullptr);
+    run->estimator->join();
+    if (run->publisher.joinable()) run->publisher.join();
+  };
+
   try {
     while (!should_quit) {
       OpticalFlowResult::Ptr frame;
@@ -127,18 +235,29 @@ void MonoVioEstimator::run(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba)
         pending = next;
         samples.push_back(*pending);
         if (metric && pending->t_ns > forwarded_imu_ns) {
-          metric_imu.push(std::make_shared<ImuData>(*pending));
+          metric->imu.push(std::make_shared<ImuData>(*pending));
           forwarded_imu_ns = pending->t_ns;
         }
       }
       if (imu_finished) break;
       ++frames_processed;
       if (metric) {
-        metric_vision.push(frame);
-        tracking_state = metric->tracking_state.load();
+        metric->vision.push(frame);
+        tracking_state = metric->estimator->tracking_state.load();
         last_processed_t_ns = frame->t_ns;
-        while (!samples.empty() && samples.front().t_ns < frame->t_ns - 1000000000LL) samples.pop_front();
-        continue;
+        if (!visual && metric->unhealthy && reinitializations < configuration.vio_mono_reinit_max) {
+          // Keep publishing the current estimator and bootstrap a successor.
+          ++reinitializations;
+          std::cout << "MONO_VIO_REINIT_START t_ns=" << frame->t_ns << std::endl;
+          start_bootstrap();
+          visual_map = 0;
+          history.clear();
+          agreeing.clear();
+        }
+        if (!visual) {
+          while (!samples.empty() && samples.front().t_ns < frame->t_ns - 1000000000LL) samples.pop_front();
+          continue;
+        }
       }
       history[frame->t_ns] = frame;
       bootstrap_vision.push(frame);
@@ -197,46 +316,71 @@ void MonoVioEstimator::run(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba)
       // Stop the bootstrap worker before reading its optimized map.
       bootstrap_vision.push(nullptr);
       visual->join();
-      visual_stopped = true;
-      metric = std::make_shared<KeypointVioEstimator>(gravity, calibration, configuration);
-      metric->vision_data_queue = &metric_vision;
-      metric->imu_data_queue = &metric_imu;
-      metric->out_state_queue = out_state_queue;
-      metric->out_vis_queue = out_vis_queue;
-      metric->out_marg_queue = out_marg_queue;
-      metric_imu.push(std::make_shared<ImuData>(*pending));
+      auto next = std::make_unique<MetricRun>();
+      next->estimator = std::make_shared<KeypointVioEstimator>(gravity, calibration, configuration);
+      next->estimator->vision_data_queue = &next->vision;
+      next->estimator->imu_data_queue = &next->imu;
+      next->estimator->out_state_queue = &next->states;
+      next->imu.push(std::make_shared<ImuData>(*pending));
+      next->estimator->initializeFromMonoMap(*visual, *alignment, frames, history, ba);
+      next->init_t_ns = frames.back().t_ns;
+      if (metric) {
+        // Hand over at the newest frame. Wait until the current estimator has
+        // published it, then express the successor in the output world: keep
+        // the published position and heading (gravity fixes roll and pitch).
+        metric->publish_until_ns = next->init_t_ns;
+        const auto t0 = std::chrono::steady_clock::now();
+        while (metric->last_seen_ns < next->init_t_ns && !metric->finished &&
+               std::chrono::steady_clock::now() - t0 < std::chrono::seconds(10))
+          std::this_thread::sleep_for(std::chrono::microseconds(200));
+        std::optional<Sophus::SE3d> anchor;
+        {
+          std::lock_guard<std::mutex> lock(metric->mutex);
+          auto found = metric->published.upper_bound(next->init_t_ns);
+          if (found != metric->published.begin()) anchor = std::prev(found)->second;
+        }
+        const Sophus::SE3d T_w_i = next->estimator->getT_w_i_init();
+        if (anchor) {
+          const Sophus::SO3d R = yawOnly((anchor->so3() * T_w_i.so3().inverse()).matrix());
+          next->T_out_w = Sophus::SE3d(R, anchor->translation() - R * T_w_i.translation());
+        }
+        stop_metric(metric.get());
+        std::cout << std::setprecision(6) << "MONO_VIO_REINITIALIZED t_ns=" << next->init_t_ns
+                  << " scale=" << alignment->scale << std::endl;
+      } else {
+        next->estimator->out_vis_queue = out_vis_queue;
+        next->estimator->out_marg_queue = out_marg_queue;
+        initial_pose = next->estimator->getT_w_i_init();
+        std::ostringstream initialization;
+        initialization << std::setprecision(6)
+                       << "MONO_VIO_INITIALIZED scale=" << alignment->scale
+                       << " gravity=" << alignment->gravity.transpose()
+                       << " gyro_bias=" << alignment->gyro_bias.transpose()
+                       << " residual=" << alignment->residual
+                       << " relative_scale_std=" << alignment->relative_scale_std;
+        std::cout << initialization.str() << std::endl;
+      }
       forwarded_imu_ns = pending->t_ns;
-      metric->initializeFromMonoMap(*visual, *alignment, frames, history, ba);
-      initial_pose = metric->getT_w_i_init();
+      metric = std::move(next);
+      MetricRun* run = metric.get();
+      metric->publisher = std::thread([publish, run] { publish(run); });
       metric_scale = alignment->scale;
       metric_initialized = true;
       tracking_state = TrackingState::TRACKING;
-      std::ostringstream initialization;
-      initialization << std::setprecision(6)
-                     << "MONO_VIO_INITIALIZED scale=" << alignment->scale
-                     << " gravity=" << alignment->gravity.transpose()
-                     << " gyro_bias=" << alignment->gyro_bias.transpose()
-                     << " residual=" << alignment->residual
-                     << " relative_scale_std=" << alignment->relative_scale_std;
-      std::cout << initialization.str() << std::endl;
       visual.reset();
       history.clear();
+      agreeing.clear();
     }
   } catch (const tbb::user_abort&) {
   }
-  if (!visual_stopped) {
+  if (visual) {
     bootstrap_vision.push(nullptr);
     visual->join();
   }
-  if (metric) {
-    metric_vision.push(nullptr);
-    metric_imu.push(nullptr);
-    metric->join();
-  } else {
-    if (out_state_queue) out_state_queue->push(nullptr);
-    if (out_vis_queue) out_vis_queue->push(nullptr);
-    if (out_marg_queue) out_marg_queue->push(nullptr);
-  }
+  if (metric) stop_metric(metric.get());
+  if (out_state_queue) out_state_queue->push(nullptr);
+  if (out_vis_queue && !metric) out_vis_queue->push(nullptr);
+  if (out_marg_queue && !metric) out_marg_queue->push(nullptr);
   finished = true;
 }
 }  // namespace granite
