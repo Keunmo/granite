@@ -81,6 +81,12 @@ struct MonoInertialInitOptions {
   double covariance_scale_accel_bias = 9.0;
   double rest_accel_bias_sigma = 0.03;  // Accel bias along gravity from a start at rest [m/s^2] (0: off)
   bool replay_window = false;           // Moving start: start at the oldest pose and replay the window
+  // Start at rest (not in openvio): sigma of the horizontal accel bias, coupled with the tilt it hides [m/s^2]
+  // (0: the independent sigmas of openvio only)
+  double rest_tilt_bias_sigma = 0.0;
+  // Moving start (not in openvio): reject a start whose speed sigma (refined covariance, before the inflation) is
+  // above this fraction of the speed. Near-constant velocity leaves the metric scale unobservable. (0: no check)
+  double max_relative_speed_sigma = 0.05;
   Eigen::Vector3d gyro_bias_prior = Eigen::Vector3d::Zero();   // Bias linearization point and prior mean
   Eigen::Vector3d accel_bias_prior = Eigen::Vector3d::Zero();
 
@@ -108,6 +114,7 @@ struct MonoInertialInitResult {
   int num_tracks = 0, num_valid_tracks = 0, num_poses = 0;
   double rotation_deg = -1;
   double linear_speed = -1;  // |v| of the linear solution at the oldest pose
+  double relative_speed_sigma = -1;  // Moving: speed sigma / speed of the refined start state
   int num_refined_features = 0, num_unprojected_observations = 0, refine_iterations = 0;
   double refine_initial_cost = 0, refine_final_cost = 0;
   bool rest_bias_applied = false;

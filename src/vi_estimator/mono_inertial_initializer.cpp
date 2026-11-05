@@ -207,6 +207,8 @@ MonoInertialInitOptions MonoInertialInitOptions::fromConfig(const VioConfig& con
   o.covariance_scale_accel_bias = config.vio_mono_init_covariance_scale_accel_bias;
   o.rest_accel_bias_sigma = config.vio_mono_init_rest_accel_bias_sigma;
   o.replay_window = config.vio_mono_init_replay_window;
+  o.rest_tilt_bias_sigma = config.vio_mono_init_rest_tilt_bias_sigma;
+  o.max_relative_speed_sigma = config.vio_mono_init_max_relative_speed_sigma;
   return o;
 }
 
@@ -219,7 +221,8 @@ std::string MonoInertialInitResult::summary() const {
   if (method == "at rest") s << " accel_std_old=" << accel_std_old << " accel_std_new=" << accel_std_new;
   if (method == "moving")
     s << " valid_tracks=" << num_valid_tracks << " poses=" << num_poses << " rotation_deg=" << rotation_deg
-      << " linear_speed=" << linear_speed << " refined_features=" << num_refined_features
+      << " linear_speed=" << linear_speed << " relative_speed_sigma=" << relative_speed_sigma
+      << " refined_features=" << num_refined_features
       << " unprojected=" << num_unprojected_observations << " iterations=" << refine_iterations
       << " cost=" << refine_initial_cost << "->" << refine_final_cost;
   if (success) {
@@ -435,6 +438,19 @@ bool MonoInertialInitializer::startAtRest(MonoInertialInitResult& result) const 
   const double sigma[5] = {0.05, 0.02, 0.01, 0.02, 0.02};
   result.covariance.setZero();
   for (int k = 0; k < 5; ++k) result.covariance.block<3, 3>(3 * k, 3 * k) = sigma[k] * sigma[k] * Eigen::Matrix3d::Identity();
+  if (options.rest_tilt_bias_sigma > 0.0) {
+    // Not in openvio: at rest a horizontal accel bias db (IMU frame, orthogonal to the specific force) and the tilt
+    // dtheta = [e_z]x R_w_i db / G give the same specific force. The pair is one unobservable direction per axis:
+    // its covariance is sigma^2 G G^T with G = [dtheta / ds; db / ds].
+    const Eigen::Vector3d f = a_older.normalized();
+    Eigen::Matrix<double, 3, 2> B;
+    B.col(0) = f.unitOrthogonal();
+    B.col(1) = f.cross(B.col(0));
+    Eigen::Matrix<double, 15, 2> G = Eigen::Matrix<double, 15, 2>::Zero();
+    G.block<3, 2>(3, 0) = Sophus::SO3d::hat(Eigen::Vector3d::UnitZ()) * R_w_i.matrix() * B / gravity_magnitude;
+    G.block<3, 2>(12, 0) = B;
+    result.covariance += options.rest_tilt_bias_sigma * options.rest_tilt_bias_sigma * G * G.transpose();
+  }
   return true;
 }
 
@@ -846,6 +862,17 @@ bool MonoInertialInitializer::startMoving(MonoInertialInitResult& result) {
   if (!P.allFinite()) {
     result.reason = "covariance recovery failed";
     return false;
+  }
+  {
+    const Eigen::Vector3d v = refinement.states[chosen].vel_w_i;
+    const double speed = v.norm();
+    const Eigen::Vector3d u = speed > 1e-6 ? Eigen::Vector3d(v / speed) : Eigen::Vector3d::UnitX();
+    const double sigma = std::sqrt(std::max(0.0, u.dot(P.block<3, 3>(6, 6) * u)));
+    result.relative_speed_sigma = sigma / std::max(speed, 1e-6);
+    if (options.max_relative_speed_sigma > 0.0 && result.relative_speed_sigma > options.max_relative_speed_sigma) {
+      result.reason = "speed not observable (relative sigma " + std::to_string(result.relative_speed_sigma) + ")";
+      return false;
+    }
   }
   P.block<3, 3>(3, 3) *= options.covariance_scale_orientation;
   P.block<3, 3>(6, 6) *= options.covariance_scale_velocity;

@@ -117,6 +117,8 @@ struct VioConfig {
   double vio_mono_init_covariance_scale_accel_bias;
   double vio_mono_init_rest_accel_bias_sigma;
   bool vio_mono_init_replay_window;
+  double vio_mono_init_rest_tilt_bias_sigma;
+  double vio_mono_init_max_relative_speed_sigma;
 
   double mapper_obs_std_dev;
   double mapper_obs_huber_thresh;
