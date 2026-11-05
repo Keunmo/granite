@@ -98,9 +98,9 @@ VioConfig::VioConfig() {
   vio_init_ba_weight = 1e1;
   vio_init_bg_weight = 1e2;
 
-  vio_mono_init_consistent_alignments = 3;
-  vio_mono_init_consistency_scale = 0.02;
-  vio_mono_init_consistency_gravity_deg = 1.0;
+  vio_mono_init_consistent_alignments = 2;
+  vio_mono_init_consistency_scale = 0.03;
+  vio_mono_init_consistency_gravity_deg = 1.5;
 
   vio_mono_reinit_max = 0;
   vio_mono_health_settle_s = 3.0;
