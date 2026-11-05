@@ -72,6 +72,8 @@ class MonoVioEstimator : public VioEstimatorBase {
 
  private:
   void run(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba);
+  // Initialization by the visual-inertial initializer (vio_mono_init_method "inertial")
+  void runInertial(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba);
   Eigen::Vector3d gravity;
   Calibration<double> calibration;
   VioConfig configuration;

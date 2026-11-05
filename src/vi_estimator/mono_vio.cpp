@@ -50,6 +50,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
 #include <granite/vi_estimator/mono_vio.h>
+#include <granite/vi_estimator/mono_inertial_initializer.h>
 #include <sstream>
 #include <iomanip>
 
@@ -59,6 +60,10 @@ MonoVioEstimator::MonoVioEstimator(const Eigen::Vector3d& gravity,
     : gravity(gravity), calibration(calibration), configuration(configuration) {
   if (calibration.intrinsics.size() != 1 || calibration.T_i_c.size() != 1) {
     throw std::invalid_argument("Mono VIO needs exactly one calibrated camera");
+  }
+  if (configuration.vio_mono_init_method != "vo_alignment" &&
+      configuration.vio_mono_init_method != "inertial") {
+    throw std::invalid_argument("vio_mono_init_method must be vo_alignment or inertial");
   }
 }
 MonoVioEstimator::~MonoVioEstimator() { join(); }
@@ -82,6 +87,10 @@ void MonoVioEstimator::initialize(const Eigen::Vector3d& bg, const Eigen::Vector
 }
 
 void MonoVioEstimator::run(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba) {
+  if (configuration.vio_mono_init_method == "inertial") {
+    runInertial(bg, ba);
+    return;
+  }
   VioConfig bootstrap_config = configuration;
   bootstrap_config.vio_enforce_realtime = false;
   bootstrap_config.vio_max_kfs = std::max(bootstrap_config.vio_max_kfs, 8);
@@ -194,6 +203,118 @@ void MonoVioEstimator::run(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba)
   if (!visual_stopped) {
     bootstrap_vision.push(nullptr);
     visual->join();
+  }
+  if (metric) {
+    metric_vision.push(nullptr);
+    metric_imu.push(nullptr);
+    metric->join();
+  } else {
+    if (out_state_queue) out_state_queue->push(nullptr);
+    if (out_vis_queue) out_vis_queue->push(nullptr);
+    if (out_marg_queue) out_marg_queue->push(nullptr);
+  }
+  finished = true;
+}
+
+void MonoVioEstimator::runInertial(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba) {
+  MonoInertialInitOptions options = MonoInertialInitOptions::fromConfig(configuration);
+  options.gyro_bias_prior = bg;
+  options.accel_bias_prior = ba;
+  MonoInertialInitializer initializer(options, calibration, gravity);
+  tbb::concurrent_bounded_queue<OpticalFlowResult::Ptr> metric_vision;
+  tbb::concurrent_bounded_queue<ImuData::Ptr> metric_imu;
+  std::shared_ptr<KeypointVioEstimator> metric;
+  Eigen::aligned_deque<ImuData> samples;  // Raw samples (the metric VIO calibrates them itself)
+  Eigen::aligned_map<int64_t, OpticalFlowResult::Ptr> history;
+  ImuData::Ptr pending;
+  std::string last_reason;
+  const int64_t keep_ns = static_cast<int64_t>((options.window_time + 1.0) * 1e9);
+  try {
+    while (!should_quit) {
+      OpticalFlowResult::Ptr frame;
+      vision_data_queue->pop(frame);
+      if (!frame) break;
+      if (configuration.vio_enforce_realtime) {
+        OpticalFlowResult::Ptr newer;
+        while (vision_data_queue->try_pop(newer)) {
+          if (!newer) { frame.reset(); break; }
+          frame = newer;
+        }
+        if (!frame) break;
+      }
+      bool imu_finished = false;
+      while (!pending || pending->t_ns <= frame->t_ns) {
+        ImuData::Ptr next;
+        imu_data_queue->pop(next);
+        if (!next) { imu_finished = true; break; }
+        pending = next;
+        if (metric) {
+          metric_imu.push(std::make_shared<ImuData>(*pending));
+        } else {
+          samples.push_back(*pending);
+          ImuData calibrated = *pending;
+          calibrated.accel = calibration.calib_accel_bias.getCalibrated(calibrated.accel);
+          calibrated.gyro = calibration.calib_gyro_bias.getCalibrated(calibrated.gyro);
+          initializer.addImu(calibrated);
+        }
+      }
+      if (imu_finished) break;
+      last_processed_t_ns = frame->t_ns;
+      if (metric) {
+        metric_vision.push(frame);
+        tracking_state = metric->tracking_state.load();
+        continue;
+      }
+      history[frame->t_ns] = frame;
+      while (!history.empty() && history.begin()->first < frame->t_ns - keep_ns) history.erase(history.begin());
+      while (!samples.empty() && samples.front().t_ns < frame->t_ns - keep_ns) samples.pop_front();
+      initializer.addFrame(*frame);
+      const MonoInertialInitResult result = initializer.tryInitialize();
+      if (!result.success) {
+        if (!result.method.empty() && result.reason != last_reason) {
+          std::cout << "MONO_INIT_TRY " << result.summary() << std::endl;
+          last_reason = result.reason;
+        }
+        continue;
+      }
+
+      // Prior of the start state: the initializer's information, with Granite's
+      // gauge weight on position and yaw (unobservable in VIO).
+      Eigen::Matrix<double, 15, 15> information =
+          result.covariance.ldlt().solve(Eigen::Matrix<double, 15, 15>::Identity());
+      for (int i : {0, 1, 2, 5}) {
+        information.row(i).setZero();
+        information.col(i).setZero();
+        information(i, i) = configuration.vio_init_pose_weight;
+      }
+      information = 0.5 * (information + information.transpose()).eval();
+      if (!information.allFinite()) {
+        std::cout << "MONO_INIT_TRY prior not finite" << std::endl;
+        continue;
+      }
+      metric = std::make_shared<KeypointVioEstimator>(gravity, calibration, configuration);
+      metric->vision_data_queue = &metric_vision;
+      metric->imu_data_queue = &metric_imu;
+      metric->out_state_queue = out_state_queue;
+      metric->out_vis_queue = out_vis_queue;
+      metric->out_marg_queue = out_marg_queue;
+      // IMU from the last sample at or before the start state, then the images
+      // from the start state on (replayed from the history)
+      size_t first = 0;
+      while (first + 1 < samples.size() && samples[first + 1].t_ns <= result.t_ns) ++first;
+      for (size_t k = first; k < samples.size(); ++k) metric_imu.push(std::make_shared<ImuData>(samples[k]));
+      metric->initializeFromInertialStart(result.t_ns, result.T_w_i, result.vel_w_i, result.bias_gyro,
+                                          result.bias_accel, information);
+      for (auto it = history.lower_bound(result.t_ns); it != history.end(); ++it) metric_vision.push(it->second);
+      initial_pose = result.T_w_i;
+      metric_scale = 1.0;
+      metric_initialized = true;
+      tracking_state = TrackingState::TRACKING;
+      std::cout << "MONO_VIO_INITIALIZED init=inertial " << result.summary() << std::endl;
+      history.clear();
+      samples.clear();
+    }
+  } catch (const tbb::user_abort&) {
   }
   if (metric) {
     metric_vision.push(nullptr);
