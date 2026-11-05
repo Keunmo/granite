@@ -122,6 +122,11 @@ struct VioConfig {
   double vio_mono_health_max_accel_bias;
   double vio_mono_health_max_gyro_bias;
 
+  // Sum the bundle adjustment linearization in a fixed order
+  // (tbb::parallel_deterministic_reduce), so that the result does not depend
+  // on the number of TBB threads or on their timing. About 7 % slower.
+  bool vio_use_deterministic;
+
   double mapper_obs_std_dev;
   double mapper_obs_huber_thresh;
   int mapper_detection_num_points;

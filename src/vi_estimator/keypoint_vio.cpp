@@ -986,10 +986,19 @@ void KeypointVioEstimator::optimize(
                                                se3_SIZE>
           lopt(aom);
 
-      tbb::blocked_range<Eigen::aligned_vector<RelLinData<se3_SIZE>>::iterator>
-          range(rld_vec.begin(), rld_vec.end());
-
-      tbb::parallel_reduce(range, lopt);
+      if (config.vio_use_deterministic) {
+        // Fixed split and fixed order of the joins: grain 4 keeps the cost of
+        // the extra splits small.
+        tbb::blocked_range<
+            Eigen::aligned_vector<RelLinData<se3_SIZE>>::iterator>
+            range(rld_vec.begin(), rld_vec.end(), 4);
+        tbb::parallel_deterministic_reduce(range, lopt);
+      } else {
+        tbb::blocked_range<
+            Eigen::aligned_vector<RelLinData<se3_SIZE>>::iterator>
+            range(rld_vec.begin(), rld_vec.end());
+        tbb::parallel_reduce(range, lopt);
+      }
 
       if (calib.intrinsics.size() == 1 &&
           iter == 0)

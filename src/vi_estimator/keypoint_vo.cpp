@@ -1161,10 +1161,19 @@ void KeypointVoEstimator::optimize(std::map<int64_t, int>& num_points_connected,
                                                se3_SIZE>
           lopt(optim_order);
 
-      tbb::blocked_range<Eigen::aligned_vector<RelLinData<se3_SIZE>>::iterator>
-          range(rld_vec.begin(), rld_vec.end());
-
-      tbb::parallel_reduce(range, lopt);
+      if (config.vio_use_deterministic) {
+        // Fixed split and fixed order of the joins: grain 4 keeps the cost of
+        // the extra splits small.
+        tbb::blocked_range<
+            Eigen::aligned_vector<RelLinData<se3_SIZE>>::iterator>
+            range(rld_vec.begin(), rld_vec.end(), 4);
+        tbb::parallel_deterministic_reduce(range, lopt);
+      } else {
+        tbb::blocked_range<
+            Eigen::aligned_vector<RelLinData<se3_SIZE>>::iterator>
+            range(rld_vec.begin(), rld_vec.end());
+        tbb::parallel_reduce(range, lopt);
+      }
 
       double rel_pose_constraint_error = 0;
       linearizeRelTranslationConstraints(

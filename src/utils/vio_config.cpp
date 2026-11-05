@@ -110,6 +110,8 @@ VioConfig::VioConfig() {
   vio_mono_health_max_accel_bias = 2.0;
   vio_mono_health_max_gyro_bias = 0.1;
 
+  vio_use_deterministic = false;
+
   mapper_obs_std_dev = 0.25;
   mapper_obs_huber_thresh = 1.5;
   mapper_detection_num_points = 800;
@@ -224,6 +226,7 @@ void serialize(Archive& ar, granite::VioConfig& config) {
                config.vio_mono_health_max_accel_bias);
   optional_nvp(ar, "config.vio_mono_health_max_gyro_bias",
                config.vio_mono_health_max_gyro_bias);
+  optional_nvp(ar, "config.vio_use_deterministic", config.vio_use_deterministic);
 
   ar(CEREAL_NVP(config.mapper_obs_std_dev));
   ar(CEREAL_NVP(config.mapper_obs_huber_thresh));
