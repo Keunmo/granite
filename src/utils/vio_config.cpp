@@ -112,6 +112,26 @@ VioConfig::VioConfig() {
 
   vio_use_deterministic = false;
 
+  vio_mono_init_method = "vo_alignment";
+  vio_mono_init_window_time = 2.0;
+  vio_mono_init_excitation_accel_std = 1.0;
+  vio_mono_init_max_still_disparity = 8.7;
+  vio_mono_init_max_tracks = 50;
+  vio_mono_init_num_poses = 6;
+  vio_mono_init_min_rotation_deg = 10.0;
+  vio_mono_init_refine_max_iterations = 50;
+  vio_mono_init_pixel_sigma = 1.0;
+  vio_mono_init_prior_sigma_gyro_bias = 0.05;
+  vio_mono_init_prior_sigma_accel_bias = 0.10;
+  vio_mono_init_covariance_scale_orientation = 10.0;
+  vio_mono_init_covariance_scale_velocity = 1.0;
+  vio_mono_init_covariance_scale_gyro_bias = 10.0;
+  vio_mono_init_covariance_scale_accel_bias = 9.0;
+  vio_mono_init_rest_accel_bias_sigma = 0.03;
+  vio_mono_init_replay_window = false;
+  vio_mono_init_rest_tilt_bias_sigma = 0.0;
+  vio_mono_init_max_relative_speed_sigma = 0.05;
+
   mapper_obs_std_dev = 0.25;
   mapper_obs_huber_thresh = 1.5;
   mapper_detection_num_points = 800;
@@ -227,6 +247,27 @@ void serialize(Archive& ar, granite::VioConfig& config) {
   optional_nvp(ar, "config.vio_mono_health_max_gyro_bias",
                config.vio_mono_health_max_gyro_bias);
   optional_nvp(ar, "config.vio_use_deterministic", config.vio_use_deterministic);
+
+  // Optional: configs written before these options keep their defaults
+  optional_nvp(ar, "config.vio_mono_init_method", config.vio_mono_init_method);
+  optional_nvp(ar, "config.vio_mono_init_window_time", config.vio_mono_init_window_time);
+  optional_nvp(ar, "config.vio_mono_init_excitation_accel_std", config.vio_mono_init_excitation_accel_std);
+  optional_nvp(ar, "config.vio_mono_init_max_still_disparity", config.vio_mono_init_max_still_disparity);
+  optional_nvp(ar, "config.vio_mono_init_max_tracks", config.vio_mono_init_max_tracks);
+  optional_nvp(ar, "config.vio_mono_init_num_poses", config.vio_mono_init_num_poses);
+  optional_nvp(ar, "config.vio_mono_init_min_rotation_deg", config.vio_mono_init_min_rotation_deg);
+  optional_nvp(ar, "config.vio_mono_init_refine_max_iterations", config.vio_mono_init_refine_max_iterations);
+  optional_nvp(ar, "config.vio_mono_init_pixel_sigma", config.vio_mono_init_pixel_sigma);
+  optional_nvp(ar, "config.vio_mono_init_prior_sigma_gyro_bias", config.vio_mono_init_prior_sigma_gyro_bias);
+  optional_nvp(ar, "config.vio_mono_init_prior_sigma_accel_bias", config.vio_mono_init_prior_sigma_accel_bias);
+  optional_nvp(ar, "config.vio_mono_init_covariance_scale_orientation", config.vio_mono_init_covariance_scale_orientation);
+  optional_nvp(ar, "config.vio_mono_init_covariance_scale_velocity", config.vio_mono_init_covariance_scale_velocity);
+  optional_nvp(ar, "config.vio_mono_init_covariance_scale_gyro_bias", config.vio_mono_init_covariance_scale_gyro_bias);
+  optional_nvp(ar, "config.vio_mono_init_covariance_scale_accel_bias", config.vio_mono_init_covariance_scale_accel_bias);
+  optional_nvp(ar, "config.vio_mono_init_rest_accel_bias_sigma", config.vio_mono_init_rest_accel_bias_sigma);
+  optional_nvp(ar, "config.vio_mono_init_replay_window", config.vio_mono_init_replay_window);
+  optional_nvp(ar, "config.vio_mono_init_rest_tilt_bias_sigma", config.vio_mono_init_rest_tilt_bias_sigma);
+  optional_nvp(ar, "config.vio_mono_init_max_relative_speed_sigma", config.vio_mono_init_max_relative_speed_sigma);
 
   ar(CEREAL_NVP(config.mapper_obs_std_dev));
   ar(CEREAL_NVP(config.mapper_obs_huber_thresh));

@@ -98,6 +98,12 @@ class KeypointVioEstimator : public VioEstimatorBase,
       const Eigen::aligned_map<int64_t, OpticalFlowResult::Ptr>& history,
       const Eigen::Vector3d& accel_bias);
 
+  // Start at a metric state from the visual-inertial initializer with an
+  // empty map; prior_H is the information of [p, theta, v, bg, ba] at t_ns.
+  void initializeFromInertialStart(int64_t t_ns, const Sophus::SE3d& T_w_i,
+      const Eigen::Vector3d& vel_w_i, const Eigen::Vector3d& bg,
+      const Eigen::Vector3d& ba, const Eigen::Matrix<double, 15, 15>& prior_H);
+
   virtual ~KeypointVioEstimator() { join(); }
 
   void addIMUToQueue(const ImuData::Ptr& data);
