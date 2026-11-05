@@ -70,6 +70,11 @@ struct VioStateData {
   size_t num_connected_infinite_landmarks = 0;
   MonoVioSupport mono_vio_support = MonoVioSupport::NOT_APPLICABLE;
 
+  // How much the optimization of this frame moved the previously published
+  // state: rotation [rad] and translation [m].
+  double prev_correction_rot = std::numeric_limits<double>::quiet_NaN();
+  double prev_correction_pos = std::numeric_limits<double>::quiet_NaN();
+
   double scale_variance = std::numeric_limits<double>::quiet_NaN();
   double drift_variance = std::numeric_limits<double>::quiet_NaN();
 

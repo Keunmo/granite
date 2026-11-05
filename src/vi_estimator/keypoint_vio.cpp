@@ -52,6 +52,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <granite/utils/assert.h>
 #include <granite/vi_estimator/keypoint_vio.h>
 
+#include <optional>
+
 #include <granite/optimization/accumulator.h>
 #include <granite/vi_estimator/keypoint_vo.h>
 #include <granite/vi_estimator/mono_vio_alignment.h>
@@ -524,8 +526,27 @@ bool KeypointVioEstimator::measure(const OpticalFlowResult::Ptr& opt_flow_meas,
   }
 
   if (calib.intrinsics.size() == 1) updateMonoSupport(opt_flow_meas, num_points_connected);
+  // The previous state was already published. Measure how much the
+  // optimization of this frame moves it (a health signal of the estimator).
+  std::optional<Sophus::SE3d> published_prev;
+  {
+    const auto prev_state = frame_states.find(prev_state_t_ns);
+    if (prev_state_t_ns != this_state_t_ns && prev_state != frame_states.end())
+      published_prev = prev_state->second.getState().T_w_i;
+  }
   optimize(num_points_connected);
   if (calib.intrinsics.size() == 1) updateMonoSupport(opt_flow_meas, num_points_connected);
+  double prev_correction_rot = std::numeric_limits<double>::quiet_NaN();
+  double prev_correction_pos = std::numeric_limits<double>::quiet_NaN();
+  if (published_prev) {
+    const auto prev_state = frame_states.find(prev_state_t_ns);
+    if (prev_state != frame_states.end()) {
+      const Sophus::SE3d delta =
+          published_prev->inverse() * prev_state->second.getState().T_w_i;
+      prev_correction_rot = delta.so3().log().norm();
+      prev_correction_pos = delta.translation().norm();
+    }
+  }
   marginalize(num_points_connected);
 
   if (out_state_queue) {
@@ -536,6 +557,8 @@ bool KeypointVioEstimator::measure(const OpticalFlowResult::Ptr& opt_flow_meas,
     data->state = PoseVelBiasState(p.getState());
 
     data->map_idx = 0;
+    data->prev_correction_rot = prev_correction_rot;
+    data->prev_correction_pos = prev_correction_pos;
     data->num_landmarks = lmdb.numLandmarks();
     if (calib.intrinsics.size() == 1) {
       data->num_connected_finite_landmarks = connected_finite;
