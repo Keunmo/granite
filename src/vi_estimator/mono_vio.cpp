@@ -187,8 +187,6 @@ void MonoVioEstimator::run(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba)
           const double rot = std::sqrt(rot2 / recent.size()), pos = std::sqrt(pos2 / recent.size());
           if (rot > rot_limit && pos < pos_limit && !run->unhealthy) {
             run->unhealthy = true;
-            std::cout << std::setprecision(6) << "MONO_VIO_UNHEALTHY t_ns=" << t << " correction_rot_deg="
-                      << rot * 180 / M_PI << " correction_pos_m=" << pos << std::endl;
           }
         }
       }
@@ -198,9 +196,6 @@ void MonoVioEstimator::run(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba)
       if (!run->unhealthy && (t - run->init_t_ns) * 1e-9 >= settle_s &&
           (data->state.bias_accel.norm() > max_ba || data->state.bias_gyro.norm() > max_bg)) {
         run->unhealthy = true;
-        std::cout << std::setprecision(6) << "MONO_VIO_UNHEALTHY t_ns=" << t
-                  << " bias_accel=" << data->state.bias_accel.norm()
-                  << " bias_gyro=" << data->state.bias_gyro.norm() << std::endl;
       }
       data->healthy = !run->unhealthy;
       if (t > run->publish_until_ns) continue;
@@ -258,7 +253,6 @@ void MonoVioEstimator::run(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba)
         if (!visual && metric->unhealthy && reinitializations < configuration.vio_mono_reinit_max) {
           // Keep publishing the current estimator and bootstrap a successor.
           ++reinitializations;
-          std::cout << "MONO_VIO_REINIT_START t_ns=" << frame->t_ns << std::endl;
           start_bootstrap();
           visual_map = 0;
           history.clear();
@@ -315,9 +309,6 @@ void MonoVioEstimator::run(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba)
         }
         if (!agrees) agreeing.clear();
         agreeing.push_back(*alignment);
-        std::cout << std::setprecision(6) << "MONO_VIO_ALIGNMENT t_ns=" << frame->t_ns
-                  << " scale=" << alignment->scale << " agreeing=" << agreeing.size()
-                  << std::endl;
         if (static_cast<int>(agreeing.size()) <
             configuration.vio_mono_init_consistent_alignments)
           continue;
@@ -355,20 +346,10 @@ void MonoVioEstimator::run(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba)
           next->T_out_w = Sophus::SE3d(R, anchor->translation() - R * T_w_i.translation());
         }
         stop_metric(metric.get());
-        std::cout << std::setprecision(6) << "MONO_VIO_REINITIALIZED t_ns=" << next->init_t_ns
-                  << " scale=" << alignment->scale << std::endl;
       } else {
         next->estimator->out_vis_queue = out_vis_queue;
         next->estimator->out_marg_queue = out_marg_queue;
         initial_pose = next->estimator->getT_w_i_init();
-        std::ostringstream initialization;
-        initialization << std::setprecision(6)
-                       << "MONO_VIO_INITIALIZED scale=" << alignment->scale
-                       << " gravity=" << alignment->gravity.transpose()
-                       << " gyro_bias=" << alignment->gyro_bias.transpose()
-                       << " residual=" << alignment->residual
-                       << " relative_scale_std=" << alignment->relative_scale_std;
-        std::cout << initialization.str() << std::endl;
       }
       forwarded_imu_ns = pending->t_ns;
       metric = std::move(next);
@@ -405,10 +386,6 @@ void MonoVioEstimator::runInertial(const Eigen::Vector3d& bg, const Eigen::Vecto
   Eigen::aligned_deque<ImuData> samples;  // Raw samples (the metric VIO calibrates them itself)
   Eigen::aligned_map<int64_t, OpticalFlowResult::Ptr> history;
   ImuData::Ptr pending;
-  std::string last_reason;
-  // GRANITE_MONO_INIT_TRACE=1 prints every initialization attempt (one line per image) to show
-  // why a start does not initialize, e.g. the disparities of the still / moving decision.
-  const bool trace_init = std::getenv("GRANITE_MONO_INIT_TRACE") != nullptr;
   const int64_t keep_ns =
       static_cast<int64_t>((std::max(options.window_time, options.moving_window_time) + 1.0) * 1e9);
   try {
@@ -452,14 +429,7 @@ void MonoVioEstimator::runInertial(const Eigen::Vector3d& bg, const Eigen::Vecto
       while (!samples.empty() && samples.front().t_ns < frame->t_ns - keep_ns) samples.pop_front();
       initializer.addFrame(*frame);
       const MonoInertialInitResult result = initializer.tryInitialize();
-      if (trace_init) std::cout << "MONO_INIT_TRACE " << result.summary() << std::endl;
-      if (!result.success) {
-        if (!result.method.empty() && result.reason != last_reason) {
-          std::cout << "MONO_INIT_TRY " << result.summary() << std::endl;
-          last_reason = result.reason;
-        }
-        continue;
-      }
+      if (!result.success) continue;
 
       // Prior of the start state: the initializer's information, with Granite's
       // gauge weight on position and yaw (unobservable in VIO).
@@ -471,10 +441,7 @@ void MonoVioEstimator::runInertial(const Eigen::Vector3d& bg, const Eigen::Vecto
         information(i, i) = configuration.vio_init_pose_weight;
       }
       information = 0.5 * (information + information.transpose()).eval();
-      if (!information.allFinite()) {
-        std::cout << "MONO_INIT_TRY prior not finite" << std::endl;
-        continue;
-      }
+      if (!information.allFinite()) continue;
       metric = std::make_shared<KeypointVioEstimator>(gravity, calibration, configuration);
       metric->vision_data_queue = &metric_vision;
       metric->imu_data_queue = &metric_imu;
@@ -493,7 +460,6 @@ void MonoVioEstimator::runInertial(const Eigen::Vector3d& bg, const Eigen::Vecto
       metric_scale = 1.0;
       metric_initialized = true;
       tracking_state = TrackingState::TRACKING;
-      std::cout << "MONO_VIO_INITIALIZED init=inertial " << result.summary() << std::endl;
       history.clear();
       samples.clear();
     }

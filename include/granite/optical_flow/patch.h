@@ -169,11 +169,6 @@ struct OpticalFlowPatch {
       iszerosum = true;
     }
     if (iszerosum && num_valid_points > 0) {
-      std::cout << "sum = " << sum << std::endl;
-      std::cout << "num_valid_points = " << num_valid_points << std::endl;
-      for (int i = 0; i < PATTERN_SIZE; i++) {
-        std::cout << i << ", res = " << residual[i] << std::endl;
-      }
       return false;
     }
     for (int i = 0; i < PATTERN_SIZE; i++) {

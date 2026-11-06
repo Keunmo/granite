@@ -413,15 +413,6 @@ bool KeypointVioEstimator::gateGaugeStep(const AbsOrderMap& aom, const Eigen::Ma
     for (const auto& j : aom.abs_order_map)
       damped.block<3, 3>(i.second.first, j.second.first).diagonal().array() += w;
   inc = damped.ldlt().solve(b);
-  ++gauge_gate_count;
-  // Summary every 1000 gated steps: the number of undamped steps with a
-  // common translation of the size of a visible jump (0.1 m).
-  if (common.norm() > 0.1) ++gauge_gate_large;
-  gauge_gate_max_m = std::max(gauge_gate_max_m, common.norm());
-  if (gauge_gate_count % 1000 == 0)
-    std::cout << std::setprecision(4) << "VIO_GAUGE_GATE count=" << gauge_gate_count
-              << " above_0.1m=" << gauge_gate_large << " max_common_m=" << gauge_gate_max_m
-              << std::endl;
   return true;
 }
 }  // namespace granite

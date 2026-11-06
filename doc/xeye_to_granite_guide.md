@@ -341,7 +341,6 @@ $B/granite_pi_cam_imu_vio --config-path $C/b0429_pi_640x400_handheld.json --i2c 
 - `--duration`을 주지 않으면 Ctrl-C 또는 창 닫기까지 실행합니다.
 - `--num-threads`는 3을 권장합니다. 카메라와 IMU 스레드가 나머지 코어를 씁니다.
 - GUI는 최근 이미지 300장(약 20 s)만 보관합니다. 더 오래된 프레임을 고르면 이미지가 바뀌지 않습니다.
-- 초기화 시도를 모두 보려면 `GRANITE_MONO_INIT_TRACE=1`을 앞에 붙입니다. 이미지마다 한 줄(이유, 앞·뒤 반의 이동, 가속도 표준편차)이 나옵니다.
 - 실행 중에는 매초 상태 줄(`t=... input_fps=... imu_hz=... tracking=... support=...`)이 나옵니다.
 
 ### 5.3 프레임률
@@ -454,7 +453,7 @@ Pi 4 모니터에 GUI 띄우기 [미검증]:
 | `No rp1-cfe or unicam media graph contains sensor` | 카메라 케이블, `dtoverlay=arducam-pivariety` |
 | `Unexpected MPU WHO_AM_I value`, `Cannot open /dev/i2c-N` | `--i2c` 번호(5.1절), 사용자의 `i2c` 그룹 |
 | `imu_i2c_errors`가 0보다 큼 | Pi 4 리그의 CP2112는 약 150~200회에 1회 전송 시간 초과(`errno 110`, 약 54 ms 뒤)가 납니다. CP2112가 상태 질문에 응답하지 않는 것이 원인입니다. 앱은 FIFO를 유지하고 샘플 경계만 다시 맞춥니다. 그래서 손실은 약 0.3%입니다. 자세한 내용은 `doc/mpu6500-cp2112-issue.md`에 있습니다. |
-| 초기화되지 않음 | 2.5절. `GRANITE_MONO_INIT_TRACE=1`로 이유를 봅니다. `platform still`은 움직임이 부족합니다. `platform moving (moving start off)`는 정지 구간이 부족합니다. `no IMU excitation in the newer half`는 가속이 부족합니다. |
+| 초기화되지 않음 | 2.5절의 조건을 확인합니다. 매초 상태 줄이 `tracking=initializing`을 계속 보이면, 리그를 2초 이상 정지한 다음 1초 안에 분명하게 들어 올리거나 옮깁니다. |
 | `queue_drops` 또는 `dropped_input` 증가 | 추정기가 카메라보다 느립니다. 다른 프로세스가 CPU를 쓰는지 확인합니다. GUI가 켜져 있으면 `--show-gui 0`으로 다시 확인합니다. live는 `--fps`를 낮추거나 `--num-threads`를 확인합니다. |
 | 밝기가 목표와 다름 | `camera.metering_circle`이 렌즈 원 안에 있는지 확인합니다. 노출은 `--max-exposure`(5 ms) 다음에 gain을 씁니다. |
 | `Calibration resolution ... is neither the sensor mode nor the output` | 보정 해상도는 센서 모드 또는 그 1/N이어야 합니다. 변환의 `--downscale`과 live의 `--downscale`을 맞춥니다. |

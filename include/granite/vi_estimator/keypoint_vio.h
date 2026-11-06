@@ -225,8 +225,6 @@ class KeypointVioEstimator : public VioEstimatorBase,
   void updateMonoSupport(const OpticalFlowResult::Ptr& frame,
                          std::map<FrameId, int>& connected);
   // Gauge gate (see VioConfig::vio_gauge_gate): true if it changed inc.
-  size_t gauge_gate_count = 0, gauge_gate_large = 0;
-  double gauge_gate_max_m = 0;
   // H and b are the normal equations of inc (without the LM diagonal).
   bool gateGaugeStep(const AbsOrderMap& aom, const Eigen::MatrixXd& H,
                      const Eigen::VectorXd& b, const Eigen::VectorXd& diagonal,

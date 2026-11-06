@@ -57,8 +57,9 @@ def main():
     init = ""
     log = os.path.join(a.run, "run.log")
     if os.path.exists(log):
+        # Older logs have the MONO_VIO_INITIALIZED line. The estimator does not print it now.
         m = re.search(r"MONO_VIO_INITIALIZED (.*)", open(log).read())
-        init = m.group(1) if m else "no init"
+        init = m.group(1) if m else ""
     print(f"{a.run}: first state {t[0] - t0_frame:.2f} s; {init}")
     if a.quiet:
         return
