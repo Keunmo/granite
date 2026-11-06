@@ -85,7 +85,7 @@ $B/granite_vio --live --use-imu 1 --cam-calib $C/b0429_pi_640x400_calib.json \
 | 단계 | 도구 | 입력 | 출력 |
 |---|---|---|---|
 | A. 변환 | `eval/scripts/capture_to_granite.py`, `eval/scripts/capture_to_euroc.py` | xeye `capture.yaml`, capture 데이터 | Granite 보정 JSON, VIO 설정 JSON, EuRoC 데이터셋 |
-| B. 크로스 빌드 | 데스크톱 `~/cross/granite-pi4` | Granite 소스 | `granite_vio`, `granite_pi_cam_imu_vio`, `granite_mono_vio_dataset`, `libgranite.so` |
+| B. 크로스 빌드 | 데스크톱 `cross/pi4/build.sh` | Granite 소스 | `granite_vio`, `granite_pi_cam_imu_vio`, `granite_mono_vio_dataset`, `libgranite.so` |
 | C. 데이터셋 실행 | Pi 4 `granite_vio --realtime` | A의 EuRoC 데이터셋과 보정 | TUM 궤적, 상태 CSV |
 | D. live 실행 | Pi 4 `granite_vio --live` | A의 보정과 설정 | TUM 궤적, 상태 CSV, EuRoC 녹화 |
 | E. 녹화 재생 | `granite_vio --realtime` | D의 녹화 | live와 비교할 궤적 |
@@ -203,44 +203,23 @@ smrig_ar0234 cam1(손으로 든 리그, 0~8.3 s 정지 후 천천히 움직임) 
 
 ## 3. 크로스 빌드와 배포
 
-데스크톱에서 빌드합니다. Pi 4에서는 빌드하지 않습니다 [검증].
+데스크톱에서 빌드합니다. Pi 4에서는 빌드하지 않습니다. 빌드 설정과 스크립트는 저장소의 `cross/pi4/`에 있습니다. 준비(컴파일러, GLEW 헤더, sysroot)와 빌드 옵션은 `cross/pi4/README.md`에 있습니다 [검증, 깨끗한 상태에서 빌드 71 s].
 
 ```bash
-cd ~/cross/granite-pi4/build_live      # GRANITE_SRC=~/workspace/granite_reliability
-make -j14
-F="granite_vio granite_pi_cam_imu_vio granite_mono_vio_dataset libgranite.so"
-ssh 10.20.10.50 "mkdir -p ~/granite_eval/bin/granite"
-for f in $F; do scp $f 10.20.10.50:granite_eval/bin/granite/.$f.new; done
-SHA=$(git -C ~/workspace/granite_reliability rev-parse --short HEAD)
-ssh 10.20.10.50 "cd ~/granite_eval/bin/granite && for f in $F; do mv -f .\$f.new \$f; done && echo $SHA \$(date -Is) > DEPLOYED"
+cd ~/workspace/granite_reliability
+cross/pi4/build.sh               # Pangolin(처음 한 번)과 Granite 빌드, ~/cross/pi4-build/
+cross/pi4/deploy.sh              # Pi 4의 ~/granite_eval/bin/granite/에 배포
+cross/pi4/deploy.sh --scripts    # live 스크립트와 바탕화면 아이콘도 배포
 ```
 
-- live 스크립트와 바탕화면 아이콘이 바뀌었으면 같이 복사합니다.
-
-  ```bash
-  cd ~/workspace/granite_reliability
-  scp scripts/pi4_live_mono_vio.sh scripts/pi4_live_mono_vio.svg 10.20.10.50:granite_eval/
-  scp scripts/pi4_live_mono_vio.desktop 10.20.10.50:Desktop/
-  ssh 10.20.10.50 'chmod +x ~/granite_eval/pi4_live_mono_vio.sh ~/Desktop/pi4_live_mono_vio.desktop &&
-    DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus gio set ~/Desktop/pi4_live_mono_vio.desktop metadata::trusted true'
-  ```
-
-- 파일을 임시 이름으로 복사한 다음 이름을 바꿉니다. 같은 이름으로 바로 덮어쓰면 실행 중인 프로그램이 쓰는 `libgranite.so`가 바뀝니다. 그러면 그 실행이 비정상 종료할 수 있습니다. 실행 중인 바이너리는 바로 덮어쓰기가 실패합니다(`dest open ... Failure`).
-
 - 배포는 항상 같은 폴더 `~/granite_eval/bin/granite/`를 덮어씁니다. 이 폴더에는 가장 최근에 배포한 바이너리만 있습니다.
-- 배포한 커밋은 `~/granite_eval/bin/granite/DEPLOYED`에 있습니다.
-
-- 새 빌드 폴더를 만들 때: `cmake .. -DCMAKE_TOOLCHAIN_FILE=$HOME/sysroots/pi4-ubuntu2404.toolchain.cmake -DGRANITE_SRC=$HOME/workspace/granite_reliability`
+- 배포한 커밋은 `~/granite_eval/bin/granite/DEPLOYED`에 있습니다. 커밋하지 않은 변경이 있으면 커밋 뒤에 `-dirty`가 붙습니다.
+- `deploy.sh`는 파일을 임시 이름으로 복사한 다음 이름을 바꿉니다. 같은 이름으로 바로 덮어쓰면 실행 중인 프로그램이 쓰는 `libgranite.so`가 바뀝니다. 그러면 그 실행이 비정상 종료할 수 있습니다.
 - 실행 파일은 같은 폴더의 `libgranite.so`를 씁니다(RUNPATH `$ORIGIN`).
-- 2026-11-06에 배포한 커밋은 `355cc87`입니다.
 - `bin/cross_*` 폴더와 `bin/granite_mono_vio_dataset`은 평가 보고서의 바이너리입니다. 평가 보고서와 Pi 4 배치 스크립트(`scripts/batch_*.sh`, `scripts/run_pi4.sh`)가 이 경로를 씁니다.
-- `granite_vio`는 Pi 4용 Pangolin 정적 라이브러리를 씁니다. 이 라이브러리는 `~/cross/pangolin-pi4/build/src/libpangolin.a`입니다. 다시 만드는 방법은 다음과 같습니다.
-  - 소스: `thirdparty/Pangolin`.
-  - GLEW 헤더: Pi 4 sysroot에 없습니다. 데스크톱 `/usr/include/GL/glew.h`(같은 2.2.0)를 `~/cross/pangolin-pi4/glew_include`에 복사해서 씁니다.
-  - 옵션: `-include cstdint -DGLEW_NO_GLU`, video, python, 도구는 끕니다. 명령은 `~/cross/pangolin-pi4/cmake.log`의 맨 앞에 있습니다.
-- Pi 4 크로스 빌드에는 rosbag이 없습니다(`GRANITE_NO_ROSBAG`). 그래서 `--dataset-type bag`은 쓸 수 없습니다. `euroc`을 씁니다.
+- Pi 4 빌드에는 rosbag이 없습니다(`GRANITE_NO_ROSBAG`). 그래서 `--dataset-type bag`은 쓸 수 없습니다. `euroc`을 씁니다.
 - 데스크톱에서 `granite_vio`의 최대 속도 궤적은 평가 러너와 바이트 단위로 같습니다. 실시간 결과도 러너와 같습니다(상태 872개, 버림 0, Sim3 스케일 0.9967, PASS) [검증, Cam1 1000 프레임].
-- Pi 4에서는 `granite_vio --help` 실행과 공유 라이브러리 연결만 확인했습니다. Pi 4의 데이터셋 실행과 live 실행은 확인하지 않았습니다 [미검증].
+- Pi 4의 `granite_vio` 데이터셋 실행과 live 실행은 확인하지 않았습니다 [미검증].
 
 ## 4. Pi 4에서 데이터셋 실행
 
@@ -496,6 +475,6 @@ Pi 4 모니터에 GUI 띄우기 [미검증]:
 - 실행 프로그램: `granite_vio`. 데이터셋은 `--dataset-path --dataset-type euroc --use-imu 1 [--realtime] --out`. live는 `--live --use-imu 1 --cam-calib --config-path --i2c --out [--record]`.
 - 코드: `src/vio_app.h`(GUI, 실시간 공급, live 모드, `--out`, SUMMARY와 LIVE 줄), `src/vio.cpp`(`granite_vio` 옵션), `src/pi_camera_imu_vio.cpp`(live 앱 옵션, VIO 없는 확인 모드), `include/granite/device/pi_live_support.h`(녹화, `camera.*` 키, 센서 옵션), `src/device/pi_camera_imu.cpp`(카메라와 IMU, IMU 오류 복구), `eval/src/mono_vio_dataset.cpp`(평가 러너), `eval/scripts/capture_to_granite.py`, `eval/scripts/capture_to_euroc.py`, `eval/src/imu_fifo_test.cc`(CP2112 시험).
 - 설정: 데이터셋 실행은 `eval/config/oi_g40_det_gauge_gate_rest.json` + `eval/config/raw_cam1_kb4_calib.json`. Pi 4 live는 `eval/config/live/b0429_pi_640x400_calib.json` + `b0429_pi_640x400_handheld.json`.
-- 빌드: 데스크톱 `build_gui/`. Pi 4 크로스 빌드 `~/cross/granite-pi4/build_live`(Pangolin `~/cross/pangolin-pi4`).
+- 빌드: 데스크톱 `build_gui/`. Pi 4 크로스 빌드와 배포 `cross/pi4/`(`build.sh`, `deploy.sh`, 빌드 폴더 `~/cross/pi4-build/`).
 - Pi 4: 바이너리 `~/granite_eval/bin/granite/`, 데이터 `~/granite_eval/data/city_sky_cam1/`, 결과 `~/granite_eval/results/`, live 출력 `~/granite_eval/live/`.
 - 아직 없는 것: Pi 4의 `granite_vio` 실행 확인(데이터셋, live, GUI 부하), 움직이는 live 시험, 30 fps 실시간 시험, live 시간 오프셋 측정, IMU Allan 보정, CP2112 응답 손실의 위치(`doc/mpu6500-cp2112-issue.md` 5절).
