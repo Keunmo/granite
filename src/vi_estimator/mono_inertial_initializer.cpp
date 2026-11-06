@@ -209,6 +209,7 @@ MonoInertialInitOptions MonoInertialInitOptions::fromConfig(const VioConfig& con
   o.replay_window = config.vio_mono_init_replay_window;
   o.rest_tilt_bias_sigma = config.vio_mono_init_rest_tilt_bias_sigma;
   o.max_relative_speed_sigma = config.vio_mono_init_max_relative_speed_sigma;
+  o.max_rest_disparity = config.vio_mono_init_max_rest_disparity;
   return o;
 }
 
@@ -359,8 +360,11 @@ MonoInertialInitResult MonoInertialInitializer::tryInitialize() {
   }
 
   // Still, then moving (a jerk): start at rest. Moving: the moving start. Still all along: wait.
-  const bool jerk = !moving_old && moving_new;
-  const bool still = !moving_old && !moving_new;
+  // With max_rest_disparity, "still" also needs an older half at rest: a constant velocity has no IMU excitation
+  // and can stay below max_still_disparity (2.8 px at 4 m/s in the Unreal city sequence, 0.004 px at rest).
+  const bool rest_old = options.max_rest_disparity <= 0.0 || result.disparity_old <= options.max_rest_disparity;
+  const bool jerk = !moving_old && moving_new && rest_old;
+  const bool still = !moving_old && !moving_new && rest_old;
   if (jerk && options.excitation_accel_std > 0.0) {
     result.method = "at rest";
     result.success = startAtRest(result);

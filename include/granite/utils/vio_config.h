@@ -160,6 +160,11 @@ struct VioConfig {
   bool vio_mono_init_replay_window;
   double vio_mono_init_rest_tilt_bias_sigma;
   double vio_mono_init_max_relative_speed_sigma;
+  // Start at rest only when the mean pixel motion of the older half window is
+  // at most this [px] (0: off). A constant velocity has no IMU excitation and
+  // can move the pixels less than vio_mono_init_max_still_disparity. The
+  // start at rest then sets the speed to zero. Not in openvio.
+  double vio_mono_init_max_rest_disparity;
 
   double mapper_obs_std_dev;
   double mapper_obs_huber_thresh;

@@ -87,6 +87,8 @@ struct MonoInertialInitOptions {
   // Moving start (not in openvio): reject a start whose speed sigma (refined covariance, before the inflation) is
   // above this fraction of the speed. Near-constant velocity leaves the metric scale unobservable. (0: no check)
   double max_relative_speed_sigma = 0.05;
+  // Not in openvio: start at rest only when the older half moves at most this [px] (0: off)
+  double max_rest_disparity = 0.0;
   Eigen::Vector3d gyro_bias_prior = Eigen::Vector3d::Zero();   // Bias linearization point and prior mean
   Eigen::Vector3d accel_bias_prior = Eigen::Vector3d::Zero();
 
