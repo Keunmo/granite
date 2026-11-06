@@ -172,6 +172,10 @@ struct VioConfig {
   // rotation (they span at least half the window) instead of the longest
   // tracks, which see the farthest points. Not in openvio.
   bool vio_mono_init_parallax_tracks;
+  // Reject a moving start when fewer than this fraction of its tracks have a
+  // point in front of every ray (0: only the fixed minimum of 8 points). Not
+  // in openvio.
+  double vio_mono_init_min_refined_fraction;
 
   double mapper_obs_std_dev;
   double mapper_obs_huber_thresh;

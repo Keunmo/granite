@@ -212,6 +212,7 @@ MonoInertialInitOptions MonoInertialInitOptions::fromConfig(const VioConfig& con
   o.max_rest_disparity = config.vio_mono_init_max_rest_disparity;
   o.moving_window_time = config.vio_mono_init_moving_window_time;
   o.parallax_tracks = config.vio_mono_init_parallax_tracks;
+  o.min_refined_fraction = config.vio_mono_init_min_refined_fraction;
   return o;
 }
 
@@ -835,7 +836,8 @@ bool MonoInertialInitializer::startMoving(MonoInertialInitResult& result) {
     }
   }
   result.num_refined_features = static_cast<int>(refinement.points.size());
-  if (result.num_refined_features < kMinTracks) {
+  if (result.num_refined_features < kMinTracks ||
+      result.num_refined_features < options.min_refined_fraction * result.num_valid_tracks) {
     result.reason = "only " + std::to_string(refinement.points.size()) + " features in front of their bearings";
     return false;
   }

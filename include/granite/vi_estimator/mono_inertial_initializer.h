@@ -93,6 +93,8 @@ struct MonoInertialInitOptions {
   double moving_window_time = 0.0;
   // Not in openvio: moving start with the tracks of the largest gyro-compensated parallax (not the longest ones)
   bool parallax_tracks = false;
+  // Not in openvio: moving start, minimum fraction of the tracks with a point in front of every ray (0: off)
+  double min_refined_fraction = 0.0;
   Eigen::Vector3d gyro_bias_prior = Eigen::Vector3d::Zero();   // Bias linearization point and prior mean
   Eigen::Vector3d accel_bias_prior = Eigen::Vector3d::Zero();
 
