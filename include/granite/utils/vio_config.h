@@ -176,6 +176,9 @@ struct VioConfig {
   // point in front of every ray (0: only the fixed minimum of 8 points). Not
   // in openvio.
   double vio_mono_init_min_refined_fraction;
+  // false: never use the moving start, wait for a start at rest (true: the
+  // moving start of openvio when the platform moves).
+  bool vio_mono_init_moving_start;
 
   double mapper_obs_std_dev;
   double mapper_obs_huber_thresh;

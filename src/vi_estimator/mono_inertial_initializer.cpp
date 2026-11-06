@@ -213,6 +213,7 @@ MonoInertialInitOptions MonoInertialInitOptions::fromConfig(const VioConfig& con
   o.moving_window_time = config.vio_mono_init_moving_window_time;
   o.parallax_tracks = config.vio_mono_init_parallax_tracks;
   o.min_refined_fraction = config.vio_mono_init_min_refined_fraction;
+  o.moving_start = config.vio_mono_init_moving_start;
   return o;
 }
 
@@ -380,6 +381,8 @@ MonoInertialInitResult MonoInertialInitializer::tryInitialize() {
   if (jerk && options.excitation_accel_std > 0.0) {
     result.method = "at rest";
     result.success = startAtRest(result);
+  } else if (!still && !options.moving_start) {
+    result.reason = "platform moving (moving start off)";
   } else if (!still) {
     result.method = "moving";
     result.success = startMoving(result);
