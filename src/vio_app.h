@@ -82,6 +82,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <chrono>
 #include <condition_variable>
 #include <csignal>
+#include <filesystem>
 #include <fstream>
 #include <iomanip>
 #include <iostream>
@@ -98,7 +99,12 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 // Set by SIGINT and SIGTERM: a live run and a realtime run stop and write
 // their results.
 inline volatile std::sig_atomic_t granite_vio_interrupted = 0;
-inline void granite_vio_interrupt(int) { granite_vio_interrupted = 1; }
+// The first signal asks the run to stop and write its results. A second
+// signal ends the process at once (e.g. when a step does not check the flag).
+inline void granite_vio_interrupt(int) {
+  if (granite_vio_interrupted) std::_Exit(130);
+  granite_vio_interrupted = 1;
+}
 
 // Options of the realtime dataset run and of the live run.
 struct VioRunOptions {
@@ -279,6 +285,10 @@ class VioDataset {
 
     populate_gt_data_log();
 
+    // Open the output files before any thread starts, so that a bad path
+    // stops the program with a message.
+    openOutputs();
+
     // initialize system
 
     // initialize optical flow
@@ -295,6 +305,13 @@ class VioDataset {
 
     if (show_gui) vio->out_vis_queue = &out_vis_queue;
     vio->out_state_queue = &out_state_queue;
+  }
+
+  // An exception can leave the flow thread waiting for input. Stop it, so
+  // that the destructor of the flow does not wait forever.
+  ~VioDataset() {
+    if (opt_flow_ptr) opt_flow_ptr->quit(true);
+    if (vio) vio->quit();
   }
 
   void run() {
@@ -318,7 +335,6 @@ class VioDataset {
       }
     }
 
-    openOutputs();
     if (run_opt.live) startLiveDevice();
 
     vio->initialize(Eigen::Vector3d::Zero(), Eigen::Vector3d::Zero());
@@ -2021,6 +2037,12 @@ class VioDataset {
   }
 
   void openOutputs() {
+    const auto make_parent = [](const std::string& path) {
+      const auto parent = std::filesystem::path(path).parent_path();
+      if (!parent.empty()) std::filesystem::create_directories(parent);
+    };
+    if (!run_opt.out_prefix.empty()) make_parent(run_opt.out_prefix + "_traj_tum.txt");
+    if (!run_opt.trajectory_path.empty()) make_parent(run_opt.trajectory_path);
     if (!run_opt.out_prefix.empty()) {
       tum_out.open(run_opt.out_prefix + "_traj_tum.txt");
       states_out.open(run_opt.out_prefix + "_states.csv");
