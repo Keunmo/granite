@@ -157,9 +157,11 @@ class VioDataset {
       vio_dataset = dataset_io->get_data();
     }
 
+    // One camera and an IMU: the factory makes a MonoVioEstimator. It uses
+    // only the main camera.
     if (calib.T_i_c.size() == 1 && use_imu) {
-      std::cerr << "Monocular-inertial is not yet supported. Set --use-imu to 0!" << std::endl;
-      throw granite::NotImplementedException();
+      calib.main_cam_idx = {0};
+      calib.stereo_pairs.clear();
     }
 
     // populate ground truth data structures
@@ -265,6 +267,11 @@ class VioDataset {
     if (marg_data_saver) marg_data_saver->join();
     opt_flow_ptr->join();
     vio->join();
+    // The estimator does not read the IMU queue after the last image. Stop
+    // the IMU feeder if it waits on the full queue. Set terminate first, so
+    // that the feeder does not push the end marker into the full queue.
+    terminate = true;
+    imu_data_queue.abort();
     if (image_feeder && image_feeder->joinable()) image_feeder->join();
     if (imu_feeder && imu_feeder->joinable()) imu_feeder->join();
     terminate = true;
@@ -311,7 +318,7 @@ class VioDataset {
     std::vector<granite::FrameId> best_t_ns(vio_t_ns.at(best_idx).begin(),
                                            vio_t_ns.at(best_idx).end());
 
-    if (calib.intrinsics.size() > 1 || use_imu) {
+    if (metric()) {
       Eigen::aligned_vector<Eigen::Vector3d> best_t_w_i(
           vio_t_w_i.at(best_idx).begin(), vio_t_w_i.at(best_idx).end());
 
@@ -482,7 +489,7 @@ class VioDataset {
             T_w_i = vis_data->frames.back();
           }
 
-          T_w_i = calib.intrinsics.size() > 1
+          T_w_i = metric()
                       ? T_gt_est.at(vis_data->map_idx) * T_w_i
                       : sT_gt_est.at(vis_data->map_idx) * T_w_i;
 
@@ -739,7 +746,7 @@ class VioDataset {
           Sophus::SE3d window_T_gt_est;
           Sophus::Sim3d window_sT_gt_est;
 
-          if (calib.intrinsics.size() > 1 || use_imu) {
+          if (metric()) {
             granite::alignSVD(window_t_ns, window_t_w_i, gt_t_ns, gt_t_w_i,
                              window_T_gt_est, window_sT_gt_est, false);
           } else {
@@ -822,11 +829,11 @@ class VioDataset {
           std::vector<float> vals;
           vals.push_back((t_ns - start_t_ns) * 1e-9);
 
-          Eigen::Vector3d v = calib.intrinsics.size() > 1
+          Eigen::Vector3d v = metric()
                                   ? T_gt_est.at(data->map_idx) * vel_w_i
                                   : sT_gt_est.at(data->map_idx) * vel_w_i;
 
-          Eigen::Vector3d t = (calib.intrinsics.size() > 1
+          Eigen::Vector3d t = (metric()
                                    ? T_gt_est.at(data->map_idx) * T_w_i
                                    : sT_gt_est.at(data->map_idx) * T_w_i)
                                   .translation();
@@ -1036,7 +1043,7 @@ class VioDataset {
       glColor3ubv(gt_color);
       glLineWidth(4.f);
 
-      if (calib.intrinsics.size() > 1 || use_imu) {
+      if (metric()) {
         pangolin::glDrawLineStrip(gt_t_w_i);
         pangolin::glDrawAxis(gt_now_T_w_i.matrix(), 0.2);
       } else {
@@ -1061,7 +1068,7 @@ class VioDataset {
       glLineWidth(4.f);
       glEnable(GL_BLEND);
       glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-      if ((calib.intrinsics.size() > 1 || use_imu) &&
+      if ((metric()) &&
           !vio_t_w_i.at(map_idx).empty()) {
         Eigen::aligned_vector<Eigen::Vector3d> sub_t_w_i;
         for (size_t idx = 0; idx < vio_t_ns.at(map_idx).size(); idx++) {
@@ -1102,7 +1109,7 @@ class VioDataset {
                             0.1f);
             }
           } else if (!it->second->frames.empty()) {
-            if (calib.intrinsics.size() > 1) {
+            if (metric()) {
               const Sophus::SE3d T_w_i =
                   T_gt_est.at(map_idx) * it->second->frames.back();
               pangolin::glDrawAxis(T_w_i.matrix(), 0.3);
@@ -1126,7 +1133,7 @@ class VioDataset {
                   state_color, 0.1f);
 
           for (const auto& p : it->second->frames)
-            if (calib.intrinsics.size() > 1) {
+            if (metric()) {
               for (size_t i = 0; i < calib.T_i_c.size(); i++)
                 render_camera(
                     (T_gt_est.at(map_idx) * p * calib.T_i_c[i]).matrix(), 2.0f,
@@ -1143,7 +1150,7 @@ class VioDataset {
           std::transform(it->second->points.cbegin(), it->second->points.cend(),
                          aligned_points.begin(),
                          [&](const Eigen::Vector3d& point) -> Eigen::Vector3f {
-                           return (calib.intrinsics.size() > 1
+                           return (metric()
                                        ? T_gt_est.at(map_idx) * point
                                        : sT_gt_est.at(map_idx) * point)
                                .cast<float>();
@@ -1314,12 +1321,12 @@ class VioDataset {
         vals.push_back((vio_t_ns.at(map_idx).at(idx) - start_t_ns) * 1e-9);
 
         Eigen::Vector3d v =
-            calib.intrinsics.size() > 1
+            metric()
                 ? T_gt_est.at(map_idx) * vio_vel_w_i.at(map_idx).at(idx)
                 : sT_gt_est.at(map_idx) * vio_vel_w_i.at(map_idx).at(idx);
 
         Eigen::Vector3d t =
-            (calib.intrinsics.size() > 1
+            (metric()
                  ? T_gt_est.at(map_idx) * vio_T_w_i.at(map_idx).at(idx)
                  : sT_gt_est.at(map_idx) * vio_T_w_i.at(map_idx).at(idx))
                 .translation();
@@ -1378,7 +1385,7 @@ class VioDataset {
       std::vector<granite::FrameId> map_t_ns(vio_t_ns.at(map_idx).begin(),
                                             vio_t_ns.at(map_idx).end());
 
-      if (calib.intrinsics.size() > 1 || use_imu) {
+      if (metric()) {
         Eigen::aligned_vector<Eigen::Vector3d> map_t_w_i(
             vio_t_w_i.at(map_idx).begin(), vio_t_w_i.at(map_idx).end());
 
@@ -1541,12 +1548,12 @@ class VioDataset {
           float t_s = vio_t_ns.at(map_idx).at(idx) * 1e-9;
 
           const Sophus::SE3d pose =
-              (calib.intrinsics.size() > 1
+              (metric()
                    ? T_gt_est.at(map_idx) * vio_T_w_i.at(map_idx).at(idx)
                    : sT_gt_est.at(map_idx) * vio_T_w_i.at(map_idx).at(idx));
 
           const Eigen::Vector3d vel =
-              calib.intrinsics.size() > 1
+              metric()
                   ? T_gt_est.at(map_idx) * vio_vel_w_i.at(map_idx).at(idx)
                   : sT_gt_est.at(map_idx) * vio_vel_w_i.at(map_idx).at(idx);
 
@@ -1591,7 +1598,7 @@ class VioDataset {
         float t_s = vio_dataset->get_gt_timestamps()[i] * 1e-9;
 
         // const Sophus::SE3d pose =
-        //     (calib.intrinsics.size() > 1
+        //     (metric()
         //          ? T_gt_est.inverse() * vio_dataset->get_gt_pose_data().at(i)
         //          : sT_gt_est.inverse() *
         //          vio_dataset->get_gt_pose_data().at(i));
@@ -1609,7 +1616,7 @@ class VioDataset {
 
         if (!vio_dataset->get_gt_velocities().empty()) {
           // const Eigen::Vector3d vel =
-          //     calib.intrinsics.size() > 1
+          //     metric()
           //         ? T_gt_est.inverse() *
           //         vio_dataset->get_gt_velocities().at(i) :
           //         sT_gt_est.inverse() *
@@ -1777,6 +1784,10 @@ class VioDataset {
   granite::VioDatasetPtr vio_dataset;
   granite::VioConfig vio_config;
   bool use_imu = true;
+  // Stereo and mono VIO give metric poses of the IMU: align them to the
+  // ground truth with SE3. Mono VO gives camera poses without scale: align
+  // them with Sim3.
+  bool metric() const { return calib.intrinsics.size() > 1 || use_imu; }
   granite::OpticalFlowBase::Ptr opt_flow_ptr;
   granite::VioEstimatorBase::Ptr vio;
 };
