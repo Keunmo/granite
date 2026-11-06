@@ -1,0 +1,602 @@
+diff --git a/include/granite/utils/vio_config.h b/include/granite/utils/vio_config.h
+index 3165fa2..0b56c63 100644
+--- a/include/granite/utils/vio_config.h
++++ b/include/granite/utils/vio_config.h
+@@ -160,6 +160,23 @@ struct VioConfig {
+   bool vio_mono_init_replay_window;
+   double vio_mono_init_rest_tilt_bias_sigma;
+   double vio_mono_init_max_relative_speed_sigma;
++  // Start at rest only when the mean pixel motion of the older half window is
++  // at most this [px] (0: off, the older half only needs to be below
++  // vio_mono_init_max_still_disparity). A constant velocity has no IMU
++  // excitation and a small pixel motion, and the start at rest then sets the
++  // speed to zero. With the check, that window goes to the moving start.
++  double vio_mono_init_max_rest_disparity;
++  // Moving start: solve the linear system again this many times with every
++  // row divided by the point depth of the last solution (0: off).
++  int vio_mono_init_linear_reweight_iterations;
++  // Moving start: use the tracks of the largest parallax after the gyro
++  // rotation (they span at least half the window) instead of the longest
++  // tracks, which see the farthest points. Off by default.
++  bool vio_mono_init_parallax_tracks;
++  // Moving start: also refine from the linear speed times 2, 4, ...,
++  // 2^(n-1) and keep the converged refinement of the lowest cost per
++  // observation (0 or 1: off).
++  int vio_mono_init_scale_hypotheses;
+ 
+   double mapper_obs_std_dev;
+   double mapper_obs_huber_thresh;
+diff --git a/include/granite/vi_estimator/mono_inertial_initializer.h b/include/granite/vi_estimator/mono_inertial_initializer.h
+index 1f3d1f4..62f4590 100644
+--- a/include/granite/vi_estimator/mono_inertial_initializer.h
++++ b/include/granite/vi_estimator/mono_inertial_initializer.h
+@@ -87,6 +87,18 @@ struct MonoInertialInitOptions {
+   // Moving start (not in openvio): reject a start whose speed sigma (refined covariance, before the inflation) is
+   // above this fraction of the speed. Near-constant velocity leaves the metric scale unobservable. (0: no check)
+   double max_relative_speed_sigma = 0.05;
++  // Not in openvio: start at rest only when the mean pixel motion of the older half is at most this [px]; a window
++  // that moves more goes to the moving start (0: off)
++  double max_rest_disparity = 0.0;
++  // Not in openvio: moving start, solve the linear system again with each row divided by the point depth of the
++  // last solution (0: the algebraic solution of openvio)
++  int linear_reweight_iterations = 0;
++  // Not in openvio: moving start, take the tracks of the largest gyro-compensated parallax (spanning half the
++  // window) instead of the longest tracks
++  bool parallax_tracks = false;
++  // Not in openvio: moving start, refine also from the linear speed scaled by 2, 4, ..., 2^(n-1) and keep the
++  // converged refinement of the lowest cost per observation (0 or 1: the linear solution only)
++  int scale_hypotheses = 0;
+   Eigen::Vector3d gyro_bias_prior = Eigen::Vector3d::Zero();   // Bias linearization point and prior mean
+   Eigen::Vector3d accel_bias_prior = Eigen::Vector3d::Zero();
+ 
+@@ -115,7 +127,9 @@ struct MonoInertialInitResult {
+   double rotation_deg = -1;
+   double linear_speed = -1;  // |v| of the linear solution at the oldest pose
+   double relative_speed_sigma = -1;  // Moving: speed sigma / speed of the refined start state
+-  int num_refined_features = 0, num_unprojected_observations = 0, refine_iterations = 0;
++  double refined_speed = -1;         // Moving: |v| of the refined start state
++  int num_refined_features = 0, num_refined_observations = 0, num_unprojected_observations = 0,
++      refine_iterations = 0;
+   double refine_initial_cost = 0, refine_final_cost = 0;
+   bool rest_bias_applied = false;
+   double rest_bias = 0;
+diff --git a/src/utils/vio_config.cpp b/src/utils/vio_config.cpp
+index f273ee1..e86f280 100644
+--- a/src/utils/vio_config.cpp
++++ b/src/utils/vio_config.cpp
+@@ -134,6 +134,10 @@ VioConfig::VioConfig() {
+   vio_mono_init_replay_window = false;
+   vio_mono_init_rest_tilt_bias_sigma = 0.0;
+   vio_mono_init_max_relative_speed_sigma = 0.05;
++  vio_mono_init_max_rest_disparity = 0.0;
++  vio_mono_init_linear_reweight_iterations = 0;
++  vio_mono_init_parallax_tracks = false;
++  vio_mono_init_scale_hypotheses = 0;
+ 
+   mapper_obs_std_dev = 0.25;
+   mapper_obs_huber_thresh = 1.5;
+@@ -274,6 +278,10 @@ void serialize(Archive& ar, granite::VioConfig& config) {
+   optional_nvp(ar, "config.vio_mono_init_replay_window", config.vio_mono_init_replay_window);
+   optional_nvp(ar, "config.vio_mono_init_rest_tilt_bias_sigma", config.vio_mono_init_rest_tilt_bias_sigma);
+   optional_nvp(ar, "config.vio_mono_init_max_relative_speed_sigma", config.vio_mono_init_max_relative_speed_sigma);
++  optional_nvp(ar, "config.vio_mono_init_max_rest_disparity", config.vio_mono_init_max_rest_disparity);
++  optional_nvp(ar, "config.vio_mono_init_linear_reweight_iterations", config.vio_mono_init_linear_reweight_iterations);
++  optional_nvp(ar, "config.vio_mono_init_parallax_tracks", config.vio_mono_init_parallax_tracks);
++  optional_nvp(ar, "config.vio_mono_init_scale_hypotheses", config.vio_mono_init_scale_hypotheses);
+ 
+   ar(CEREAL_NVP(config.mapper_obs_std_dev));
+   ar(CEREAL_NVP(config.mapper_obs_huber_thresh));
+diff --git a/src/vi_estimator/mono_inertial_initializer.cpp b/src/vi_estimator/mono_inertial_initializer.cpp
+index 28726a9..505203f 100644
+--- a/src/vi_estimator/mono_inertial_initializer.cpp
++++ b/src/vi_estimator/mono_inertial_initializer.cpp
+@@ -19,6 +19,8 @@
+ #include <limits>
+ #include <set>
+ #include <sstream>
++#include <fstream>
++#include <cstdlib>
+ 
+ #include <Eigen/Eigenvalues>
+ 
+@@ -209,6 +211,10 @@ MonoInertialInitOptions MonoInertialInitOptions::fromConfig(const VioConfig& con
+   o.replay_window = config.vio_mono_init_replay_window;
+   o.rest_tilt_bias_sigma = config.vio_mono_init_rest_tilt_bias_sigma;
+   o.max_relative_speed_sigma = config.vio_mono_init_max_relative_speed_sigma;
++  o.max_rest_disparity = config.vio_mono_init_max_rest_disparity;
++  o.linear_reweight_iterations = config.vio_mono_init_linear_reweight_iterations;
++  o.parallax_tracks = config.vio_mono_init_parallax_tracks;
++  o.scale_hypotheses = config.vio_mono_init_scale_hypotheses;
+   return o;
+ }
+ 
+@@ -221,7 +227,8 @@ std::string MonoInertialInitResult::summary() const {
+   if (method == "at rest") s << " accel_std_old=" << accel_std_old << " accel_std_new=" << accel_std_new;
+   if (method == "moving")
+     s << " valid_tracks=" << num_valid_tracks << " poses=" << num_poses << " rotation_deg=" << rotation_deg
+-      << " linear_speed=" << linear_speed << " relative_speed_sigma=" << relative_speed_sigma
++      << " linear_speed=" << linear_speed << " refined_speed=" << refined_speed
++      << " relative_speed_sigma=" << relative_speed_sigma
+       << " refined_features=" << num_refined_features
+       << " unprojected=" << num_unprojected_observations << " iterations=" << refine_iterations
+       << " cost=" << refine_initial_cost << "->" << refine_final_cost;
+@@ -359,8 +366,11 @@ MonoInertialInitResult MonoInertialInitializer::tryInitialize() {
+   }
+ 
+   // Still, then moving (a jerk): start at rest. Moving: the moving start. Still all along: wait.
+-  const bool jerk = !moving_old && moving_new;
+-  const bool still = !moving_old && !moving_new;
++  // With max_rest_disparity, "still" also needs an older half at rest: a constant velocity has no IMU excitation
++  // and can stay below max_still_disparity (2.8 px at 4 m/s in the Unreal city sequence, 0.004 px at rest).
++  const bool rest_old = options.max_rest_disparity <= 0.0 || result.disparity_old <= options.max_rest_disparity;
++  const bool jerk = !moving_old && moving_new && rest_old;
++  const bool still = !moving_old && !moving_new && rest_old;
+   if (jerk && options.excitation_accel_std > 0.0) {
+     result.method = "at rest";
+     result.success = startAtRest(result);
+@@ -605,6 +615,37 @@ bool MonoInertialInitializer::startMoving(MonoInertialInitResult& result) {
+   for (const auto& entry : tracks) ids.push_back(entry.first);
+   std::stable_sort(ids.begin(), ids.end(),
+                    [&](int a, int b) { return tracks.at(a).t_ns.size() > tracks.at(b).t_ns.size(); });
++  if (options.parallax_tracks) {
++    // Not in openvio: the longest tracks are the farthest points, whose parallax can be below the gyro error. Rank
++    // the tracks that span half the window by their parallax after the gyro rotation (bias prior) instead.
++    std::set<int64_t> image_times;
++    for (const auto& entry : tracks) image_times.insert(entry.second.t_ns.begin(), entry.second.t_ns.end());
++    std::map<int64_t, Sophus::SO3d> R_of_time;  // R_{I(oldest IMU sample) <- I(t)}
++    Sophus::SO3d R;
++    size_t k = 0;
++    for (int64_t t : image_times) {
++      if (t < imu.front().t_ns) continue;
++      while (k + 1 < imu.size() && imu[k + 1].t_ns <= t) {
++        R = R * Sophus::SO3d::exp((imu[k].gyro - options.gyro_bias_prior) * seconds(imu[k + 1].t_ns - imu[k].t_ns));
++        ++k;
++      }
++      R_of_time[t] = R * Sophus::SO3d::exp((imu[k].gyro - options.gyro_bias_prior) * seconds(t - imu[k].t_ns));
++    }
++    const Eigen::Matrix3d R_ic = calib.T_i_c[0].so3().matrix();
++    std::map<int, double> parallax;
++    for (int id : ids) {
++      const Track& track = tracks.at(id);
++      double p = -1.0;
++      const auto r0 = R_of_time.find(track.t_ns.front()), r1 = R_of_time.find(track.t_ns.back());
++      if (track.t_ns.back() - track.t_ns.front() >= W / 2 && r0 != R_of_time.end() && r1 != R_of_time.end()) {
++        const Eigen::Vector3d d0 = r0->second * (R_ic * track.bearings.front());
++        const Eigen::Vector3d d1 = r1->second * (R_ic * track.bearings.back());
++        p = std::atan2(d0.cross(d1).norm(), d0.dot(d1));
++      }
++      parallax[id] = p;
++    }
++    std::stable_sort(ids.begin(), ids.end(), [&](int a, int b) { return parallax.at(a) > parallax.at(b); });
++  }
+   if (static_cast<int>(ids.size()) > options.max_tracks) ids.resize(options.max_tracks);
+   const int min_kept = static_cast<int>(options.window_time);
+   const int64_t spacing = W / (options.num_poses + 1);
+@@ -696,6 +737,7 @@ bool MonoInertialInitializer::startMoving(MonoInertialInitResult& result) {
+   const int v_col = 3 * num_points;
+   Eigen::MatrixXd A = Eigen::MatrixXd::Zero(num_rows, v_col + 6);
+   Eigen::VectorXd bvec = Eigen::VectorXd::Zero(num_rows);
++  std::vector<std::pair<int, int>> row_observations;  // (point, pose) of each row pair
+   int row = 0;
+   for (int f = 0; f < num_points; ++f) {
+     const Track& track = tracks.at(track_ids[f]);
+@@ -716,6 +758,7 @@ bool MonoInertialInitializer::startMoving(MonoInertialInitResult& result) {
+       A.block<2, 3>(row, v_col) = -DT * Y;
+       A.block<2, 3>(row, v_col + 3) = -0.5 * DT * DT * Y;
+       bvec.segment<2>(row) = Y * alpha - T * t_ci;
++      row_observations.emplace_back(f, pose->second);
+       row += 2;
+     }
+   }
+@@ -725,167 +768,262 @@ bool MonoInertialInitializer::startMoving(MonoInertialInitResult& result) {
+   }
+   Eigen::VectorXd x;
+   if (!solveGravityConstrainedLeastSquares(A, bvec, gravity_magnitude, x, result.reason)) return false;
+-  const Eigen::Vector3d v_I0 = x.segment<3>(v_col);
+-  const Eigen::Vector3d g_I0 = x.tail<3>();
+-  result.linear_speed = v_I0.norm();
+-
+-  // ---- Poses in I0 and the points in front of every ray that observed them at a pose time
+-  Eigen::aligned_vector<PoseVelState> poses_I0(N);
+-  for (int k = 0; k < N; ++k) {
+-    Eigen::Matrix3d R;
+-    Eigen::Vector3d alpha, beta;
+-    double DT;
+-    motion(k, &R, &alpha, &beta, &DT);
+-    poses_I0[k] = PoseVelState(pose_times[k],
+-                               Sophus::SE3d(Sophus::SO3d::fitToSO3(R), v_I0 * DT + 0.5 * g_I0 * DT * DT + alpha),
+-                               v_I0 + g_I0 * DT + R * beta);
+-  }
+-  const Sophus::SO3d R_w_0(Eigen::Quaterniond::FromTwoVectors(g_I0, gravity));
+-  Refinement refinement;
+-  refinement.calib = &calib;
+-  refinement.gravity = gravity;
+-  refinement.pixel_sigma = options.pixel_sigma;
+-  refinement.bg_prior = options.gyro_bias_prior;
+-  refinement.ba_prior = options.accel_bias_prior;
+-  refinement.sigma_bg = options.prior_sigma_gyro_bias;
+-  refinement.sigma_ba = options.prior_sigma_accel_bias;
+-  refinement.bg = options.gyro_bias_prior;
+-  refinement.ba = options.accel_bias_prior;
+-  for (int k = 0; k < N; ++k) {
+-    const PoseVelState& s = poses_I0[k];
+-    refinement.states.emplace_back(s.t_ns, Sophus::SE3d(R_w_0 * s.T_w_i.so3(), R_w_0 * s.T_w_i.translation()),
+-                                   R_w_0 * s.vel_w_i);
+-  }
+-  refinement.first_pose_prior = refinement.states[0].T_w_i;
+-  refinement.imu = from_previous;
+-  for (int f = 0; f < num_points; ++f) {
+-    const Track& track = tracks.at(track_ids[f]);
+-    const Eigen::Vector3d p_F = x.segment<3>(3 * f);
+-    bool in_front = true;
+-    for (size_t i = 0; i < track.t_ns.size() && in_front; ++i) {
+-      const auto pose = pose_of_time.find(track.t_ns[i]);
+-      if (pose == pose_of_time.end()) continue;
+-      const PoseVelState& s = poses_I0[pose->second];
+-      const Eigen::Vector3d p_C = R_ci * (s.T_w_i.so3().inverse() * (p_F - s.T_w_i.translation())) + t_ci;
+-      in_front = track.bearings[i].dot(p_C) > 0.0;
++  if (const char* dump = std::getenv("GRANITE_INIT_DUMP")) {
++    // DIAG: dump the linear system of every attempt (append)
++    std::ofstream f(dump, std::ios::app);
++    f << std::setprecision(17) << "W " << newest << " " << N << " " << num_points << " " << num_rows << "\n";
++    for (int k = 0; k < N; ++k) {
++      Eigen::Matrix3d R; Eigen::Vector3d al, be; double DT;
++      motion(k, &R, &al, &be, &DT);
++      f << "P " << pose_times[k] << " " << DT;
++      for (int i = 0; i < 9; ++i) f << " " << R(i / 3, i % 3);
++      f << " " << al.transpose() << " " << be.transpose() << "\n";
+     }
+-    if (!in_front) continue;
+-    const int j = static_cast<int>(refinement.points.size());
+-    refinement.points.push_back(R_w_0 * p_F);
+-    for (size_t i = 0; i < track.t_ns.size(); ++i) {
+-      const auto pose = pose_of_time.find(track.t_ns[i]);
+-      if (pose == pose_of_time.end()) continue;
+-      // a3ff0e5: an observation whose point does not project at the start is left out
+-      const PoseVelState& s = refinement.states[pose->second];
+-      Eigen::Vector4d p4;
+-      p4 << R_ci * (s.T_w_i.so3().inverse() * (refinement.points[j] - s.T_w_i.translation())) + t_ci, 1.0;
+-      Eigen::Vector2d proj;
+-      if (!calib.intrinsics[0].project(p4, proj) || !proj.allFinite()) {
+-        ++result.num_unprojected_observations;
+-        continue;
++    for (size_t r = 0; r < row_observations.size(); ++r) f << "O " << row_observations[r].first << " " << row_observations[r].second << "\n";
++    for (int f2 = 0; f2 < num_points; ++f2) {
++      const Track& track = tracks.at(track_ids[f2]);
++      for (size_t i = 0; i < track.t_ns.size(); ++i) {
++        const auto pose = pose_of_time.find(track.t_ns[i]);
++        if (pose == pose_of_time.end()) continue;
++        f << "B " << f2 << " " << pose->second << " " << track.bearings[i].transpose() << " " << track.pixels[i].transpose() << "\n";
+       }
+-      refinement.observations.push_back({pose->second, j, track.pixels[i]});
+     }
++    f << "X " << x.transpose() << "\n";
++    f << "T " << T_c_i.matrix3x4().row(0) << " " << T_c_i.matrix3x4().row(1) << " " << T_c_i.matrix3x4().row(2) << "\n";
+   }
+-  result.num_refined_features = static_cast<int>(refinement.points.size());
+-  if (result.num_refined_features < kMinTracks) {
+-    result.reason = "only " + std::to_string(refinement.points.size()) + " features in front of their bearings";
+-    return false;
++  // Not in openvio: the algebraic error of a row is about the angular error times the point depth, so far points
++  // weigh more and the solution shrinks toward a small speed. Divide each row pair by the depth of the last
++  // solution and solve again.
++  for (int it = 0; it < options.linear_reweight_iterations; ++it) {
++    constexpr double kMinDepth = 0.1;  // [m]
++    const Eigen::Vector3d v = x.segment<3>(v_col), g_lin = x.tail<3>();
++    Eigen::MatrixXd Aw = A;
++    Eigen::VectorXd bw = bvec;
++    for (size_t r = 0; r < row_observations.size(); ++r) {
++      Eigen::Matrix3d R;
++      Eigen::Vector3d alpha, beta;
++      double DT;
++      motion(row_observations[r].second, &R, &alpha, &beta, &DT);
++      const Eigen::Vector3d p_k = v * DT + 0.5 * g_lin * DT * DT + alpha;
++      const Eigen::Vector3d p_C = R_ci * (R.transpose() * (x.segment<3>(3 * row_observations[r].first) - p_k)) + t_ci;
++      const double depth = std::max(p_C.norm(), kMinDepth);
++      Aw.middleRows<2>(2 * r) /= depth;
++      bw.segment<2>(2 * r) /= depth;
++    }
++    Eigen::VectorXd x_new;
++    std::string reason;
++    if (!solveGravityConstrainedLeastSquares(Aw, bw, gravity_magnitude, x_new, reason)) break;
++    x = x_new;
+   }
++  // Refinement and covariance from one linear solution x. *converged: the refinement converged and the covariance
++  // was recovered (the speed check may still reject the start).
++  auto refine_from = [&](const Eigen::VectorXd& x, MonoInertialInitResult& result, bool* converged_out) -> bool {
++  *converged_out = false;
++    const Eigen::Vector3d v_I0 = x.segment<3>(v_col);
++    const Eigen::Vector3d g_I0 = x.tail<3>();
++    result.linear_speed = v_I0.norm();
+ 
+-  // ---- Levenberg-Marquardt; the IMU is preintegrated again at the refined biases once
+-  Eigen::MatrixXd H;
+-  Eigen::VectorXd g;
+-  double cost = 0.0;
+-  if (!refinement.evaluate(&cost, &H, &g)) {
+-    result.reason = "refinement start does not project";
+-    return false;
+-  }
+-  result.refine_initial_cost = cost;
+-  bool converged = options.refine_max_iterations == 0;
+-  double lambda = 1e-4;
+-  int relinearizations = 0;
+-  for (int it = 0; it < options.refine_max_iterations && !converged; ++it) {
+-    ++result.refine_iterations;
+-    Eigen::MatrixXd Hd = H;
+-    Hd.diagonal() += lambda * H.diagonal().cwiseMax(1e-6);
+-    const Eigen::VectorXd delta = -Hd.ldlt().solve(g);
+-    Refinement trial = refinement;
+-    double trial_cost = 0.0;
+-    bool accepted = false;
+-    if (delta.allFinite()) {
+-      trial.apply(delta);
+-      accepted = trial.evaluate(&trial_cost, nullptr, nullptr) && trial_cost < cost;
+-    }
+-    if (!accepted) {
+-      lambda *= 10.0;
+-      if (lambda > 1e12) converged = true;  // No decrease is possible: a minimum
+-      continue;
+-    }
+-    const double decrease = (cost - trial_cost) / std::max(cost, 1e-300);
+-    refinement = trial;
+-    cost = trial_cost;
+-    lambda = std::max(lambda / 10.0, 1e-12);
+-    bool done = decrease < 1e-5;
+-    if (done && relinearizations == 0 &&
+-        ((refinement.bg - options.gyro_bias_prior).norm() > 1e-4 ||
+-         (refinement.ba - options.accel_bias_prior).norm() > 1e-2)) {
+-      // Preintegrate again at the refined biases
+-      ++relinearizations;
+-      for (int k = 1; k < N; ++k)
+-        preintegrate(imu, pose_times[k - 1], pose_times[k], refinement.bg, refinement.ba, accel_cov, gyro_cov,
+-                     refinement.imu[k]);
+-      done = false;
++    // ---- Poses in I0 and the points in front of every ray that observed them at a pose time
++    Eigen::aligned_vector<PoseVelState> poses_I0(N);
++    for (int k = 0; k < N; ++k) {
++      Eigen::Matrix3d R;
++      Eigen::Vector3d alpha, beta;
++      double DT;
++      motion(k, &R, &alpha, &beta, &DT);
++      poses_I0[k] = PoseVelState(pose_times[k],
++                                 Sophus::SE3d(Sophus::SO3d::fitToSO3(R), v_I0 * DT + 0.5 * g_I0 * DT * DT + alpha),
++                                 v_I0 + g_I0 * DT + R * beta);
++    }
++    const Sophus::SO3d R_w_0(Eigen::Quaterniond::FromTwoVectors(g_I0, gravity));
++    Refinement refinement;
++    refinement.calib = &calib;
++    refinement.gravity = gravity;
++    refinement.pixel_sigma = options.pixel_sigma;
++    refinement.bg_prior = options.gyro_bias_prior;
++    refinement.ba_prior = options.accel_bias_prior;
++    refinement.sigma_bg = options.prior_sigma_gyro_bias;
++    refinement.sigma_ba = options.prior_sigma_accel_bias;
++    refinement.bg = options.gyro_bias_prior;
++    refinement.ba = options.accel_bias_prior;
++    for (int k = 0; k < N; ++k) {
++      const PoseVelState& s = poses_I0[k];
++      refinement.states.emplace_back(s.t_ns, Sophus::SE3d(R_w_0 * s.T_w_i.so3(), R_w_0 * s.T_w_i.translation()),
++                                     R_w_0 * s.vel_w_i);
++    }
++    refinement.first_pose_prior = refinement.states[0].T_w_i;
++    refinement.imu = from_previous;
++    for (int f = 0; f < num_points; ++f) {
++      const Track& track = tracks.at(track_ids[f]);
++      const Eigen::Vector3d p_F = x.segment<3>(3 * f);
++      bool in_front = true;
++      for (size_t i = 0; i < track.t_ns.size() && in_front; ++i) {
++        const auto pose = pose_of_time.find(track.t_ns[i]);
++        if (pose == pose_of_time.end()) continue;
++        const PoseVelState& s = poses_I0[pose->second];
++        const Eigen::Vector3d p_C = R_ci * (s.T_w_i.so3().inverse() * (p_F - s.T_w_i.translation())) + t_ci;
++        in_front = track.bearings[i].dot(p_C) > 0.0;
++      }
++      if (!in_front) continue;
++      const int j = static_cast<int>(refinement.points.size());
++      refinement.points.push_back(R_w_0 * p_F);
++      for (size_t i = 0; i < track.t_ns.size(); ++i) {
++        const auto pose = pose_of_time.find(track.t_ns[i]);
++        if (pose == pose_of_time.end()) continue;
++        // a3ff0e5: an observation whose point does not project at the start is left out
++        const PoseVelState& s = refinement.states[pose->second];
++        Eigen::Vector4d p4;
++        p4 << R_ci * (s.T_w_i.so3().inverse() * (refinement.points[j] - s.T_w_i.translation())) + t_ci, 1.0;
++        Eigen::Vector2d proj;
++        if (!calib.intrinsics[0].project(p4, proj) || !proj.allFinite()) {
++          ++result.num_unprojected_observations;
++          continue;
++        }
++        refinement.observations.push_back({pose->second, j, track.pixels[i]});
++      }
++    }
++    result.num_refined_features = static_cast<int>(refinement.points.size());
++    result.num_refined_observations = static_cast<int>(refinement.observations.size());
++    if (result.num_refined_features < kMinTracks) {
++      result.reason = "only " + std::to_string(refinement.points.size()) + " features in front of their bearings";
++      return false;
++    }
++
++    // ---- Levenberg-Marquardt; the IMU is preintegrated again at the refined biases once
++    Eigen::MatrixXd H;
++    Eigen::VectorXd g;
++    double cost = 0.0;
++    if (!refinement.evaluate(&cost, &H, &g)) {
++      result.reason = "refinement start does not project";
++      return false;
+     }
++    result.refine_initial_cost = cost;
++    bool converged = options.refine_max_iterations == 0;
++    double lambda = 1e-4;
++    int relinearizations = 0;
++    for (int it = 0; it < options.refine_max_iterations && !converged; ++it) {
++      ++result.refine_iterations;
++      Eigen::MatrixXd Hd = H;
++      Hd.diagonal() += lambda * H.diagonal().cwiseMax(1e-6);
++      const Eigen::VectorXd delta = -Hd.ldlt().solve(g);
++      Refinement trial = refinement;
++      double trial_cost = 0.0;
++      bool accepted = false;
++      if (delta.allFinite()) {
++        trial.apply(delta);
++        accepted = trial.evaluate(&trial_cost, nullptr, nullptr) && trial_cost < cost;
++      }
++      if (!accepted) {
++        lambda *= 10.0;
++        if (lambda > 1e12) converged = true;  // No decrease is possible: a minimum
++        continue;
++      }
++      const double decrease = (cost - trial_cost) / std::max(cost, 1e-300);
++      refinement = trial;
++      cost = trial_cost;
++      lambda = std::max(lambda / 10.0, 1e-12);
++      bool done = decrease < 1e-5;
++      if (done && relinearizations == 0 &&
++          ((refinement.bg - options.gyro_bias_prior).norm() > 1e-4 ||
++           (refinement.ba - options.accel_bias_prior).norm() > 1e-2)) {
++        // Preintegrate again at the refined biases
++        ++relinearizations;
++        for (int k = 1; k < N; ++k)
++          preintegrate(imu, pose_times[k - 1], pose_times[k], refinement.bg, refinement.ba, accel_cov, gyro_cov,
++                       refinement.imu[k]);
++        done = false;
++      }
++      refinement.evaluate(&cost, &H, &g);
++      converged = done || g.lpNorm<Eigen::Infinity>() < 1e-10;
++    }
++    result.refine_final_cost = cost;
++    if (!converged) {
++      result.reason = "refinement did not converge";
++      return false;
++    }
++
++    // ---- Marginal covariance of the chosen pose [p, theta, v] and the biases
+     refinement.evaluate(&cost, &H, &g);
+-    converged = done || g.lpNorm<Eigen::Infinity>() < 1e-10;
+-  }
+-  result.refine_final_cost = cost;
+-  if (!converged) {
+-    result.reason = "refinement did not converge";
+-    return false;
+-  }
++    const Eigen::LDLT<Eigen::MatrixXd> ldlt(H);
++    if (ldlt.info() != Eigen::Success || !(ldlt.vectorD().array() > 0).all()) {
++      result.reason = "covariance recovery failed";
++      return false;
++    }
++    const int chosen = options.replay_window ? 0 : N - 1;
++    Eigen::MatrixXd selector = Eigen::MatrixXd::Zero(H.rows(), 15);
++    selector.block<9, 9>(9 * chosen, 0).setIdentity();
++    selector.block<6, 6>(refinement.biasOffset(), 9).setIdentity();
++    const Eigen::MatrixXd columns = ldlt.solve(selector);
++    Matrix15 P = selector.transpose() * columns;
++    if (!P.allFinite()) {
++      result.reason = "covariance recovery failed";
++      return false;
++    }
++    *converged_out = true;
++    {
++      const Eigen::Vector3d v = refinement.states[chosen].vel_w_i;
++      const double speed = v.norm();
++      const Eigen::Vector3d u = speed > 1e-6 ? Eigen::Vector3d(v / speed) : Eigen::Vector3d::UnitX();
++      const double sigma = std::sqrt(std::max(0.0, u.dot(P.block<3, 3>(6, 6) * u)));
++      result.relative_speed_sigma = sigma / std::max(speed, 1e-6);
++      result.refined_speed = speed;
++      if (options.max_relative_speed_sigma > 0.0 && result.relative_speed_sigma > options.max_relative_speed_sigma) {
++        result.reason = "speed not observable (relative sigma " + std::to_string(result.relative_speed_sigma) + ")";
++        return false;
++      }
++    }
++    P.block<3, 3>(3, 3) *= options.covariance_scale_orientation;
++    P.block<3, 3>(6, 6) *= options.covariance_scale_velocity;
++    P.block<3, 3>(9, 9) *= options.covariance_scale_gyro_bias;
++    P.block<3, 3>(12, 12) *= options.covariance_scale_accel_bias;
++    result.covariance = 0.5 * (P + P.transpose());
++    const PoseVelState& s = refinement.states[chosen];
++    result.t_ns = s.t_ns;
++    result.T_w_i = s.T_w_i;
++    result.vel_w_i = s.vel_w_i;
++    result.bias_gyro = refinement.bg;
++    result.bias_accel = refinement.ba;
++    return true;
++  };
+ 
+-  // ---- Marginal covariance of the chosen pose [p, theta, v] and the biases
+-  refinement.evaluate(&cost, &H, &g);
+-  const Eigen::LDLT<Eigen::MatrixXd> ldlt(H);
+-  if (ldlt.info() != Eigen::Success || !(ldlt.vectorD().array() > 0).all()) {
+-    result.reason = "covariance recovery failed";
+-    return false;
+-  }
+-  const int chosen = options.replay_window ? 0 : N - 1;
+-  Eigen::MatrixXd selector = Eigen::MatrixXd::Zero(H.rows(), 15);
+-  selector.block<9, 9>(9 * chosen, 0).setIdentity();
+-  selector.block<6, 6>(refinement.biasOffset(), 9).setIdentity();
+-  const Eigen::MatrixXd columns = ldlt.solve(selector);
+-  Matrix15 P = selector.transpose() * columns;
+-  if (!P.allFinite()) {
+-    result.reason = "covariance recovery failed";
+-    return false;
++  if (options.scale_hypotheses <= 1) {
++    bool converged = false;
++    return refine_from(x, result, &converged);
+   }
+-  {
+-    const Eigen::Vector3d v = refinement.states[chosen].vel_w_i;
+-    const double speed = v.norm();
+-    const Eigen::Vector3d u = speed > 1e-6 ? Eigen::Vector3d(v / speed) : Eigen::Vector3d::UnitX();
+-    const double sigma = std::sqrt(std::max(0.0, u.dot(P.block<3, 3>(6, 6) * u)));
+-    result.relative_speed_sigma = sigma / std::max(speed, 1e-6);
+-    if (options.max_relative_speed_sigma > 0.0 && result.relative_speed_sigma > options.max_relative_speed_sigma) {
+-      result.reason = "speed not observable (relative sigma " + std::to_string(result.relative_speed_sigma) + ")";
+-      return false;
++  // Not in openvio: the linear solution shrinks toward a small speed when the points are far. Start the refinement
++  // also at the speed scaled by 2, 4, ... (points solved again for the scaled speed), and keep the converged
++  // refinement of the lowest cost per observation.
++  MonoInertialInitResult best = result;
++  bool best_success = false, have_best = false;
++  double best_cost = std::numeric_limits<double>::infinity();
++  for (int h = 0; h < options.scale_hypotheses; ++h) {
++    Eigen::VectorXd xh = x;
++    xh.segment<3>(v_col) *= std::pow(2.0, h);
++    if (h > 0) {
++      const Eigen::VectorXd rhs = bvec - A.rightCols(6) * xh.tail(6);
++      std::vector<Eigen::Matrix3d> AtA(num_points, Eigen::Matrix3d::Zero());
++      std::vector<Eigen::Vector3d> Atb(num_points, Eigen::Vector3d::Zero());
++      for (size_t r = 0; r < row_observations.size(); ++r) {
++        const int f = row_observations[r].first;
++        const Eigen::Matrix<double, 2, 3> Y = A.block<2, 3>(2 * r, 3 * f);
++        AtA[f] += Y.transpose() * Y;
++        Atb[f] += Y.transpose() * rhs.segment<2>(2 * r);
++      }
++      for (int f = 0; f < num_points; ++f) xh.segment<3>(3 * f) = AtA[f].ldlt().solve(Atb[f]);
++    }
++    MonoInertialInitResult r = result;
++    bool converged = false;
++    const bool success = refine_from(xh, r, &converged);
++    if (h == 0 && !have_best) best = r;
++    const double cost = r.refine_final_cost / std::max(1, r.num_refined_observations);
++    if (converged && cost < best_cost) {
++      best_cost = cost;
++      best = r;
++      best_success = success;
++      have_best = true;
+     }
+   }
+-  P.block<3, 3>(3, 3) *= options.covariance_scale_orientation;
+-  P.block<3, 3>(6, 6) *= options.covariance_scale_velocity;
+-  P.block<3, 3>(9, 9) *= options.covariance_scale_gyro_bias;
+-  P.block<3, 3>(12, 12) *= options.covariance_scale_accel_bias;
+-  result.covariance = 0.5 * (P + P.transpose());
+-  const PoseVelState& s = refinement.states[chosen];
+-  result.t_ns = s.t_ns;
+-  result.T_w_i = s.T_w_i;
+-  result.vel_w_i = s.vel_w_i;
+-  result.bias_gyro = refinement.bg;
+-  result.bias_accel = refinement.ba;
+-  return true;
++  result = best;
++  return best_success;
+ }
+ 
+ // Accel-bias component along gravity when the data start at rest (median ray motion of the first second below half

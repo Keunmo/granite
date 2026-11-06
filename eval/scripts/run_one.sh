@@ -1,12 +1,12 @@
 #!/bin/bash
-# Usage: [TAG=bin tag] run_one.sh NAME CONFIG CAM(0-3) SET(1000|full) [extra runner args]
+# Usage: [TAG=bin tag] [SUFFIX=_s<START>] run_one.sh NAME CONFIG CAM(0-3) SET(1000|full) [extra runner args]
 # Runs the offline Granite mono VIO runner on ~/data/granite_euroc/cam<CAM>[_1000] and writes
 # eval/results/NAME (data: eval/data/cam<CAM>[_1000], from the raw capture)
 # eval/results/NAME/{granite_traj_tum.txt,granite_states.csv,run.log,metrics.json}.
 set -u
 E=$(cd $(dirname $0)/.. && pwd)
 NAME=$1; CFG=$2; CAM=$3; SET=$4; shift 4
-D=${DATA:-$E/data}/cam$CAM; [ "$SET" = 1000 ] && D=${D}_1000
+D=${DATA:-$E/data}/cam$CAM; [ "$SET" = 1000 ] && D=${D}_1000; D=${D}${SUFFIX:-}  # SUFFIX=_s<START>: moving-start subset (SET full)
 R=$E/results/$NAME; mkdir -p $R
 GT=$HOME/multipleye_docker/data/unreal_data_city_sky/gt_poses.txt
 cp $CFG $R/config.json
