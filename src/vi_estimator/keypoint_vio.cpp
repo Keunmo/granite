@@ -259,8 +259,11 @@ void KeypointVioEstimator::initialize(const Eigen::Vector3d& bg,
           break;
         };
 
-        if (config.vio_enforce_realtime) {
-          // drop current frame if another frame is already in the queue.
+        // Drop the current frame if another frame is already in the queue.
+        // Keep the first frame: an external initialization (for example
+        // initializeFromInertialStart) gives the state of exactly this frame,
+        // and the replayed frames after it arrive together.
+        if (config.vio_enforce_realtime && prev_frame) {
           while (!vision_data_queue->empty()) vision_data_queue->pop(curr_frame);
         }
 
