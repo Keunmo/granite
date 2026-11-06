@@ -57,6 +57,7 @@
         "config.vio_use_deterministic": true,
         "config.vio_gauge_gate": true,
         "config.vio_mono_init_max_rest_disparity": 1.0,
+        "config.vio_mono_init_excitation_accel_std": 0.3,
         "config.vio_mono_init_moving_start": false
     }
 }
