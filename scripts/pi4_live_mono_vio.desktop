@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Granite Live Mono VIO
+Comment=Live mono VIO with the Pi 4 camera and IMU (granite_vio --live)
+Exec=gnome-terminal --title="Granite Live Mono VIO" -- env GRANITE_PAUSE=1 /home/uvify/granite_eval/pi4_live_mono_vio.sh
+Icon=/home/uvify/granite_eval/pi4_live_mono_vio.svg
+Terminal=false
+Categories=Science;

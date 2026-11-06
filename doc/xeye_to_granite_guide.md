@@ -46,7 +46,22 @@ $B/granite_vio --dataset-path data/city_sky_cam1 --dataset-type euroc --use-imu 
 
 ### B. Pi 4 live 실행
 
-리그를 들고 움직여서 시험하는 명령입니다.
+가장 쉬운 방법은 Pi 4 바탕화면의 **Granite Live Mono VIO** 아이콘입니다. 아이콘을 두 번 누르면 터미널 창과 GUI가 열립니다. 같은 실행을 터미널에서 할 수도 있습니다.
+
+```bash
+~/granite_eval/pi4_live_mono_vio.sh              # GUI와 녹화
+~/granite_eval/pi4_live_mono_vio.sh --no-record  # 녹화 없음
+~/granite_eval/pi4_live_mono_vio.sh --no-gui     # SSH: GUI 없음
+```
+
+- 스크립트는 CP2112의 I2C 번호를 스스로 찾습니다. 다른 번호를 쓰려면 `GRANITE_I2C=/dev/i2c-N`을 앞에 붙입니다.
+- 결과는 `~/granite_eval/live/<날짜_시각>/`에 있습니다: `run_traj_tum.txt`, `run_states.csv`, `run.log`, `euroc/`(녹화).
+- Ctrl+C를 누르거나 GUI 창을 닫으면 실행이 끝나고 결과를 씁니다. 터미널 창을 먼저 닫으면 결과의 끝부분을 잃을 수 있습니다.
+- 다른 `bin/granite` 프로그램이 센서를 쓰고 있으면 스크립트는 실행하지 않습니다.
+- 스크립트, 아이콘 파일, 바탕화면 파일의 원본은 저장소의 `scripts/pi4_live_mono_vio.*`입니다.
+- 바탕화면의 **Live VIO** 아이콘은 openvio의 live VIO입니다. Granite와 다른 프로그램입니다.
+
+직접 실행하는 명령은 다음과 같습니다.
 
 ```bash
 ssh 10.20.10.50
@@ -198,6 +213,16 @@ for f in $F; do scp $f 10.20.10.50:granite_eval/bin/granite/.$f.new; done
 SHA=$(git -C ~/workspace/granite_reliability rev-parse --short HEAD)
 ssh 10.20.10.50 "cd ~/granite_eval/bin/granite && for f in $F; do mv -f .\$f.new \$f; done && echo $SHA \$(date -Is) > DEPLOYED"
 ```
+
+- live 스크립트와 바탕화면 아이콘이 바뀌었으면 같이 복사합니다.
+
+  ```bash
+  cd ~/workspace/granite_reliability
+  scp scripts/pi4_live_mono_vio.sh scripts/pi4_live_mono_vio.svg 10.20.10.50:granite_eval/
+  scp scripts/pi4_live_mono_vio.desktop 10.20.10.50:Desktop/
+  ssh 10.20.10.50 'chmod +x ~/granite_eval/pi4_live_mono_vio.sh ~/Desktop/pi4_live_mono_vio.desktop &&
+    DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$(id -u)/bus gio set ~/Desktop/pi4_live_mono_vio.desktop metadata::trusted true'
+  ```
 
 - 파일을 임시 이름으로 복사한 다음 이름을 바꿉니다. 같은 이름으로 바로 덮어쓰면 실행 중인 프로그램이 쓰는 `libgranite.so`가 바뀝니다. 그러면 그 실행이 비정상 종료할 수 있습니다. 실행 중인 바이너리는 바로 덮어쓰기가 실패합니다(`dest open ... Failure`).
 
