@@ -192,11 +192,14 @@ smrig_ar0234 cam1(손으로 든 리그, 0~8.3 s 정지 후 천천히 움직임) 
 ```bash
 cd ~/cross/granite-pi4/build_live      # GRANITE_SRC=~/workspace/granite_reliability
 make -j14
+F="granite_vio granite_pi_cam_imu_vio granite_mono_vio_dataset libgranite.so"
 ssh 10.20.10.50 "mkdir -p ~/granite_eval/bin/granite"
-scp granite_vio granite_pi_cam_imu_vio granite_mono_vio_dataset libgranite.so 10.20.10.50:granite_eval/bin/granite/
+for f in $F; do scp $f 10.20.10.50:granite_eval/bin/granite/.$f.new; done
 SHA=$(git -C ~/workspace/granite_reliability rev-parse --short HEAD)
-ssh 10.20.10.50 "echo $SHA \$(date -Is) > ~/granite_eval/bin/granite/DEPLOYED"
+ssh 10.20.10.50 "cd ~/granite_eval/bin/granite && for f in $F; do mv -f .\$f.new \$f; done && echo $SHA \$(date -Is) > DEPLOYED"
 ```
+
+- 파일을 임시 이름으로 복사한 다음 이름을 바꿉니다. 같은 이름으로 바로 덮어쓰면 실행 중인 프로그램이 쓰는 `libgranite.so`가 바뀝니다. 그러면 그 실행이 비정상 종료할 수 있습니다. 실행 중인 바이너리는 바로 덮어쓰기가 실패합니다(`dest open ... Failure`).
 
 - 배포는 항상 같은 폴더 `~/granite_eval/bin/granite/`를 덮어씁니다. 이 폴더에는 가장 최근에 배포한 바이너리만 있습니다.
 - 배포한 커밋은 `~/granite_eval/bin/granite/DEPLOYED`에 있습니다.
