@@ -21,6 +21,13 @@ Criteria (fixed before the runs; FAIL if any is violated):
   5 s in 8-18 s, Granite Pi 5 a 1.3 m step 0.5 s after initialization); the same allowance is given to both.
   This allowance and the 3.0 deg limit of C7 were chosen after looking at openvio Pi 4 1000-frame runs (stable 5 s
   rotation error 2.0-2.1 deg) and the Pi 5 Granite runs (failures 11-53 deg), before the Pi 4 Granite runs.
+Option --abs-window adds two criteria with an absolute floor (the verdict with C2b/C3b in place of C2/C3 is
+verdict_abs; the default verdict does not change):
+  C2b window error     |d_est - d_gt| <= max(0.10 d_gt, 0.5 m) for every 5 s window (step 2.5 s, no minimum
+                       displacement), d = |p(t+5) - p(t)|
+  C3b error change     |e_i - e_(i-1)| <= max(0.10 (d_gt,i + d_gt,(i-1)) / 2, 0.5 m) between consecutive windows,
+                       e = d_est - d_gt
+  Both use the windows that start after the settling time.
 Basis: openvio on the full sequence has ATE 0.29 % and final error 0.55 % of the path; successful Granite runs on Pi 5
 had window ratios 1.00-1.05 and 30 s rotation errors 0.1-0.6 deg. C1-C3 detect the scale failures seen on Pi 5
 (window ratios 1.7-3.5), C4 the 30-364 m one-frame jumps, C7 the 30-53 deg rotation drift.
@@ -64,7 +71,7 @@ def align(x, y, scale=False):
 R_RI = rotvec(np.array([-1.2091995761561452] * 3))  # imu2rig rotation of capture.yaml
 
 
-def evaluate(est_path, gt_path, t_end=None, settle=10.0):
+def evaluate(est_path, gt_path, t_end=None, settle=10.0, abs_window=False):
     est = np.atleast_2d(np.loadtxt(est_path, comments="#"))
     g = np.loadtxt(gt_path)
     gt_t = g[:, 7] * 1e-9
@@ -114,6 +121,22 @@ def evaluate(est_path, gt_path, t_end=None, settle=10.0):
         if dg >= 2.0:
             wins.append((float(s0 - t0), float(np.linalg.norm(p[b] - p[a]) / dg)))
         s0 += 2.5
+    if abs_window:
+        aw = []
+        s0 = t[0]
+        while s0 + 5 <= t[-1]:
+            a, b = np.searchsorted(t, s0), min(np.searchsorted(t, s0 + 5), len(t) - 1)
+            if s0 >= t_settle:
+                dg = float(np.linalg.norm(gp[b] - gp[a]))
+                aw.append((float(s0 - t0), dg, float(np.linalg.norm(p[b] - p[a])) - dg))
+            s0 += 2.5
+        bad2 = [w for w in aw if abs(w[2]) > max(0.10 * w[1], 0.5)]
+        bad3 = [(aw[i][0], aw[i][2] - aw[i - 1][2]) for i in range(1, len(aw))
+                if abs(aw[i][2] - aw[i - 1][2]) > max(0.10 * (aw[i][1] + aw[i - 1][1]) / 2, 0.5)]
+        res.update(abs_windows=len(aw), abs_win_err_max_m=float(max([abs(w[2]) for w in aw], default=0.0)),
+                   abs_win_bad=len(bad2), abs_win_bad_t_s=[round(w[0], 1) for w in bad2],
+                   abs_change_max_m=float(max([abs(aw[i][2] - aw[i - 1][2]) for i in range(1, len(aw))], default=0.0)),
+                   abs_change_bad=len(bad3), abs_change_bad_t_s=[round(c[0], 1) for c in bad3])
     stable = [w for w in wins if w[0] + t0 >= t_settle]
     trans = [w for w in wins if w[0] + t0 < t_settle]
     r = np.array([w[1] for w in stable]) if stable else np.array([np.nan])
@@ -158,6 +181,15 @@ def evaluate(est_path, gt_path, t_end=None, settle=10.0):
         "C7_rotation": bool((max(rel) if rel else 0) <= 3.0 and rot_err[-1] <= 3.0),
     }
     res["checks"] = {k2: bool(v) for k2, v in checks.items()}
+    if abs_window:
+        abs_checks = dict(checks)
+        del abs_checks["C2_window_scale"], abs_checks["C3_scale_jump"]
+        abs_checks["C2b_window_error"] = res["abs_win_bad"] == 0
+        abs_checks["C3b_error_change"] = res["abs_change_bad"] == 0
+        res["checks_abs"] = {k2: bool(v) for k2, v in abs_checks.items()}
+        res["verdict_abs"] = ("DIVERGED" if res["ate_pct"] >= 10 else
+                              "PASS" if all(abs_checks.values()) else "FAIL")
+        res["failed_abs"] = [k2 for k2, v in abs_checks.items() if not v]
     if res["ate_pct"] >= 10:
         res["verdict"] = "DIVERGED"
     else:
@@ -197,8 +229,9 @@ if __name__ == "__main__":
     ap.add_argument("--settle", type=float, default=10.0)
     ap.add_argument("--json")
     ap.add_argument("--plot")
+    ap.add_argument("--abs-window", action="store_true", help="add C2b and C3b (absolute error floor 0.5 m)")
     a = ap.parse_args()
-    res, curves = evaluate(a.estimate, a.ground_truth, a.t_end, a.settle)
+    res, curves = evaluate(a.estimate, a.ground_truth, a.t_end, a.settle, a.abs_window)
     print(json.dumps(res, indent=1))
     if a.json:
         open(a.json, "w").write(json.dumps(res, indent=1))

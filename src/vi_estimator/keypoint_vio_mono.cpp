@@ -3,6 +3,8 @@
 #include <granite/vi_estimator/keypoint_vio.h>
 #include <opencv2/calib3d.hpp>
 #include <Eigen/SVD>
+#include <iomanip>
+#include <iostream>
 
 namespace granite {
 void KeypointVioEstimator::updateMonoLandmarks(const OpticalFlowResult::Ptr& frame,
@@ -384,5 +386,42 @@ void KeypointVioEstimator::recoverMonoPose(const OpticalFlowResult::Ptr& frame) 
       (predicted.T_w_i.translation()-pose.translation()).norm()>0.1+0.5*gap*gap) return;
   frame_states.at(frame->t_ns)=PoseVelBiasStateWithLin(frame->t_ns,pose,predicted.vel_w_i,
       predicted.bias_gyro,predicted.bias_accel,false);
+}
+}  // namespace granite
+
+namespace granite {
+bool KeypointVioEstimator::gateGaugeStep(const AbsOrderMap& aom, const Eigen::MatrixXd& H,
+                                         const Eigen::VectorXd& b,
+                                         const Eigen::VectorXd& diagonal,
+                                         Eigen::VectorXd& inc) {
+  // Common translation of the step: the mean translation increment of all
+  // poses and states (the increment is applied as -inc).
+  Eigen::Vector3d common = Eigen::Vector3d::Zero();
+  for (const auto& kv : aom.abs_order_map) common += inc.segment<3>(kv.second.first);
+  const double n = static_cast<double>(aom.abs_order_map.size());
+  common /= n;
+  if (common.norm() <= config.vio_gauge_gate_m) return false;
+  // Solve again with information w on the common translation N (orthonormal
+  // columns N / sqrt(n)): H + w N N^T / n + diag(diagonal). The other
+  // directions get their solution for the restricted common translation, so
+  // this is not the same as removing the common part from inc. H itself does
+  // not change.
+  const double w = config.vio_gauge_gate_weight / n;
+  Eigen::MatrixXd damped = H;
+  damped.diagonal() += diagonal;
+  for (const auto& i : aom.abs_order_map)
+    for (const auto& j : aom.abs_order_map)
+      damped.block<3, 3>(i.second.first, j.second.first).diagonal().array() += w;
+  inc = damped.ldlt().solve(b);
+  ++gauge_gate_count;
+  // Summary every 1000 gated steps: the number of undamped steps with a
+  // common translation of the size of a visible jump (0.1 m).
+  if (common.norm() > 0.1) ++gauge_gate_large;
+  gauge_gate_max_m = std::max(gauge_gate_max_m, common.norm());
+  if (gauge_gate_count % 1000 == 0)
+    std::cout << std::setprecision(4) << "VIO_GAUGE_GATE count=" << gauge_gate_count
+              << " above_0.1m=" << gauge_gate_large << " max_common_m=" << gauge_gate_max_m
+              << std::endl;
+  return true;
 }
 }  // namespace granite

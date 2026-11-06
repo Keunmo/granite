@@ -1,0 +1,451 @@
+diff --git a/include/granite/utils/vio_config.h b/include/granite/utils/vio_config.h
+index a9c0a60..a1258d9 100644
+--- a/include/granite/utils/vio_config.h
++++ b/include/granite/utils/vio_config.h
+@@ -127,6 +127,15 @@ struct VioConfig {
+   // on the number of TBB threads or on their timing. About 7 % slower.
+   bool vio_use_deterministic;
+ 
++  // Gauge gate of the VIO bundle adjustment. The global translation of the
++  // window is unobservable: only the weak marginalization prior constrains it.
++  // An almost undamped LM step can move the whole window along it by meters
++  // for no cost change. When on, remove the common translation of the step
++  // (the translation step of the oldest pose) if it is more than
++  // vio_gauge_gate_m. Off by default.
++  bool vio_gauge_gate;
++  double vio_gauge_gate_m;
++
+   // Monocular VIO initialization: "vo_alignment" (bootstrap VO aligned to the
+   // IMU) or "inertial" (the visual-inertial initializer ported from openvio)
+   std::string vio_mono_init_method;
+diff --git a/include/granite/vi_estimator/keypoint_vio.h b/include/granite/vi_estimator/keypoint_vio.h
+index 1b11805..ba93666 100644
+--- a/include/granite/vi_estimator/keypoint_vio.h
++++ b/include/granite/vi_estimator/keypoint_vio.h
+@@ -64,6 +64,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ #include <granite/camera/stereographic_param.hpp>
+ #include <granite/utils/sophus_utils.hpp>
+ 
++#include <fstream>
+ #include <granite/vi_estimator/ba_base.h>
+ #include <granite/vi_estimator/vio_estimator.h>
+ 
+@@ -224,6 +225,10 @@ class KeypointVioEstimator : public VioEstimatorBase,
+   void updateMonoLandmarks(const OpticalFlowResult::Ptr& frame, bool create_new);
+   void updateMonoSupport(const OpticalFlowResult::Ptr& frame,
+                          std::map<FrameId, int>& connected);
++  bool gateGaugeStep(const AbsOrderMap& aom, Eigen::VectorXd& inc);
++  void projectGauge(const AbsOrderMap& order, Eigen::MatrixXd& H, Eigen::VectorXd& b) const;
++  void anchorGauge(const AbsOrderMap& order, Eigen::MatrixXd& H) const;
++  size_t gauge_gate_count = 0;
+   void considerMonoKeyframe(const Eigen::MatrixXd& visual_hessian, int pose_offset);
+   std::unordered_set<int> mono_rejected_tracks;
+   size_t connected_finite = 0, connected_infinite = 0;
+@@ -262,5 +267,19 @@ class KeypointVioEstimator : public VioEstimatorBase,
+   double lambda, min_lambda, max_lambda, lambda_vee;
+ 
+   std::shared_ptr<std::thread> processing_thread;
++
++ public:
++  // DIAG (temporary): per-frame record of the optimization
++  struct JumpDiag {
++    bool kf = false;
++    int new_lm = 0, upd_obs_removed = 0, filt_lm_removed = 0, filt_obs_removed = 0;
++    int recovered = 0, iters = 0, tries = 0, rejected = 0, kfs_marg = 0;
++    double lambda_end = 0;
++    double e0[4] = {0, 0, 0, 0}, e1[4] = {0, 0, 0, 0};
++    PoseVelBiasState pred, start;
++    double m2_joint = 0, m2_curr = 0, kf_corr_max = 0, kf_corr_min = 0, prev_corr = 0;
++    double vis_first = 0, vis_last = 0;
++  } diag;
++  std::ofstream* diag_out = nullptr;
+ };
+ }  // namespace granite
+diff --git a/src/utils/vio_config.cpp b/src/utils/vio_config.cpp
+index a1940e8..abdfabb 100644
+--- a/src/utils/vio_config.cpp
++++ b/src/utils/vio_config.cpp
+@@ -111,6 +111,8 @@ VioConfig::VioConfig() {
+   vio_mono_health_max_gyro_bias = 0.1;
+ 
+   vio_use_deterministic = false;
++  vio_gauge_gate = false;
++  vio_gauge_gate_m = 0.0;
+ 
+   vio_mono_init_method = "vo_alignment";
+   vio_mono_init_window_time = 2.0;
+@@ -247,6 +249,8 @@ void serialize(Archive& ar, granite::VioConfig& config) {
+   optional_nvp(ar, "config.vio_mono_health_max_gyro_bias",
+                config.vio_mono_health_max_gyro_bias);
+   optional_nvp(ar, "config.vio_use_deterministic", config.vio_use_deterministic);
++  optional_nvp(ar, "config.vio_gauge_gate", config.vio_gauge_gate);
++  optional_nvp(ar, "config.vio_gauge_gate_m", config.vio_gauge_gate_m);
+ 
+   // Optional: configs written before these options keep their defaults
+   optional_nvp(ar, "config.vio_mono_init_method", config.vio_mono_init_method);
+diff --git a/src/vi_estimator/keypoint_vio.cpp b/src/vi_estimator/keypoint_vio.cpp
+index d9a9245..43b73aa 100644
+--- a/src/vi_estimator/keypoint_vio.cpp
++++ b/src/vi_estimator/keypoint_vio.cpp
+@@ -63,6 +63,8 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ #include <tbb/parallel_reduce.h>
+ 
+ #include <chrono>
++#include <cstdlib>
++#include <iomanip>
+ 
+ namespace granite {
+ 
+@@ -391,6 +393,8 @@ bool KeypointVioEstimator::measure(const OpticalFlowResult::Ptr& opt_flow_meas,
+     next_state.t_ns = opt_flow_meas->t_ns;
+ 
+     frame_states[this_state_t_ns] = next_state;
++    diag = JumpDiag();
++    diag.pred = next_state;
+ 
+     imu_meas[meas->get_start_t_ns()] = *meas;
+   }
+@@ -442,7 +446,14 @@ bool KeypointVioEstimator::measure(const OpticalFlowResult::Ptr& opt_flow_meas,
+               << unconnected_obs0.size() << std::endl;
+   }
+ 
+-  if (calib.intrinsics.size() == 1) updateMonoLandmarks(opt_flow_meas, false);
++  {
++    const int o0 = lmdb.numObservations();
++    const Sophus::SE3d pb = frame_states.at(this_state_t_ns).getState().T_w_i;
++    if (calib.intrinsics.size() == 1) updateMonoLandmarks(opt_flow_meas, false);
++    diag.upd_obs_removed = o0 - lmdb.numObservations();
++    diag.recovered = (pb.translation() - frame_states.at(this_state_t_ns).getState().T_w_i.translation()).norm() > 0 ||
++                     (pb.so3().inverse() * frame_states.at(this_state_t_ns).getState().T_w_i.so3()).log().norm() > 0;
++  }
+ 
+   // Preserve metric map hosts during image outages; empty keyframes would
+   // evict the very geometry needed for later metric reacquisition.
+@@ -460,9 +471,12 @@ bool KeypointVioEstimator::measure(const OpticalFlowResult::Ptr& opt_flow_meas,
+     TimeCamId tcidl(opt_flow_meas->t_ns, 0);
+ 
+     int num_points_added = 0;
++    diag.kf = true;
+     if (calib.intrinsics.size() == 1) {
++      const int l0 = lmdb.numLandmarks();
+       updateMonoLandmarks(opt_flow_meas, true);
+       num_points_added = num_points_kf[this_state_t_ns];
++      diag.new_lm = int(lmdb.numLandmarks()) - l0;
+     }
+     for (int lm_id : unconnected_obs0) {
+       if (calib.intrinsics.size() == 1) break;
+@@ -555,6 +569,7 @@ bool KeypointVioEstimator::measure(const OpticalFlowResult::Ptr& opt_flow_meas,
+     if (prev_state_t_ns != this_state_t_ns && prev_state != frame_states.end())
+       published_prev = prev_state->second.getState().T_w_i;
+   }
++  diag.start = frame_states.at(this_state_t_ns).getState();
+   optimize(num_points_connected);
+   if (calib.intrinsics.size() == 1) updateMonoSupport(opt_flow_meas, num_points_connected);
+   double prev_correction_rot = std::numeric_limits<double>::quiet_NaN();
+@@ -569,6 +584,29 @@ bool KeypointVioEstimator::measure(const OpticalFlowResult::Ptr& opt_flow_meas,
+     }
+   }
+   marginalize(num_points_connected);
++  if (!diag_out && std::getenv("GRANITE_JUMP_DIAG")) {
++    diag_out = new std::ofstream(std::getenv("GRANITE_JUMP_DIAG"));
++    *diag_out << "t_ns,kf,new_lm,upd_obs_removed,recovered,filt_lm_removed,filt_obs_removed,iters,tries,rejected,lambda_end,"
++                 "e0_vis,e0_imu,e0_marg,e0_bias,e1_vis,e1_imu,e1_marg,e1_bias,dpos_pred,dvel_pred,drot_pred,dpos_start,"
++                 "prev_corr,kf_corr_min,kf_corr_max,m2_joint,m2_curr,kfs_marg,n_poses,n_states,lm,obs\n";
++  }
++  if (diag_out) {
++    const auto& c = frame_states.at(this_state_t_ns).getState();
++    *diag_out << std::setprecision(10) << this_state_t_ns << ',' << diag.kf << ',' << diag.new_lm << ','
++              << diag.upd_obs_removed << ',' << diag.recovered << ',' << diag.filt_lm_removed << ','
++              << diag.filt_obs_removed << ',' << diag.iters << ',' << diag.tries << ',' << diag.rejected << ','
++              << diag.lambda_end;
++    for (double e : diag.e0) *diag_out << ',' << e;
++    for (double e : diag.e1) *diag_out << ',' << e;
++    *diag_out << ',' << (c.T_w_i.translation() - diag.pred.T_w_i.translation()).norm() << ','
++              << (c.vel_w_i - diag.pred.vel_w_i).norm() << ','
++              << (diag.pred.T_w_i.so3().inverse() * c.T_w_i.so3()).log().norm() << ','
++              << (c.T_w_i.translation() - diag.start.T_w_i.translation()).norm() << ',' << prev_correction_pos << ','
++              << diag.kf_corr_min << ',' << diag.kf_corr_max << ',' << diag.m2_joint << ',' << diag.m2_curr << ','
++              << diag.kfs_marg << ',' << frame_poses.size() << ',' << frame_states.size() << ',' << lmdb.numLandmarks()
++              << ',' << lmdb.numObservations() << '\n';
++    diag_out->flush();
++  }
+ 
+   if (out_state_queue) {
+     PoseVelBiasStateWithLin p = frame_states.at(this_state_t_ns);
+@@ -931,6 +969,7 @@ void KeypointVioEstimator::marginalize(
+       marg_order_new.items++;
+     }
+ 
++    diag.kfs_marg = kfs_to_marg.size();
+     marg_H = marg_H_new;
+     marg_b = marg_b_new;
+     marg_order = marg_order_new;
+@@ -940,6 +979,7 @@ void KeypointVioEstimator::marginalize(
+     Eigen::VectorXd delta;
+     computeDelta(marg_order, delta);
+     marg_b -= marg_H * delta;
++    if (config.vio_gauge_gate) projectGauge(marg_order, marg_H, marg_b);
+ 
+     if (config.vio_debug) {
+       std::cout << "marginalizaon done!!" << std::endl;
+@@ -990,11 +1030,40 @@ void KeypointVioEstimator::optimize(
+       aom.items++;
+     }
+ 
+-    //    std::cout << "opt order" << std::endl;
+-    //    aom.print_order();
++    Eigen::MatrixXd diag_H;
++    Eigen::VectorXd diag_inc = Eigen::VectorXd::Zero(aom.total_size);
++    std::map<int64_t, Eigen::Vector3d> diag_t0;
++    if (std::getenv("GRANITE_JUMP_DIAG")) {
++      DenseAccumulator<double> acc;
++      acc.reset(aom.total_size);
++      double a, b, c, d;
++      linearizeAbsIMU(aom, acc.getH(), acc.getB(), a, b, c, frame_states, imu_meas, gyro_bias_weight,
++                      accel_bias_weight, g);
++      linearizeMargPrior(marg_order, marg_H, marg_b, aom, acc.getH(), acc.getB(), d);
++      diag_H = acc.getH();
++      for (const auto& kv : frame_poses) diag_t0[kv.first] = kv.second.getPose().translation();
++      for (const auto& kv : frame_states) diag_t0[kv.first] = kv.second.getState().T_w_i.translation();
++    }
+ 
+-    //    std::cout << "marg prior order" << std::endl;
+-    //    marg_order.print_order();
++    const bool dv = std::getenv("GRANITE_JUMP_T0") && this_state_t_ns >= std::atoll(std::getenv("GRANITE_JUMP_T0")) &&
++                    this_state_t_ns <= std::atoll(std::getenv("GRANITE_JUMP_T1"));
++    if (dv) {
++      std::cout << "DV frame " << this_state_t_ns << " poses " << frame_poses.size() << " states " << frame_states.size() << std::endl;
++      for (const auto& kv : aom.abs_order_map) std::cout << "DV  var " << kv.first << " off " << kv.second.first << " size " << kv.second.second << " kf " << kf_ids.count(kv.first) << std::endl;
++      Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(0.5 * (marg_H + marg_H.transpose()));
++      std::cout << "DV  marg eig: " << es.eigenvalues().head(8).transpose() << " max " << es.eigenvalues().maxCoeff() << std::endl;
++      Eigen::VectorXd delta;
++      computeDelta(marg_order, delta);
++      const Eigen::VectorXd gm = marg_b + marg_H * delta;
++      for (int k = 0; k < 4; ++k) {
++        const Eigen::VectorXd v = es.eigenvectors().col(k);
++        // translation part of each variable
++        std::cout << "DV  ev" << k << " grad=" << v.dot(gm) << " trans:";
++        for (const auto& kv : marg_order.abs_order_map) std::cout << " [" << v.segment<3>(kv.second.first).transpose() << "|" << v.segment<3>(kv.second.first + 3).norm() << (kv.second.second == 15 ? "|v" : "") << (kv.second.second == 15 ? std::to_string(v.segment<3>(kv.second.first + 6).norm()) : "") << "]";
++        std::cout << std::endl;
++      }
++      std::cout << "DV  |marg_b|=" << marg_b.norm() << " |grad|=" << gm.norm() << " |delta|=" << delta.norm() << std::endl;
++    }
+ 
+     for (int iter = 0; iter < config.vio_max_iterations; iter++) {
+       auto t1 = std::chrono::high_resolution_clock::now();
+@@ -1027,19 +1096,39 @@ void KeypointVioEstimator::optimize(
+ 
+       double marg_prior_error = 0;
+       double imu_error = 0, bg_error = 0, ba_error = 0;
++      auto gproj = [&](const char* name) {
++        if (!dv) return;
++        Eigen::Vector3d gb = Eigen::Vector3d::Zero(), hu = Eigen::Vector3d::Zero();
++        Eigen::VectorXd u = Eigen::VectorXd::Zero(aom.total_size);
++        for (const auto& kv : aom.abs_order_map) { gb += lopt.accum.getB().segment<3>(kv.second.first); u.segment<3>(kv.second.first) = Eigen::Vector3d(1, 1, 1); }
++        for (int k = 0; k < 3; ++k) {
++          Eigen::VectorXd uk = Eigen::VectorXd::Zero(aom.total_size);
++          for (const auto& kv : aom.abs_order_map) uk[kv.second.first + k] = 1;
++          hu[k] = (lopt.accum.getH() * uk).norm();
++        }
++        std::cout << std::setprecision(4) << "DV   cum " << name << " N^T b=" << gb.transpose() << " |H N|=" << hu.transpose() << std::endl;
++      };
++      gproj("vision");
+       linearizeAbsIMU(aom, lopt.accum.getH(), lopt.accum.getB(), imu_error,
+                       bg_error, ba_error, frame_states, imu_meas,
+                       gyro_bias_weight, accel_bias_weight, g);
++      gproj("+imu");
+       linearizeMargPrior(marg_order, marg_H, marg_b, aom, lopt.accum.getH(),
+                          lopt.accum.getB(), marg_prior_error);
++      gproj("+prior");
+ 
+       double error_total =
+           rld_error + imu_error + marg_prior_error + ba_error + bg_error;
++      if (iter == 0) {
++        diag.e0[0] = rld_error; diag.e0[1] = imu_error; diag.e0[2] = marg_prior_error; diag.e0[3] = ba_error + bg_error;
++      }
++      diag.iters = iter + 1;
+ 
+       if (config.vio_debug)
+         std::cout << "[LINEARIZE] Error: " << error_total << " num points "
+                   << std::endl;
+ 
++      if (config.vio_gauge_gate) anchorGauge(aom, lopt.accum.getH());
+       lopt.accum.setup_solver();
+       Eigen::VectorXd Hdiag = lopt.accum.Hdiagonal();
+ 
+@@ -1054,9 +1143,23 @@ void KeypointVioEstimator::optimize(
+           for (int i = 0; i < Hdiag_lambda.size(); i++)
+             Hdiag_lambda[i] = std::max(Hdiag_lambda[i], min_lambda);
+ 
+-          const Eigen::VectorXd inc = lopt.accum.solve(&Hdiag_lambda);
++          Eigen::VectorXd inc = lopt.accum.solve(&Hdiag_lambda);
++          if (config.vio_gauge_gate && std::getenv("GRANITE_GAUGE_STEP")) gateGaugeStep(aom, inc);
+           double max_inc = inc.array().abs().maxCoeff();
+           if (max_inc < 1e-4) converged = true;
++          if (dv) {
++            const Eigen::MatrixXd& HH = lopt.accum.getH();
++            Eigen::SelfAdjointEigenSolver<Eigen::MatrixXd> es(0.5 * (HH + HH.transpose()));
++            std::cout << std::setprecision(4) << "DV  fullH eig:";
++            for (int k = 0; k < 6; ++k) std::cout << " " << es.eigenvalues()[k];
++            std::cout << " max " << es.eigenvalues().maxCoeff() << " | b.v:";
++            for (int k = 0; k < 6; ++k) std::cout << " " << es.eigenvectors().col(k).dot(lopt.accum.getB());
++            std::cout << " | inc.v:";
++            for (int k = 0; k < 6; ++k) std::cout << " " << es.eigenvectors().col(k).dot(inc);
++            Eigen::VectorXd rest = inc;
++            for (int k = 0; k < 3; ++k) rest -= es.eigenvectors().col(k) * es.eigenvectors().col(k).dot(inc);
++            std::cout << " |inc|=" << inc.norm() << " |inc w/o 3 smallest|=" << rest.norm() << std::endl;
++          }
+ 
+           backup();
+ 
+@@ -1098,6 +1201,22 @@ void KeypointVioEstimator::optimize(
+               after_update_marg_prior_error + after_bg_error + after_ba_error;
+ 
+           double f_diff = (error_total - after_error_total);
++          if (dv) {
++            std::cout << "DV  it " << iter << " lam " << lambda << " maxinc " << max_inc << " before v/i/m/b " << rld_error << " " << imu_error << " " << marg_prior_error << " " << ba_error + bg_error
++                      << " after " << after_update_vision_error << " " << after_update_imu_error << " " << after_update_marg_prior_error << " " << after_bg_error + after_ba_error << " fdiff " << f_diff << " dtrans:";
++            for (const auto& kv : aom.abs_order_map) std::cout << " " << inc.segment<3>(kv.second.first).norm();
++            std::cout << " dv:";
++            for (const auto& kv : frame_states) std::cout << " " << inc.segment<3>(aom.abs_order_map.at(kv.first).first + 6).norm();
++            std::cout << std::endl;
++          }
++          ++diag.tries;
++          if (f_diff >= 0) {
++            diag_inc -= inc;
++            diag.e1[0] = after_update_vision_error; diag.e1[1] = after_update_imu_error;
++            diag.e1[2] = after_update_marg_prior_error; diag.e1[3] = after_bg_error + after_ba_error;
++          } else {
++            ++diag.rejected;
++          }
+ 
+           if (f_diff < 0) {
+             if (config.vio_debug)
+@@ -1208,18 +1327,41 @@ void KeypointVioEstimator::optimize(
+           filterOutliers(config.vio_outlier_threshold, 4, &num_points_connected);
+       }
+ 
++      diag.lambda_end = lambda;
+       if (converged) break;
+ 
+       // std::cerr << "LT\n" << LT << std::endl;
+       // std::cerr << "z_p\n" << z_p.transpose() << std::endl;
+       // std::cerr << "inc\n" << inc.transpose() << std::endl;
+     }
++    if (diag_H.size()) {
++      diag.m2_joint = diag_inc.dot(diag_H * diag_inc);
++      const int o = aom.abs_order_map.at(this_state_t_ns).first;
++      Eigen::MatrixXd Hr = diag_H;
++      Hr.diagonal().array() += 1e-9;
++      const Eigen::MatrixXd S = Hr.ldlt().solve(Eigen::MatrixXd::Identity(Hr.rows(), Hr.cols()));
++      const Eigen::MatrixXd Sc = S.block(o, o, se3_VEL_BIAS_SIZE, se3_VEL_BIAS_SIZE);
++      const Eigen::VectorXd dc = diag_inc.segment(o, se3_VEL_BIAS_SIZE);
++      diag.m2_curr = dc.dot(Sc.ldlt().solve(dc));
++      diag.kf_corr_min = 1e9;
++      diag.kf_corr_max = 0;
++      for (const auto& kv : frame_poses) {
++        const double d = (kv.second.getPose().translation() - diag_t0.at(kv.first)).norm();
++        diag.kf_corr_min = std::min(diag.kf_corr_min, d);
++        diag.kf_corr_max = std::max(diag.kf_corr_max, d);
++      }
++      if (frame_poses.empty()) diag.kf_corr_min = 0;
++    }
+   }
+ 
+   // Early convergence must not skip mono outlier filtering. Recompute current
+   // connections in measure instead of using the VO pose-only bookkeeping.
+-  if (calib.intrinsics.size() == 1)
++  if (calib.intrinsics.size() == 1) {
++    const int l0 = lmdb.numLandmarks(), o0 = lmdb.numObservations();
+     filterOutliers(config.vio_outlier_threshold, 3, nullptr);
++    diag.filt_lm_removed = l0 - int(lmdb.numLandmarks());
++    diag.filt_obs_removed = o0 - lmdb.numObservations();
++  }
+ 
+   if (config.vio_debug) {
+     std::cout << "=================================" << std::endl;
+diff --git a/src/vi_estimator/keypoint_vio_mono.cpp b/src/vi_estimator/keypoint_vio_mono.cpp
+index 923c618..b70e909 100644
+--- a/src/vi_estimator/keypoint_vio_mono.cpp
++++ b/src/vi_estimator/keypoint_vio_mono.cpp
+@@ -3,6 +3,8 @@
+ #include <granite/vi_estimator/keypoint_vio.h>
+ #include <opencv2/calib3d.hpp>
+ #include <Eigen/SVD>
++#include <cstdlib>
++#include <iostream>
+ 
+ namespace granite {
+ void KeypointVioEstimator::updateMonoLandmarks(const OpticalFlowResult::Ptr& frame,
+@@ -386,3 +388,71 @@ void KeypointVioEstimator::recoverMonoPose(const OpticalFlowResult::Ptr& frame)
+       predicted.bias_gyro,predicted.bias_accel,false);
+ }
+ }  // namespace granite
++
++namespace granite {
++bool KeypointVioEstimator::gateGaugeStep(const AbsOrderMap& aom, Eigen::VectorXd& inc) {
++  // The increment is applied as -inc; a common translation of all poses and
++  // states changes no visual or inertial residual.
++  Eigen::Vector3d common = Eigen::Vector3d::Zero();
++  const char* mode = std::getenv("GRANITE_GAUGE_MODE");
++  if (mode && std::string(mode) == "mean") {
++    for (const auto& kv : aom.abs_order_map) common += inc.segment<3>(kv.second.first);
++    common /= double(aom.abs_order_map.size());
++  } else {
++    int64_t anchor = -1;
++    size_t offset = 0;
++    for (const auto& kv : aom.abs_order_map)
++      if (anchor < 0 || size_t(kv.second.first) < offset) { anchor = kv.first; offset = kv.second.first; }
++    common = inc.segment<3>(offset);
++  }
++  if (common.norm() <= config.vio_gauge_gate_m) return false;
++  for (const auto& kv : aom.abs_order_map) inc.segment<3>(kv.second.first) -= common;
++  ++gauge_gate_count;
++  if (std::getenv("GRANITE_GAUGE_LOG"))
++    std::cout << "VIO_GAUGE_GATE t_ns=" << this_state_t_ns << " common_m=" << common.norm() << std::endl;
++  return true;
++}
++}  // namespace granite
++
++namespace granite {
++void KeypointVioEstimator::projectGauge(const AbsOrderMap& order, Eigen::MatrixXd& H,
++                                        Eigen::VectorXd& b) const {
++  // N: common translation of all poses and states (3 columns). P = I - N N^T / n.
++  const int size = order.total_size;
++  Eigen::MatrixXd N = Eigen::MatrixXd::Zero(size, 3);
++  for (const auto& kv : order.abs_order_map) N.block<3, 3>(kv.second.first, 0).setIdentity();
++  const double n = order.abs_order_map.size();
++  const char* m = std::getenv("GRANITE_GAUGE_PRIOR");
++  if (m && std::string(m) == "none") return;
++  if (m && std::string(m) == "schur") {
++    // Marginalize the common translation out of the prior.
++    const Eigen::MatrixXd Nh = N / std::sqrt(n);
++    const Eigen::MatrixXd HNh = H * Nh;
++    const Eigen::Matrix3d A = Nh.transpose() * HNh;
++    Eigen::LDLT<Eigen::Matrix3d> ldlt(A);
++    if (ldlt.info() == Eigen::Success && ldlt.isPositive() && A.diagonal().minCoeff() > 1e-12) {
++      const Eigen::Vector3d bN = Nh.transpose() * b;
++      b -= HNh * ldlt.solve(bN);
++      H -= HNh * ldlt.solve(HNh.transpose());
++      H = (0.5 * (H + H.transpose())).eval();
++      return;
++    }
++  }
++  // P H P = H - N (N^T H)/n - (H N) N^T/n + N (N^T H N) N^T / n^2
++  const Eigen::MatrixXd HN = H * N;
++  const Eigen::Matrix3d NHN = N.transpose() * HN;
++  H -= (HN * N.transpose() + N * HN.transpose()) / n;
++  H += N * NHN * N.transpose() / (n * n);
++  H = (0.5 * (H + H.transpose())).eval();
++  b -= N * (N.transpose() * b) / n;
++}
++
++void KeypointVioEstimator::anchorGauge(const AbsOrderMap& order, Eigen::MatrixXd& H) const {
++  const char* w_env = std::getenv("GRANITE_GAUGE_W");
++  const double w = w_env ? std::atof(w_env) : 100.0;
++  const double n = order.abs_order_map.size();
++  for (const auto& i : order.abs_order_map)
++    for (const auto& j : order.abs_order_map)
++      H.block<3, 3>(i.second.first, j.second.first).diagonal().array() += w / n;
++}
++}  // namespace granite

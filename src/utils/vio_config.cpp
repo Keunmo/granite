@@ -111,6 +111,9 @@ VioConfig::VioConfig() {
   vio_mono_health_max_gyro_bias = 0.1;
 
   vio_use_deterministic = false;
+  vio_gauge_gate = false;
+  vio_gauge_gate_m = 0.0;
+  vio_gauge_gate_weight = 50.0;
 
   vio_mono_init_method = "vo_alignment";
   vio_mono_init_window_time = 2.0;
@@ -247,6 +250,9 @@ void serialize(Archive& ar, granite::VioConfig& config) {
   optional_nvp(ar, "config.vio_mono_health_max_gyro_bias",
                config.vio_mono_health_max_gyro_bias);
   optional_nvp(ar, "config.vio_use_deterministic", config.vio_use_deterministic);
+  optional_nvp(ar, "config.vio_gauge_gate", config.vio_gauge_gate);
+  optional_nvp(ar, "config.vio_gauge_gate_m", config.vio_gauge_gate_m);
+  optional_nvp(ar, "config.vio_gauge_gate_weight", config.vio_gauge_gate_weight);
 
   // Optional: configs written before these options keep their defaults
   optional_nvp(ar, "config.vio_mono_init_method", config.vio_mono_init_method);

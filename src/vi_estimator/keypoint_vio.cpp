@@ -1054,7 +1054,10 @@ void KeypointVioEstimator::optimize(
           for (int i = 0; i < Hdiag_lambda.size(); i++)
             Hdiag_lambda[i] = std::max(Hdiag_lambda[i], min_lambda);
 
-          const Eigen::VectorXd inc = lopt.accum.solve(&Hdiag_lambda);
+          Eigen::VectorXd inc = lopt.accum.solve(&Hdiag_lambda);
+          if (config.vio_gauge_gate)
+            gateGaugeStep(aom, lopt.accum.getH(), lopt.accum.getB(),
+                          Hdiag_lambda, inc);
           double max_inc = inc.array().abs().maxCoeff();
           if (max_inc < 1e-4) converged = true;
 
@@ -1130,7 +1133,10 @@ void KeypointVioEstimator::optimize(
         for (int i = 0; i < Hdiag_lambda.size(); i++)
           Hdiag_lambda[i] = std::max(Hdiag_lambda[i], min_lambda);
 
-        const Eigen::VectorXd inc = lopt.accum.solve(&Hdiag_lambda);
+        Eigen::VectorXd inc = lopt.accum.solve(&Hdiag_lambda);
+        if (config.vio_gauge_gate)
+          gateGaugeStep(aom, lopt.accum.getH(), lopt.accum.getB(),
+                        Hdiag_lambda, inc);
         double max_inc = inc.array().abs().maxCoeff();
         if (max_inc < 1e-4) converged = true;
 

@@ -127,6 +127,18 @@ struct VioConfig {
   // on the number of TBB threads or on their timing. About 7 % slower.
   bool vio_use_deterministic;
 
+  // Gauge gate of the VIO bundle adjustment. Vision and IMU residuals do not
+  // change when all poses and states move by the same translation. Only the
+  // weak position information of the marginalization prior holds the window,
+  // and that information is coupled to the other states. An almost undamped
+  // LM step can then move the whole window by meters in one frame. When the
+  // common translation of a step is more than vio_gauge_gate_m, the gate adds
+  // vio_gauge_gate_weight to the common translation direction of the
+  // normal equations and solves again. Off by default.
+  bool vio_gauge_gate;
+  double vio_gauge_gate_m;
+  double vio_gauge_gate_weight;
+
   // Monocular VIO initialization: "vo_alignment" (bootstrap VO aligned to the
   // IMU) or "inertial" (the visual-inertial initializer ported from openvio)
   std::string vio_mono_init_method;
