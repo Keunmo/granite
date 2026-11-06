@@ -23,7 +23,7 @@ capture.yaml은 데이터셋마다 다릅니다. 각 데이터셋에는 그 데�
 ```bash
 ssh 10.20.10.50
 cd ~/granite_eval
-B=bin/live_9c9b9de
+B=bin/live_1af850d
 C=config/live
 # 1. CP2112의 I2C 번호를 확인합니다. "CP2112 SMBus Bridge"인 줄의 번호를 씁니다.
 for d in /sys/bus/i2c/devices/i2c-*; do echo $d $(cat $d/name); done | grep CP2112
@@ -176,7 +176,7 @@ scp granite_pi_cam_imu_vio granite_mono_vio_dataset libgranite.so 10.20.10.50:gr
 ### 4.2 명령
 
 ```bash
-cd ~/granite_eval; B=bin/live_9c9b9de; C=config/live
+cd ~/granite_eval; B=bin/live_1af850d; C=config/live
 # 센서만 확인 (VIO 없음, 10 s)
 $B/granite_pi_cam_imu_vio --config-path $C/b0429_pi_640x400_handheld.json --i2c /dev/i2c-23 --capture-only --duration 10
 # 녹화만 (VIO 없음)
@@ -231,7 +231,7 @@ $B/granite_pi_cam_imu_vio --calib $C/b0429_pi_640x400_calib.json --config-path $
 움직이는 녹화의 Pi 4 재생 예: smrig cam1(6.2절의 데이터를 Pi 4에 복사, `--realtime --preload`)은 7.93 s에 초기화하고 끝까지 추적합니다. rovins2 대비 SE3 ATE 0.58 m, Sim3 스케일 1.022, 길이 204.8 m 대 202.6 m입니다 [검증].
 
 ```bash
-cd ~/granite_eval; B=bin/live_9c9b9de; C=config/live
+cd ~/granite_eval; B=bin/live_1af850d; C=config/live
 $B/granite_mono_vio_dataset --dataset-path live/run1_euroc --cam-calib $C/b0429_pi_640x400_calib.json \
     --config-path $C/b0429_pi_640x400_handheld.json --out live/run1_replay --num-threads 3 --realtime
 ```
@@ -284,5 +284,5 @@ build/granite_vio --dataset-path eval/data/smrig_cam1 --dataset-type euroc --use
 
 - 코드: `src/device/pi_camera_imu.cpp`(rp1-cfe와 unicam, downscale, IMU 오류 복구), `src/pi_camera_imu_vio.cpp`(live 앱), `eval/src/mono_vio_dataset.cpp`(재생 러너, `--realtime`), `eval/scripts/capture_to_granite.py`, `eval/scripts/capture_to_euroc.py`.
 - 설정: `eval/config/live/`. Pi 4 live는 `b0429_pi_640x400_calib.json` + `b0429_pi_640x400_handheld.json`.
-- Pi 4 바이너리: `~/granite_eval/bin/live_9c9b9de/`.
+- Pi 4 바이너리: `~/granite_eval/bin/live_1af850d/`.
 - 아직 없는 것: 움직이는 live 시험, 30 fps 실시간 시험, live 시간 오프셋 측정, IMU Allan 보정, CP2112 오류의 원인.
