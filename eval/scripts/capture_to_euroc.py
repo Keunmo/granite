@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
-"""Convert one camera of an xeye capture (RGB8 quad_cam) and imu0 to a Granite EuRoC folder, and write a Granite
-mono calibration JSON.
+"""Convert one camera of an xeye capture (RGB8 quad_cam, or BAYER*8 / GRAY8 multi-camera nodes) and its IMU to a Granite
+EuRoC folder, and (equidistant uwfisheye only) write a Granite mono calibration JSON. For other camera models write
+the calibration with capture_to_granite.py --target capture.
 
 Image: RGB8 -> gray (OpenCV COLOR_RGB2GRAY fixed point: (4899 R + 9617 G + 1868 B + 8192) >> 14), then 2x2 average
-((a + b + c + d + 2) >> 2) -> 640x640 8-bit PNG. This is the openvio capture.resize_half condition.
+((a + b + c + d + 2) >> 2) -> 8-bit PNG. This is the openvio capture.resize_half condition.
+BAYER*8 and GRAY8: --downscale N as the live app (grbgToGray): N even averages N x N raw pixels, N odd averages each
+2x2 quad and then resizes by 2/N with area weights; N = 1 keeps the raw values as gray (no demosaicing, as the xeye
+gray16 calibration images).
 Camera: uwfisheye with one forward coefficient (rho = a1 theta) is the equidistant model, which is Kannala-Brandt
 (kb4) with k1..k4 = 0 and fx = fy = f a1. Halving: f / 2, c -> (c + 0.5) / 2 - 0.5.
 T_imu_cam = (imu2rig)^-1 cam2rig, poses [rx, ry, rz, tx, ty, tz] map sensor to rig (capture_to_config.py).
@@ -51,8 +55,21 @@ def rot_to_quat(R):
 G = {}
 
 
-def init(root, node, offset, size, w, h, rec_per_file, packet):
-    G.update(root=root, node=node, offset=offset, size=size, w=w, h=h, rpf=rec_per_file, packet=packet)
+def init(root, node, offset, size, w, h, rec_per_file, packet, fmt, downscale):
+    G.update(root=root, node=node, offset=offset, size=size, w=w, h=h, rpf=rec_per_file, packet=packet, fmt=fmt,
+             downscale=downscale)
+
+
+def raw_to_gray(raw, n):
+    """grbgToGray of the live app for a raw (Bayer or gray) 8-bit image."""
+    import cv2
+    h, w = raw.shape
+    if n == 1:
+        return raw
+    if n % 2 == 0:
+        return cv2.resize(raw, (w // n, h // n), interpolation=cv2.INTER_AREA)
+    quads = cv2.resize(raw, (w // 2, h // 2), interpolation=cv2.INTER_AREA)
+    return cv2.resize(quads, (w // n, h // n), interpolation=cv2.INTER_AREA)
 
 
 def convert(job):
@@ -64,10 +81,15 @@ def convert(job):
         size = int(np.frombuffer(f.read(4), "<i4")[0])
         assert size == G["packet"], (i, size)
         f.seek(rec + 4 + G["offset"])
-        raw = np.frombuffer(f.read(G["size"]), np.uint8).reshape(G["h"], G["w"], 3).astype(np.uint32)
-    gray = (4899 * raw[..., 0] + 9617 * raw[..., 1] + 1868 * raw[..., 2] + 8192) >> 14
-    half = (gray[0::2, 0::2] + gray[1::2, 0::2] + gray[0::2, 1::2] + gray[1::2, 1::2] + 2) >> 2
-    Image.fromarray(half.astype(np.uint8)).save(os.path.join(out, "%d.png" % t_ns), compress_level=1)
+        data = f.read(G["size"])
+    if G["fmt"] == "RGB8":
+        raw = np.frombuffer(data, np.uint8).reshape(G["h"], G["w"], 3).astype(np.uint32)
+        gray = (4899 * raw[..., 0] + 9617 * raw[..., 1] + 1868 * raw[..., 2] + 8192) >> 14
+        half = (gray[0::2, 0::2] + gray[1::2, 0::2] + gray[0::2, 1::2] + gray[1::2, 1::2] + 2) >> 2
+        image = half.astype(np.uint8)
+    else:
+        image = raw_to_gray(np.frombuffer(data, np.uint8).reshape(G["h"], G["w"]), G["downscale"])
+    Image.fromarray(image).save(os.path.join(out, "%d.png" % t_ns), compress_level=1)
     return i
 
 
@@ -79,7 +101,8 @@ def main():
     ap.add_argument("--node", default="quad_cam")
     ap.add_argument("--imu", default="imu0")
     ap.add_argument("--jobs", type=int, default=4)
-    ap.add_argument("--calib-out", required=True)
+    ap.add_argument("--calib-out", help="calibration JSON (equidistant uwfisheye only; else capture_to_granite.py)")
+    ap.add_argument("--downscale", type=int, default=2, help="BAYER*8 / GRAY8: 1/N of the image (RGB8: always 2)")
     ap.add_argument("--limit", type=int, default=0)
     a = ap.parse_args()
     root = pathlib.Path(a.capture)
@@ -98,11 +121,14 @@ def main():
         j += 3
         if j < len(tok) and not tok[j].lstrip("-").isdigit():
             j += 1
-        assert fmt == "RGB8"
-        layouts.append((off, w * h * 3, w, h))
-        off += w * h * 3
+        assert fmt == "RGB8" or fmt.startswith("BAYER") or fmt == "GRAY8", fmt
+        channels = 3 if fmt == "RGB8" else 1
+        layouts.append((off, w * h * channels, w, h, fmt))
+        off += w * h * channels
     packet = off
-    offset, size, w, h = layouts[ci]
+    offset, size, w, h, fmt = layouts[ci]
+    if fmt == "RGB8":
+        a.downscale = 2
     fsize = os.path.getsize(root / f"{a.node}000.bin")
     assert fsize % (packet + 4) == 0
     rpf = fsize // (packet + 4)
@@ -133,7 +159,18 @@ def main():
             v = line.strip().split(",")
             fo.write(",".join(v[:7]) + "\n")
 
-    # Calibration
+    if a.calib_out:
+        write_calibration(a, cap, cal, w, h)
+    jobs = [(idx, t, str(camdir)) for idx, t in frames]
+    with Pool(a.jobs, initializer=init,
+              initargs=(str(root), a.node, offset, size, w, h, rpf, packet, fmt, a.downscale)) as p:
+        for k, _ in enumerate(p.imap(convert, jobs, chunksize=8)):
+            if k % 500 == 0:
+                print(f"{k}/{len(jobs)}", file=sys.stderr, flush=True)
+    print("done", len(jobs), file=sys.stderr)
+
+
+def write_calibration(a, cap, cal, w, h):
     f, cx, cy = cal["intrinsic"]
     poly = cal["poly"]
     assert int(poly[0]) == 1 and len(poly) == 2, "only rho = a1 theta (equidistant) is converted exactly"
@@ -173,12 +210,6 @@ def main():
     print("T_imu_cam=\n", np.array2string(T_IC, precision=6, suppress_small=True), file=sys.stderr)
     print(f"kb4 fx=fy={fh} cx={cxh} cy={cyh} res={w//2}x{h//2}", file=sys.stderr)
 
-    jobs = [(idx, t, str(camdir)) for idx, t in frames]
-    with Pool(a.jobs, initializer=init, initargs=(str(root), a.node, offset, size, w, h, rpf, packet)) as p:
-        for k, _ in enumerate(p.imap(convert, jobs, chunksize=8)):
-            if k % 500 == 0:
-                print(f"{k}/{len(jobs)}", file=sys.stderr, flush=True)
-    print("done", len(jobs), file=sys.stderr)
 
 
 if __name__ == "__main__":
