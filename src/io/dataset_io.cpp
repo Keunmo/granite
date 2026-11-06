@@ -52,7 +52,9 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <granite/io/dataset_io.h>
 #include <granite/io/dataset_io_euroc.h>
 #include <granite/io/dataset_io_kitti.h>
+#ifndef GRANITE_NO_ROSBAG
 #include <granite/io/dataset_io_rosbag.h>
+#endif
 #include <granite/io/dataset_io_uzh.h>
 
 namespace granite {
@@ -62,8 +64,10 @@ DatasetIoInterfacePtr DatasetIoFactory::getDatasetIo(
   if (dataset_type == "euroc") {
     // return DatasetIoInterfacePtr();
     return DatasetIoInterfacePtr(new EurocIO(load_mocap_as_gt));
+#ifndef GRANITE_NO_ROSBAG
   } else if (dataset_type == "bag") {
     return DatasetIoInterfacePtr(new RosbagIO);
+#endif
   } else if (dataset_type == "uzh") {
     return DatasetIoInterfacePtr(new UzhIO);
   } else if (dataset_type == "kitti") {

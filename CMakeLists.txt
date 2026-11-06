@@ -265,6 +265,11 @@ target_link_libraries(granite_opt_flow granite pangolin)
 
 add_executable(granite_vio src/vio.cpp)
 target_link_libraries(granite_vio granite pangolin)
+if(GRANITE_BUILD_PI_CAMERA)
+  # granite_vio --live: the Raspberry Pi camera and IMU.
+  target_sources(granite_vio PRIVATE src/device/pi_camera_imu.cpp)
+  target_compile_definitions(granite_vio PRIVATE GRANITE_WITH_PI_CAMERA)
+endif()
 
 add_executable(granite_time_alignment src/time_alignment.cpp)
 target_link_libraries(granite_time_alignment granite pangolin)
@@ -306,11 +311,13 @@ if(GRANITE_BUILD_REALSENSE)
     ARCHIVE DESTINATION ${CMAKE_INSTALL_PREFIX}/lib)
 endif()
 
-if(GRANITE_BUILD_PI_CAMERA)
-  # The live window reuses the device-independent T265 GUI.
+if(GRANITE_BUILD_PI_CAMERA AND GRANITE_BUILD_GUI)
+  # VIO uses the Pangolin GUI of granite_vio (src/vio_app.h). The capture
+  # check without VIO uses the device-independent T265 window.
   add_executable(granite_pi_cam_imu_vio src/pi_camera_imu_vio.cpp
     src/device/pi_camera_imu.cpp src/device/t265_gui.cpp)
-  target_link_libraries(granite_pi_cam_imu_vio granite)
+  target_link_libraries(granite_pi_cam_imu_vio granite pangolin)
+  target_compile_definitions(granite_pi_cam_imu_vio PRIVATE GRANITE_WITH_PI_CAMERA)
   install(TARGETS granite_pi_cam_imu_vio RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin)
 endif()
 
