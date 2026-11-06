@@ -2,8 +2,9 @@
 # Live mono VIO on the Raspberry Pi 4 rig (Arducam B0429 + MPU-9250 on a CP2112).
 # Runs granite_vio --live with the Pangolin GUI and records the run as EuRoC.
 #
-# Usage: pi4_live_mono_vio.sh [--no-record] [--no-gui] [--duration S] [extra granite_vio options]
-# Env:   GRANITE_EVAL (default ~/granite_eval), GRANITE_I2C (default: the CP2112 adapter)
+# Usage: pi4_live_mono_vio.sh [--no-record] [--no-gui] [--threads N] [extra granite_vio options]
+# Env:   GRANITE_EVAL (default ~/granite_eval), GRANITE_I2C (default: the CP2112 adapter),
+#        GRANITE_THREADS (default 3: the TBB worker limit, --num-threads of granite_vio)
 #
 # Outputs in $GRANITE_EVAL/live/<date_time>/: run_traj_tum.txt, run_states.csv,
 # run.log, euroc/ (recording). Ctrl-C or closing the window ends the run and
@@ -18,11 +19,14 @@ CONFIG=$C/b0429_pi_640x400_handheld.json
 
 record=1
 gui=1
+threads=${GRANITE_THREADS:-3}
 extra=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-record) record=0 ;;
     --no-gui) gui=0 ;;
+    --threads) shift; threads=${1:?--threads needs a number} ;;
+    --num-threads) shift; threads=${1:?--num-threads needs a number} ;;
     *) extra+=("$1") ;;
   esac
   shift
@@ -70,12 +74,12 @@ fi
 OUT=$E/live/$(date +%Y%m%d_%H%M%S)
 mkdir -p "$OUT"
 args=(--live --use-imu 1 --cam-calib "$CALIB" --config-path "$CONFIG" --i2c "$I2C"
-      --num-threads 3 --out "$OUT/run")
+      --num-threads "$threads" --out "$OUT/run")
 [ "$record" = 1 ] && args+=(--record "$OUT/euroc")
 [ "$gui" = 0 ] && args+=(--show-gui 0)
 
 echo "Deployed: $(cat "$B/DEPLOYED" 2>/dev/null)"
-echo "IMU: $I2C  Output: $OUT"
+echo "IMU: $I2C  TBB threads: $threads  Output: $OUT"
 echo "Keep the rig still for 2 s, then move it clearly within 1 s. Ctrl-C or close the window to stop."
 cd "$E" || finish 1
 # tee ignores Ctrl-C: granite_vio writes its results and the LIVE line after Ctrl-C.

@@ -55,6 +55,7 @@ $B/granite_vio --dataset-path data/city_sky_cam1 --dataset-type euroc --use-imu 
 ```
 
 - 스크립트는 CP2112의 I2C 번호를 스스로 찾습니다. 다른 번호를 쓰려면 `GRANITE_I2C=/dev/i2c-N`을 앞에 붙입니다.
+- TBB 스레드 수는 기본 3입니다. 바꾸려면 `--threads N`(또는 `--num-threads N`)을 줍니다. 예: `pi4_live_mono_vio.sh --threads 4`.
 - 결과는 `~/granite_eval/live/<날짜_시각>/`에 있습니다: `run_traj_tum.txt`, `run_states.csv`, `run.log`, `euroc/`(녹화).
 - Ctrl+C를 누르거나 GUI 창을 닫으면 실행이 끝나고 결과를 씁니다. 터미널 창을 먼저 닫으면 결과의 끝부분을 잃을 수 있습니다.
 - 다른 `bin/granite` 프로그램이 센서를 쓰고 있으면 스크립트는 실행하지 않습니다.
@@ -295,7 +296,7 @@ $B/granite_vio $D --config-path $C --use-imu 1 --num-threads 4 --max-frames 1000
 | `--realtime` | 이미지를 데이터 시각에 공급합니다. flow 입력에 4장보다 많이 쌓이면 가장 오래된 이미지를 버립니다. live와 같은 규칙입니다. 추정기도 `vio_enforce_realtime`을 씁니다. |
 | (없음) | 최대 속도입니다. 모든 이미지를 처리합니다. 결정론 설정이면 실행마다 궤적이 같습니다. |
 | `--out PREFIX` | `PREFIX_traj_tum.txt`와 `PREFIX_states.csv`를 씁니다. 평가 러너와 같은 형식입니다. |
-| `--num-threads N` | TBB 스레드 수입니다. 데이터셋 실행은 4, live는 3을 씁니다. |
+| `--num-threads N` | TBB 스레드 수의 상한입니다. 데이터셋 실행은 4, live는 3을 씁니다. `granite_vio`에서 이 옵션을 빼면 상한이 없습니다(Pi 4에서는 4코어 모두). |
 | `--max-frames N` | 앞 N 프레임만 씁니다. 0은 모두입니다. |
 | `--show-gui 0` | GUI 없이 실행합니다. `DISPLAY`가 없으면 자동으로 GUI 없이 실행합니다. |
 | `--cam-time-offset-ns N` | 이미지 시각에 더합니다. 보정 JSON의 오프셋은 읽지 않습니다. |
@@ -367,7 +368,7 @@ $B/granite_pi_cam_imu_vio --config-path $C/b0429_pi_640x400_handheld.json --i2c 
 - VIO가 없는 두 모드(`--capture-only`, 보정 없는 `--record`)는 `granite_pi_cam_imu_vio`에만 있습니다. 이 두 모드는 Pangolin GUI 대신 이미지만 보이는 OpenCV 창을 씁니다.
 - 센서 옵션(`--fps`, `--downscale`, `--exposure`, `--max-exposure`, `--i2c` 등)은 두 프로그램이 같습니다. 명령줄 옵션은 설정 파일의 `camera.*` 키보다 우선합니다.
 - `--duration`을 주지 않으면 Ctrl-C 또는 창 닫기까지 실행합니다.
-- `--num-threads`는 3을 권장합니다. 카메라와 IMU 스레드가 나머지 코어를 씁니다.
+- `--num-threads`는 3을 권장합니다. 카메라와 IMU 스레드가 나머지 코어를 씁니다. 이 값은 TBB 병렬 작업의 상한입니다. flow, 추정기, 카메라, IMU, GUI는 각자 자기 스레드를 따로 씁니다.
 - GUI는 최근 이미지 300장(약 20 s)만 보관합니다. 더 오래된 프레임을 고르면 이미지가 바뀌지 않습니다.
 - 실행 중에는 매초 상태 줄(`t=... input_fps=... imu_hz=... tracking=... support=...`)이 나옵니다.
 
