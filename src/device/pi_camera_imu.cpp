@@ -567,7 +567,7 @@ void PiCameraImuDevice::imuLoop() {
     std::vector<uint8_t> bytes;
     auto next_poll = std::chrono::steady_clock::now();
     int consecutive_errors = 0, empty_polls = 0;
-    bool need_reset = false;
+    bool need_reset = false, realign = false, reading_data = false;
     while (running) {
       next_poll += IMU_POLL_PERIOD;
       std::this_thread::sleep_until(next_poll);
@@ -592,8 +592,21 @@ void PiCameraImuDevice::imuLoop() {
         if (count + MPU_FIFO_SAMPLE_BYTES > MPU_FIFO_BYTES) {
           ++imu_overflows;
           reset_fifo();
+          realign = false;
           next_poll = std::chrono::steady_clock::now();
           continue;
+        }
+        // After a failed transfer, a FIFO that does not hold whole samples
+        // starts with the end of a sample: read and discard those bytes.
+        if (realign) {
+          realign = false;
+          const size_t partial = count % MPU_FIFO_SAMPLE_BYTES;
+          if (partial != 0) {
+            uint8_t discard[MPU_FIFO_SAMPLE_BYTES];
+            readImu(MPU_FIFO_R_W, discard, partial);
+            imu_clock.reset();
+            continue;
+          }
         }
         const size_t samples = count / MPU_FIFO_SAMPLE_BYTES;
         consecutive_errors = 0;
@@ -603,10 +616,12 @@ void PiCameraImuDevice::imuLoop() {
         }
         empty_polls = 0;
         bytes.resize(samples * MPU_FIFO_SAMPLE_BYTES);
+        reading_data = true;
         for (size_t offset = 0; offset < bytes.size(); offset += MPU_READ_CHUNK) {
           readImu(MPU_FIFO_R_W, bytes.data() + offset,
                   std::min(MPU_READ_CHUNK, bytes.size() - offset));
         }
+        reading_data = false;
         const auto times = imu_clock.assign(before_ns, after_ns, samples);
         imu_period_ns = imu_clock.periodNs();
         for (size_t i = 0; i < samples; ++i) {
@@ -620,16 +635,22 @@ void PiCameraImuDevice::imuLoop() {
           if (record_imu_queue) record_imu_queue->push(data);
         }
       } catch (const std::exception& error) {
-        // The CP2112 bridge of the Pi 4 rig times out transfers (about one in
-        // 200 polls, also without the camera), and the next transfer then
-        // fails too. A failed FIFO read can lose part of the FIFO, which
-        // breaks the 12-byte sample framing: reset the FIFO and continue.
-        // The IMU stream then has a gap of about 100-200 ms.
+        // The CP2112 bridge of the Pi 4 rig times out transfers after about
+        // 54 ms (about one in 200 polls, also without the camera, also with
+        // the xeye ImuMPU6050 loop), and the next transfer often fails too.
+        // Do not reset the FIFO: a reset drops the samples in the FIFO
+        // (4.5 % of the samples in 60 s). A failed FIFO_COUNT read loses no
+        // sample. A failed FIFO data read lost the samples of that read
+        // (whole samples in a 60 s test), which breaks the sample index of
+        // the clock: restart the clock. Then check the sample framing at the
+        // next FIFO_COUNT (realign). The loss is then about 0.3 %.
         const int64_t lost_ns = monotonicNs() - poll_start_ns;
         ++imu_i2c_errors;
         if (lost_ns > imu_error_max_ns) imu_error_max_ns = lost_ns;
         if (++consecutive_errors > 5) throw;
-        need_reset = true;
+        if (reading_data) imu_clock.reset();
+        reading_data = false;
+        realign = true;
         next_poll = std::chrono::steady_clock::now();
       }
       // A slow bridge must not accumulate a backlog of sleep deadlines.

@@ -23,7 +23,7 @@ capture.yaml은 데이터셋마다 다릅니다. 각 데이터셋에는 그 데�
 ```bash
 ssh 10.20.10.50
 cd ~/granite_eval
-B=bin/live_9509bde
+B=bin/live_9c9b9de
 C=config/live
 # 1. CP2112의 I2C 번호를 확인합니다. "CP2112 SMBus Bridge"인 줄의 번호를 씁니다.
 for d in /sys/bus/i2c/devices/i2c-*; do echo $d $(cat $d/name); done | grep CP2112
@@ -176,7 +176,7 @@ scp granite_pi_cam_imu_vio granite_mono_vio_dataset libgranite.so 10.20.10.50:gr
 ### 4.2 명령
 
 ```bash
-cd ~/granite_eval; B=bin/live_9509bde; C=config/live
+cd ~/granite_eval; B=bin/live_9c9b9de; C=config/live
 # 센서만 확인 (VIO 없음, 10 s)
 $B/granite_pi_cam_imu_vio --config-path $C/b0429_pi_640x400_handheld.json --i2c /dev/i2c-23 --capture-only --duration 10
 # 녹화만 (VIO 없음)
@@ -231,7 +231,7 @@ $B/granite_pi_cam_imu_vio --calib $C/b0429_pi_640x400_calib.json --config-path $
 움직이는 녹화의 Pi 4 재생 예: smrig cam1(6.2절의 데이터를 Pi 4에 복사, `--realtime --preload`)은 7.93 s에 초기화하고 끝까지 추적합니다. rovins2 대비 SE3 ATE 0.58 m, Sim3 스케일 1.022, 길이 204.8 m 대 202.6 m입니다 [검증].
 
 ```bash
-cd ~/granite_eval; B=bin/live_9509bde; C=config/live
+cd ~/granite_eval; B=bin/live_9c9b9de; C=config/live
 $B/granite_mono_vio_dataset --dataset-path live/run1_euroc --cam-calib $C/b0429_pi_640x400_calib.json \
     --config-path $C/b0429_pi_640x400_handheld.json --out live/run1_replay --num-threads 3 --realtime
 ```
@@ -274,7 +274,7 @@ build/granite_vio --dataset-path eval/data/smrig_cam1 --dataset-type euroc --use
 |---|---|
 | `No rp1-cfe or unicam media graph contains sensor` | 카메라 케이블, `dtoverlay=arducam-pivariety` |
 | `Unexpected MPU WHO_AM_I value`, `Cannot open /dev/i2c-N` | `--i2c` 번호(4.1절), 사용자의 `i2c` 그룹 |
-| `imu_i2c_errors`가 0보다 큼 | Pi 4 리그의 CP2112는 약 200회에 1회 전송 시간 초과가 납니다. 카메라 없이 IMU만 읽어도 납니다(40 s에 24회). openvio도 같은 오류로 1 s 안에 멈춥니다. 앱은 FIFO를 다시 시작하고 계속합니다. 그래서 IMU에 100~200 ms 빈칸이 생깁니다(30 s에 5회, 합 약 1 s). 움직이는 중의 빈칸은 VIO 오차를 늘립니다 [미검증]. 근본 원인(브리지, 케이블, 풀업, I2C 속도)은 확인하지 않았습니다. |
+| `imu_i2c_errors`가 0보다 큼 | Pi 4 리그의 CP2112는 약 200회에 1회 전송 시간 초과(`errno 110`, 약 54 ms 뒤)가 납니다. 카메라 없이 IMU만 읽어도 나고, xeye `ImuMPU6050`의 FIFO 루프를 그대로 옮긴 시험 프로그램에서도 납니다(60 s에 28회) [검증]. 읽기 주기를 20~100 ms로 바꿔도 줄지 않습니다. 앱은 오류 뒤에 FIFO를 리셋하지 않고 샘플 경계만 다시 맞춥니다. 그래서 IMU 빈칸은 약 25 ms(샘플 4~5개)입니다(60 s: 199.1 Hz, 최대 빈칸 28 ms, 합 0.37 s). 이전 방식(FIFO 리셋)은 192.5 Hz, 최대 빈칸 201 ms, 합 2.35 s였습니다 [검증]. 근본 원인(USB 경로, 브리지, 케이블)은 확인하지 않았습니다. |
 | 초기화되지 않음 | 2.5절. `GRANITE_MONO_INIT_TRACE=1`로 이유를 봅니다. `platform still`은 움직임이 부족합니다. `platform moving (moving start off)`는 정지 구간이 부족합니다. `no IMU excitation in the newer half`는 가속이 부족합니다. |
 | `queue_drops` 증가 | 추정기가 카메라보다 느립니다. `--fps`를 낮추거나 `--num-threads`를 확인합니다. |
 | 밝기가 목표와 다름 | `camera.metering_circle`이 렌즈 원 안에 있는지 확인합니다. 노출은 `--max-exposure`(5 ms) 다음에 gain을 씁니다. |
@@ -284,5 +284,5 @@ build/granite_vio --dataset-path eval/data/smrig_cam1 --dataset-type euroc --use
 
 - 코드: `src/device/pi_camera_imu.cpp`(rp1-cfe와 unicam, downscale, IMU 오류 복구), `src/pi_camera_imu_vio.cpp`(live 앱), `eval/src/mono_vio_dataset.cpp`(재생 러너, `--realtime`), `eval/scripts/capture_to_granite.py`, `eval/scripts/capture_to_euroc.py`.
 - 설정: `eval/config/live/`. Pi 4 live는 `b0429_pi_640x400_calib.json` + `b0429_pi_640x400_handheld.json`.
-- Pi 4 바이너리: `~/granite_eval/bin/live_9509bde/`.
+- Pi 4 바이너리: `~/granite_eval/bin/live_9c9b9de/`.
 - 아직 없는 것: 움직이는 live 시험, 30 fps 실시간 시험, live 시간 오프셋 측정, IMU Allan 보정, CP2112 오류의 원인.

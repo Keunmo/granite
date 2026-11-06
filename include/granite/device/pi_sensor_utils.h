@@ -143,7 +143,8 @@ class FifoSampleClock {
     first_host = 0;
     anchor_index = 0;
     anchor_bound = 0;
-    last_ns = 0;
+    // Keep last_ns: the times after a reset stay later than the times before
+    // it, so that the IMU stream stays in time order.
     last_time = 0;
     started = false;
     anchored = false;
