@@ -405,7 +405,8 @@ void MonoVioEstimator::runInertial(const Eigen::Vector3d& bg, const Eigen::Vecto
   Eigen::aligned_map<int64_t, OpticalFlowResult::Ptr> history;
   ImuData::Ptr pending;
   std::string last_reason;
-  const int64_t keep_ns = static_cast<int64_t>((options.window_time + 1.0) * 1e9);
+  const int64_t keep_ns =
+      static_cast<int64_t>((std::max(options.window_time, options.moving_window_time) + 1.0) * 1e9);
   try {
     while (!should_quit) {
       OpticalFlowResult::Ptr frame;

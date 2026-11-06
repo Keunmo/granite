@@ -135,6 +135,8 @@ VioConfig::VioConfig() {
   vio_mono_init_rest_tilt_bias_sigma = 0.0;
   vio_mono_init_max_relative_speed_sigma = 0.05;
   vio_mono_init_max_rest_disparity = 0.0;
+  vio_mono_init_moving_window_time = 0.0;
+  vio_mono_init_parallax_tracks = false;
 
   mapper_obs_std_dev = 0.25;
   mapper_obs_huber_thresh = 1.5;
@@ -276,6 +278,8 @@ void serialize(Archive& ar, granite::VioConfig& config) {
   optional_nvp(ar, "config.vio_mono_init_rest_tilt_bias_sigma", config.vio_mono_init_rest_tilt_bias_sigma);
   optional_nvp(ar, "config.vio_mono_init_max_relative_speed_sigma", config.vio_mono_init_max_relative_speed_sigma);
   optional_nvp(ar, "config.vio_mono_init_max_rest_disparity", config.vio_mono_init_max_rest_disparity);
+  optional_nvp(ar, "config.vio_mono_init_moving_window_time", config.vio_mono_init_moving_window_time);
+  optional_nvp(ar, "config.vio_mono_init_parallax_tracks", config.vio_mono_init_parallax_tracks);
 
   ar(CEREAL_NVP(config.mapper_obs_std_dev));
   ar(CEREAL_NVP(config.mapper_obs_huber_thresh));

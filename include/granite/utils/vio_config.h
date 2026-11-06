@@ -165,6 +165,13 @@ struct VioConfig {
   // can move the pixels less than vio_mono_init_max_still_disparity. The
   // start at rest then sets the speed to zero. Not in openvio.
   double vio_mono_init_max_rest_disparity;
+  // Data window of the moving start [s] (0: vio_mono_init_window_time). The
+  // start at rest keeps vio_mono_init_window_time. Not in openvio.
+  double vio_mono_init_moving_window_time;
+  // Moving start: use the tracks of the largest parallax after the gyro
+  // rotation (they span at least half the window) instead of the longest
+  // tracks, which see the farthest points. Not in openvio.
+  bool vio_mono_init_parallax_tracks;
 
   double mapper_obs_std_dev;
   double mapper_obs_huber_thresh;

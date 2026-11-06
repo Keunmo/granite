@@ -210,6 +210,8 @@ MonoInertialInitOptions MonoInertialInitOptions::fromConfig(const VioConfig& con
   o.rest_tilt_bias_sigma = config.vio_mono_init_rest_tilt_bias_sigma;
   o.max_relative_speed_sigma = config.vio_mono_init_max_relative_speed_sigma;
   o.max_rest_disparity = config.vio_mono_init_max_rest_disparity;
+  o.moving_window_time = config.vio_mono_init_moving_window_time;
+  o.parallax_tracks = config.vio_mono_init_parallax_tracks;
   return o;
 }
 
@@ -222,7 +224,8 @@ std::string MonoInertialInitResult::summary() const {
   if (method == "at rest") s << " accel_std_old=" << accel_std_old << " accel_std_new=" << accel_std_new;
   if (method == "moving")
     s << " valid_tracks=" << num_valid_tracks << " poses=" << num_poses << " rotation_deg=" << rotation_deg
-      << " linear_speed=" << linear_speed << " relative_speed_sigma=" << relative_speed_sigma
+      << " linear_speed=" << linear_speed << " refined_speed=" << refined_speed
+      << " relative_speed_sigma=" << relative_speed_sigma
       << " refined_features=" << num_refined_features
       << " unprojected=" << num_unprojected_observations << " iterations=" << refine_iterations
       << " cost=" << refine_initial_cost << "->" << refine_final_cost;
@@ -241,7 +244,7 @@ MonoInertialInitializer::MonoInertialInitializer(const MonoInertialInitOptions& 
 
 void MonoInertialInitializer::addImu(const ImuData& sample) {
   imu.push_back(sample);
-  const int64_t oldest = sample.t_ns - static_cast<int64_t>((options.window_time + 0.10) * 1e9);
+  const int64_t oldest = sample.t_ns - static_cast<int64_t>((bufferTime() + 0.10) * 1e9);
   while (!imu.empty() && imu.front().t_ns < oldest) imu.pop_front();
   startup_accel.emplace_back(sample.t_ns, sample.accel);
 }
@@ -294,6 +297,12 @@ void MonoInertialInitializer::dropMeasurementsUpTo(int64_t t_ns) {
   }
 }
 
+double MonoInertialInitializer::movingWindowTime() const {
+  return options.moving_window_time > 0.0 ? options.moving_window_time : options.window_time;
+}
+
+double MonoInertialInitializer::bufferTime() const { return std::max(options.window_time, movingWindowTime()); }
+
 int64_t MonoInertialInitializer::newestImageTime() const {
   int64_t newest = -1;
   for (const auto& entry : tracks)
@@ -340,8 +349,10 @@ MonoInertialInitResult MonoInertialInitializer::tryInitialize() {
     result.reason = "no image window yet";
     return result;
   }
-  dropMeasurementsUpTo(oldest);
-  while (!imu.empty() && imu.front().t_ns < oldest) imu.pop_front();
+  // The buffer keeps the longer of the two windows; the still / moving decision uses window_time
+  const int64_t oldest_buffer = newest - static_cast<int64_t>(bufferTime() * 1e9) - 100000000LL;
+  dropMeasurementsUpTo(oldest_buffer);
+  while (!imu.empty() && imu.front().t_ns < oldest_buffer) imu.pop_front();
   result.num_tracks = static_cast<int>(tracks.size());
 
   // Visual motion of the older and the newer half of the window
@@ -349,7 +360,7 @@ MonoInertialInitResult MonoInertialInitializer::tryInitialize() {
   if (options.max_still_disparity > 0.0) {
     const int64_t mid = newest - window_ns / 2;
     int count_old = 0, count_new = 0;
-    meanTrackMotion(mid, kNoBound, &result.disparity_old, &count_old);
+    meanTrackMotion(mid, oldest_buffer == oldest ? kNoBound : oldest, &result.disparity_old, &count_old);
     meanTrackMotion(newest, mid, &result.disparity_new, &count_new);
     if (count_old < kMinDisparityTracks || count_new < kMinDisparityTracks) {
       result.reason = "not enough tracks for disparity";
@@ -589,7 +600,7 @@ class Refinement {
 bool MonoInertialInitializer::startMoving(MonoInertialInitResult& result) {
   constexpr int kMinTracks = 8;  // Tracks the moving start must keep
   const int64_t newest = newestImageTime();
-  const int64_t W = static_cast<int64_t>(options.window_time * 1e9);
+  const int64_t W = static_cast<int64_t>(movingWindowTime() * 1e9);
   const int64_t oldest = newest - W;
   dropMeasurementsUpTo(oldest);
   const bool imu_before_window = !imu.empty() && imu.front().t_ns < oldest;
@@ -609,8 +620,40 @@ bool MonoInertialInitializer::startMoving(MonoInertialInitResult& result) {
   for (const auto& entry : tracks) ids.push_back(entry.first);
   std::stable_sort(ids.begin(), ids.end(),
                    [&](int a, int b) { return tracks.at(a).t_ns.size() > tracks.at(b).t_ns.size(); });
+  if (options.parallax_tracks) {
+    // Not in openvio: the longest tracks see the farthest points, whose parallax can be below the gyro error. Rank
+    // the tracks that span half the window by their parallax after the gyro rotation (bias prior) instead.
+    std::set<int64_t> image_times;
+    for (const auto& entry : tracks) image_times.insert(entry.second.t_ns.begin(), entry.second.t_ns.end());
+    std::map<int64_t, Sophus::SO3d> R_of_time;  // R_{I(first IMU sample) <- I(t)}
+    Sophus::SO3d R;
+    size_t k = 0;
+    for (int64_t t : image_times) {
+      if (t < imu.front().t_ns) continue;
+      while (k + 1 < imu.size() && imu[k + 1].t_ns <= t) {
+        R = R * Sophus::SO3d::exp((imu[k].gyro - options.gyro_bias_prior) * seconds(imu[k + 1].t_ns - imu[k].t_ns));
+        ++k;
+      }
+      R_of_time[t] = R * Sophus::SO3d::exp((imu[k].gyro - options.gyro_bias_prior) * seconds(t - imu[k].t_ns));
+    }
+    const Eigen::Matrix3d R_ic = calib.T_i_c[0].so3().matrix();
+    std::map<int, double> parallax;
+    for (int id : ids) {
+      const Track& track = tracks.at(id);
+      double angle = -1.0;
+      const auto r0 = R_of_time.find(track.t_ns.front());
+      const auto r1 = R_of_time.find(track.t_ns.back());
+      if (track.t_ns.back() - track.t_ns.front() >= W / 2 && r0 != R_of_time.end() && r1 != R_of_time.end()) {
+        const Eigen::Vector3d d0 = r0->second * (R_ic * track.bearings.front());
+        const Eigen::Vector3d d1 = r1->second * (R_ic * track.bearings.back());
+        angle = std::atan2(d0.cross(d1).norm(), d0.dot(d1));
+      }
+      parallax[id] = angle;
+    }
+    std::stable_sort(ids.begin(), ids.end(), [&](int a, int b) { return parallax.at(a) > parallax.at(b); });
+  }
   if (static_cast<int>(ids.size()) > options.max_tracks) ids.resize(options.max_tracks);
-  const int min_kept = static_cast<int>(options.window_time);
+  const int min_kept = static_cast<int>(movingWindowTime());
   const int64_t spacing = W / (options.num_poses + 1);
   std::set<int64_t> times{newest};
   std::vector<int> track_ids;
@@ -873,6 +916,7 @@ bool MonoInertialInitializer::startMoving(MonoInertialInitResult& result) {
     const Eigen::Vector3d u = speed > 1e-6 ? Eigen::Vector3d(v / speed) : Eigen::Vector3d::UnitX();
     const double sigma = std::sqrt(std::max(0.0, u.dot(P.block<3, 3>(6, 6) * u)));
     result.relative_speed_sigma = sigma / std::max(speed, 1e-6);
+    result.refined_speed = speed;
     if (options.max_relative_speed_sigma > 0.0 && result.relative_speed_sigma > options.max_relative_speed_sigma) {
       result.reason = "speed not observable (relative sigma " + std::to_string(result.relative_speed_sigma) + ")";
       return false;

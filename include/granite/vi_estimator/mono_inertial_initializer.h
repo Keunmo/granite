@@ -89,6 +89,10 @@ struct MonoInertialInitOptions {
   double max_relative_speed_sigma = 0.05;
   // Not in openvio: start at rest only when the older half moves at most this [px] (0: off)
   double max_rest_disparity = 0.0;
+  // Not in openvio: data window of the moving start [s] (0: window_time)
+  double moving_window_time = 0.0;
+  // Not in openvio: moving start with the tracks of the largest gyro-compensated parallax (not the longest ones)
+  bool parallax_tracks = false;
   Eigen::Vector3d gyro_bias_prior = Eigen::Vector3d::Zero();   // Bias linearization point and prior mean
   Eigen::Vector3d accel_bias_prior = Eigen::Vector3d::Zero();
 
@@ -117,6 +121,7 @@ struct MonoInertialInitResult {
   double rotation_deg = -1;
   double linear_speed = -1;  // |v| of the linear solution at the oldest pose
   double relative_speed_sigma = -1;  // Moving: speed sigma / speed of the refined start state
+  double refined_speed = -1;         // Moving: |v| of the refined start state
   int num_refined_features = 0, num_unprojected_observations = 0, refine_iterations = 0;
   double refine_initial_cost = 0, refine_final_cost = 0;
   bool rest_bias_applied = false;
@@ -149,6 +154,8 @@ class MonoInertialInitializer {
   void applyRestAccelBias(MonoInertialInitResult& result) const;
   void dropMeasurementsUpTo(int64_t t_ns);
   int64_t newestImageTime() const;
+  double movingWindowTime() const;
+  double bufferTime() const;
   void meanTrackMotion(int64_t before, int64_t after, double* mean, int* count) const;
 
   MonoInertialInitOptions options;
