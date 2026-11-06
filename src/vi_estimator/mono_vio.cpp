@@ -49,6 +49,7 @@ OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 */
 
+#include <cstdlib>
 #include <granite/vi_estimator/mono_vio.h>
 #include <granite/vi_estimator/mono_inertial_initializer.h>
 #include <sstream>
@@ -405,6 +406,9 @@ void MonoVioEstimator::runInertial(const Eigen::Vector3d& bg, const Eigen::Vecto
   Eigen::aligned_map<int64_t, OpticalFlowResult::Ptr> history;
   ImuData::Ptr pending;
   std::string last_reason;
+  // GRANITE_MONO_INIT_TRACE=1 prints every initialization attempt (one line per image) to show
+  // why a start does not initialize, e.g. the disparities of the still / moving decision.
+  const bool trace_init = std::getenv("GRANITE_MONO_INIT_TRACE") != nullptr;
   const int64_t keep_ns =
       static_cast<int64_t>((std::max(options.window_time, options.moving_window_time) + 1.0) * 1e9);
   try {
@@ -448,6 +452,7 @@ void MonoVioEstimator::runInertial(const Eigen::Vector3d& bg, const Eigen::Vecto
       while (!samples.empty() && samples.front().t_ns < frame->t_ns - keep_ns) samples.pop_front();
       initializer.addFrame(*frame);
       const MonoInertialInitResult result = initializer.tryInitialize();
+      if (trace_init) std::cout << "MONO_INIT_TRACE " << result.summary() << std::endl;
       if (!result.success) {
         if (!result.method.empty() && result.reason != last_reason) {
           std::cout << "MONO_INIT_TRY " << result.summary() << std::endl;
