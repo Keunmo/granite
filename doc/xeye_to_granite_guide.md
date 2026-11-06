@@ -5,6 +5,8 @@
 - **데이터셋 실행:** 녹화된 EuRoC 데이터셋을 Pi 4에서 재생합니다. 기준 데이터셋은 Unreal `unreal_data_city_sky`의 Cam1입니다(4절).
 - **live 실행:** Pi 4에 연결된 카메라와 IMU로 실행합니다. 기준 리그는 Arducam B0429(AR0234)와 MPU-9250(CP2112)입니다(5절).
 
+두 방법 모두 `granite_vio`로 실행합니다. 화면은 Granite 기본 GUI(Pangolin)입니다. 화면이 없으면(`--show-gui 0` 또는 SSH) 결과 파일만 씁니다.
+
 두 방법 모두 xeye capture의 보정(`capture.yaml`)을 Granite 입력으로 바꾸어서 씁니다(2절). 구조는 openvio의 `doc/xeye_to_openvio_guide.md`를 따릅니다. Pi 4의 주소는 `uvify@10.20.10.50`입니다.
 
 capture.yaml은 데이터셋마다 다릅니다. 각 데이터셋에는 그 데이터셋의 capture.yaml만 씁니다.
@@ -23,20 +25,23 @@ capture.yaml은 데이터셋마다 다릅니다. 각 데이터셋에는 그 데�
 
 ## 빠른 시작
 
-바이너리, 설정, 데이터는 Pi 4에 이미 있습니다 [검증, 2026-11-06].
+바이너리, 설정, 데이터는 Pi 4에 있습니다. 바이너리 폴더는 `~/granite_eval/bin/live_355cc87/`입니다.
 
 ### A. Pi 4에서 데이터셋 실행 (Unreal Cam1)
 
 ```bash
 ssh 10.20.10.50
 cd ~/granite_eval
-B=bin/live_1af850d
+B=bin/live_355cc87
 # 실시간(15.4 fps) 실행, 앞 1000 프레임. 전체 구간은 --max-frames를 뺍니다(약 400 s).
-$B/granite_mono_vio_dataset --dataset-path data/city_sky_cam1 --cam-calib config/city_sky_cam1_kb4_calib.json \
-    --config-path config/oi_g40_det_gauge_gate_rest.json --out results/c1_rt --num-threads 4 --realtime --max-frames 1000
+$B/granite_vio --dataset-path data/city_sky_cam1 --dataset-type euroc --use-imu 1 \
+    --cam-calib config/city_sky_cam1_kb4_calib.json --config-path config/oi_g40_det_gauge_gate_rest.json \
+    --num-threads 4 --realtime --max-frames 1000 --out results/c1_rt
 ```
 
 - 결과: `results/c1_rt_traj_tum.txt`(TUM, T_w_i), `results/c1_rt_states.csv`(상태 CSV). 끝의 `SUMMARY` 줄에 지연과 버린 이미지 수가 있습니다.
+- SSH에는 `DISPLAY`가 없습니다. 그래서 GUI 없이 실행합니다. Pi 4 모니터에 GUI를 띄우는 방법은 7.3절에 있습니다.
+- GUI가 열려 있으면 데이터가 끝나도 프로그램이 끝나지 않습니다. 창을 닫으면 끝납니다.
 - 평가는 데스크톱에서 합니다(4.4절). Pi 4에는 numpy가 없습니다.
 
 ### B. Pi 4 live 실행
@@ -46,40 +51,31 @@ $B/granite_mono_vio_dataset --dataset-path data/city_sky_cam1 --cam-calib config
 ```bash
 ssh 10.20.10.50
 cd ~/granite_eval
-B=bin/live_1af850d
+B=bin/live_355cc87
 C=config/live
 # 1. CP2112의 I2C 번호를 확인합니다. "CP2112 SMBus Bridge"인 줄의 번호를 씁니다.
 for d in /sys/bus/i2c/devices/i2c-*; do echo $d $(cat $d/name); done | grep CP2112
-# 2. VIO와 녹화를 같이 실행합니다. 리그를 2초 이상 정지한 다음 움직입니다. Ctrl-C로 끝냅니다.
-$B/granite_pi_cam_imu_vio --calib $C/b0429_pi_640x400_calib.json --config-path $C/b0429_pi_640x400_handheld.json \
-    --i2c /dev/i2c-23 --out live/run1 --record live/run1_euroc
+# 2. VIO와 녹화를 같이 실행합니다. 리그를 2초 이상 정지한 다음 움직입니다. Ctrl-C 또는 창 닫기로 끝냅니다.
+$B/granite_vio --live --use-imu 1 --cam-calib $C/b0429_pi_640x400_calib.json \
+    --config-path $C/b0429_pi_640x400_handheld.json --i2c /dev/i2c-23 --out live/run1 --record live/run1_euroc
 ```
 
 - 결과: `live/run1_traj_tum.txt`(TUM, T_w_i), `live/run1_states.csv`(상태 CSV), `live/run1_euroc/`(EuRoC 녹화).
 - 끝에 나오는 `LIVE` 줄에서 fps, 손실, IMU, 지연을 확인합니다(6절).
-- 화면이 있으면 live 창이 나옵니다. SSH에는 `DISPLAY`가 없으므로 창이 없습니다.
-- live 창은 Granite 기본 GUI(`granite_vio`의 Pangolin 화면)가 아닙니다. T265 live 앱용으로 추가한 OpenCV 창(`T265Gui`, `doc/T265_GUI.md`)입니다 [코드 확인].
-
-GUI 정리 [코드 확인]:
-
-| 실행 | 프로그램 | 화면 |
-|---|---|---|
-| Pi 4 live | `granite_pi_cam_imu_vio` | OpenCV `T265Gui` (Granite 기본 GUI 아님) |
-| 데이터셋 (Pi 4, 실시간 규칙) | `granite_mono_vio_dataset` | 없음 |
-| 데이터셋 (데스크톱) | `granite_vio --use-imu 1` | Granite 기본 Pangolin GUI. 실시간 규칙과 시간 오프셋은 없음(7.3절) |
+- `granite_pi_cam_imu_vio`도 같은 GUI와 같은 실행 경로를 씁니다(5.2절).
 
 ## 1. 전체 흐름
 
 | 단계 | 도구 | 입력 | 출력 |
 |---|---|---|---|
 | A. 변환 | `eval/scripts/capture_to_granite.py`, `eval/scripts/capture_to_euroc.py` | xeye `capture.yaml`, capture 데이터 | Granite 보정 JSON, VIO 설정 JSON, EuRoC 데이터셋 |
-| B. 크로스 빌드 | 데스크톱 `~/cross/granite-pi4` | Granite 소스 | `granite_pi_cam_imu_vio`, `granite_mono_vio_dataset`, `libgranite.so` |
-| C. 데이터셋 실행 | Pi 4 `granite_mono_vio_dataset` | A의 EuRoC 데이터셋과 보정 | TUM 궤적, 상태 CSV |
-| D. live 실행 | Pi 4 `granite_pi_cam_imu_vio` | A의 보정과 설정 | TUM 궤적, 상태 CSV, EuRoC 녹화 |
-| E. 녹화 재생 | `granite_mono_vio_dataset --realtime` | D의 녹화 | live와 비교할 궤적 |
+| B. 크로스 빌드 | 데스크톱 `~/cross/granite-pi4` | Granite 소스 | `granite_vio`, `granite_pi_cam_imu_vio`, `granite_mono_vio_dataset`, `libgranite.so` |
+| C. 데이터셋 실행 | Pi 4 `granite_vio --realtime` | A의 EuRoC 데이터셋과 보정 | TUM 궤적, 상태 CSV |
+| D. live 실행 | Pi 4 `granite_vio --live` | A의 보정과 설정 | TUM 궤적, 상태 CSV, EuRoC 녹화 |
+| E. 녹화 재생 | `granite_vio --realtime` | D의 녹화 | live와 비교할 궤적 |
 | F. 평가 | 데스크톱 `eval/scripts/eval_pose.py` | C 또는 E의 궤적, GT | ATE, 스케일, 판정 |
 
-live 앱과 데이터셋 러너는 같은 추정기 경로를 씁니다 [코드 확인].
+`granite_vio`의 세 모드(최대 속도, `--realtime`, `--live`)는 같은 추정기 경로를 씁니다 [코드 확인, `src/vio_app.h`]. 평가 러너 `eval/src/mono_vio_dataset.cpp`도 같은 경로입니다.
 
 - 같은 설정 파일, `vio_mono_init_method: "inertial"`, `vio_enforce_realtime` 켬.
 - `initialize()`에 바이어스 0을 줍니다. 보정 JSON의 바이어스는 IMU 샘플에서 뺍니다.
@@ -198,12 +194,19 @@ cd ~/cross/granite-pi4/build_live      # GRANITE_SRC=~/workspace/granite_reliabi
 make -j14
 SHA=$(git -C ~/workspace/granite_reliability rev-parse --short HEAD)
 ssh 10.20.10.50 "mkdir -p ~/granite_eval/bin/live_$SHA"
-scp granite_pi_cam_imu_vio granite_mono_vio_dataset libgranite.so 10.20.10.50:granite_eval/bin/live_$SHA/
+scp granite_vio granite_pi_cam_imu_vio granite_mono_vio_dataset libgranite.so 10.20.10.50:granite_eval/bin/live_$SHA/
 ```
 
 - 새 빌드 폴더를 만들 때: `cmake .. -DCMAKE_TOOLCHAIN_FILE=$HOME/sysroots/pi4-ubuntu2404.toolchain.cmake -DGRANITE_SRC=$HOME/workspace/granite_reliability`
 - 실행 파일은 같은 폴더의 `libgranite.so`를 씁니다(RUNPATH `$ORIGIN`).
-- 현재 Pi 4 바이너리는 `~/granite_eval/bin/live_1af850d/`입니다. 이 폴더의 `granite_mono_vio_dataset`는 최종 후보 바이너리(`bin/cross_9788391/`)와 같은 궤적을 냅니다 [검증, Cam1 1000 프레임 결정론 최대 속도, 궤적 md5 `f6c0ae49` 일치].
+- 현재 Pi 4 바이너리는 `~/granite_eval/bin/live_355cc87/`입니다.
+- `granite_vio`는 Pi 4용 Pangolin 정적 라이브러리를 씁니다. 이 라이브러리는 `~/cross/pangolin-pi4/build/src/libpangolin.a`입니다. 다시 만드는 방법은 다음과 같습니다.
+  - 소스: `thirdparty/Pangolin`.
+  - GLEW 헤더: Pi 4 sysroot에 없습니다. 데스크톱 `/usr/include/GL/glew.h`(같은 2.2.0)를 `~/cross/pangolin-pi4/glew_include`에 복사해서 씁니다.
+  - 옵션: `-include cstdint -DGLEW_NO_GLU`, video, python, 도구는 끕니다. 명령은 `~/cross/pangolin-pi4/cmake.log`의 맨 앞에 있습니다.
+- Pi 4 크로스 빌드에는 rosbag이 없습니다(`GRANITE_NO_ROSBAG`). 그래서 `--dataset-type bag`은 쓸 수 없습니다. `euroc`을 씁니다.
+- 데스크톱에서 `granite_vio`의 최대 속도 궤적은 평가 러너와 바이트 단위로 같습니다. 실시간 결과도 러너와 같습니다(상태 872개, 버림 0, Sim3 스케일 0.9967, PASS) [검증, Cam1 1000 프레임].
+- Pi 4에서는 `granite_vio --help` 실행과 공유 라이브러리 연결만 확인했습니다. Pi 4의 데이터셋 실행과 live 실행은 확인하지 않았습니다 [미검증].
 
 ## 4. Pi 4에서 데이터셋 실행
 
@@ -244,34 +247,37 @@ Pi 4에 있는 파일입니다 [검증].
 
 ```bash
 cd ~/granite_eval
-B=bin/live_1af850d
-D="--dataset-path data/city_sky_cam1 --cam-calib config/city_sky_cam1_kb4_calib.json"
+B=bin/live_355cc87
+D="--dataset-path data/city_sky_cam1 --dataset-type euroc --cam-calib config/city_sky_cam1_kb4_calib.json"
 C=config/oi_g40_det_gauge_gate_rest.json
 # 실시간, 전체 구간
-$B/granite_mono_vio_dataset $D --config-path $C --out results/c1_rt_full --num-threads 4 --realtime
+$B/granite_vio $D --config-path $C --use-imu 1 --num-threads 4 --realtime --out results/c1_rt_full
 # 최대 속도(모든 이미지 처리), 앞 1000 프레임
-$B/granite_mono_vio_dataset $D --config-path $C --out results/c1_max_1k --num-threads 4 --max-frames 1000
+$B/granite_vio $D --config-path $C --use-imu 1 --num-threads 4 --max-frames 1000 --out results/c1_max_1k
 ```
 
 | 옵션 | 뜻 |
 |---|---|
-| `--realtime` | 이미지를 데이터 시각에 공급합니다. flow 입력에 4장보다 많이 쌓이면 가장 오래된 이미지를 버립니다. live와 같은 규칙입니다. |
+| `--use-imu 1` | 단안 VIO입니다. 카메라 1대와 IMU입니다. `0`은 단안 VO입니다. |
+| `--realtime` | 이미지를 데이터 시각에 공급합니다. flow 입력에 4장보다 많이 쌓이면 가장 오래된 이미지를 버립니다. live와 같은 규칙입니다. 추정기도 `vio_enforce_realtime`을 씁니다. |
 | (없음) | 최대 속도입니다. 모든 이미지를 처리합니다. 결정론 설정이면 실행마다 궤적이 같습니다. |
+| `--out PREFIX` | `PREFIX_traj_tum.txt`와 `PREFIX_states.csv`를 씁니다. 평가 러너와 같은 형식입니다. |
 | `--num-threads N` | TBB 스레드 수입니다. 데이터셋 실행은 4, live는 3을 씁니다. |
 | `--max-frames N` | 앞 N 프레임만 씁니다. 0은 모두입니다. |
-| `--preload` | 실행 전에 모든 이미지를 읽어 둡니다. 전체 구간은 메모리가 많이 필요합니다. 평가 결과는 이 옵션 없이 만들었습니다. |
-| `--cam-time-offset-ns N` | 이미지 시각에 더합니다. 러너는 보정 JSON의 오프셋을 읽지 않습니다. |
+| `--show-gui 0` | GUI 없이 실행합니다. `DISPLAY`가 없으면 자동으로 GUI 없이 실행합니다. |
+| `--cam-time-offset-ns N` | 이미지 시각에 더합니다. 보정 JSON의 오프셋은 읽지 않습니다. |
 | `--queue-limit N` | 실시간 모드의 flow 입력 큐 크기입니다(기본 4). |
+| `--save-trajectory tum` | 끝에 Granite 형식의 궤적 파일(`trajectory.txt`)도 씁니다. 평가에는 `--out`을 씁니다. |
 
 - 한 번에 한 실행만 합니다. 동시에 실행하면 실시간 결과가 나빠집니다.
 - 실시간 모드에서는 스레드 타이밍 때문에 실행마다 궤적이 조금 다릅니다.
-- 온도와 클럭을 같이 기록하려면 Pi 4의 `~/granite_eval/scripts/run_pi4_bin.sh`를 씁니다. 예: `BIN=$PWD/$B/granite_mono_vio_dataset bash scripts/run_pi4_bin.sh NAME $C --num-threads 4 --realtime`. 결과는 `results/NAME/`에 들어갑니다.
+- 평가 러너 `granite_mono_vio_dataset`도 같은 폴더에 있습니다. 옵션은 같고, `--dataset-type`, `--use-imu`가 없습니다. `--preload`(이미지를 미리 읽음)는 러너에만 있습니다.
 
 ### 4.3 결과 확인
 
-끝의 `SUMMARY` 줄의 값입니다.
+끝의 `SUMMARY` 줄의 값입니다. `granite_vio`와 평가 러너가 같은 키를 씁니다.
 
-| 값 | 뜻 | Cam1 전체 구간 실시간 실측 [검증, `cross_9788391`] |
+| 값 | 뜻 | Cam1 전체 구간 실시간 실측 [검증, 평가 러너 `cross_9788391`] |
 |---|---|---|
 | `frames`, `fed`, `dropped_input` | 이미지 수, 공급한 수, 버린 수 | 6118, 6118, 0 |
 | `states` | 출력한 상태 수 | 5990 |
@@ -311,20 +317,27 @@ $B/granite_mono_vio_dataset $D --config-path $C --out results/c1_max_1k --num-th
 ### 5.2 명령
 
 ```bash
-cd ~/granite_eval; B=bin/live_1af850d; C=config/live
+cd ~/granite_eval; B=bin/live_355cc87; C=config/live
+# VIO + 녹화 (빠른 시작 B와 같음)
+$B/granite_vio --live --use-imu 1 --cam-calib $C/b0429_pi_640x400_calib.json \
+    --config-path $C/b0429_pi_640x400_handheld.json --i2c /dev/i2c-23 --out live/run1 --record live/run1_euroc
+# 같은 실행을 live 앱의 옵션으로
+$B/granite_pi_cam_imu_vio --calib $C/b0429_pi_640x400_calib.json --config-path $C/b0429_pi_640x400_handheld.json \
+    --i2c /dev/i2c-23 --out live/run1 --record live/run1_euroc
 # 센서만 확인 (VIO 없음, 10 s)
 $B/granite_pi_cam_imu_vio --config-path $C/b0429_pi_640x400_handheld.json --i2c /dev/i2c-23 --capture-only --duration 10
 # 녹화만 (VIO 없음)
 $B/granite_pi_cam_imu_vio --config-path $C/b0429_pi_640x400_handheld.json --i2c /dev/i2c-23 --record live/rec1 --duration 30
-# VIO + 녹화 (빠른 시작 B와 같음)
-$B/granite_pi_cam_imu_vio --calib $C/b0429_pi_640x400_calib.json --config-path $C/b0429_pi_640x400_handheld.json \
-    --i2c /dev/i2c-23 --out live/run1 --record live/run1_euroc
 ```
 
-- 명령줄 옵션은 설정 파일의 `camera.*` 키보다 우선합니다(`--fps`, `--downscale`, `--exposure`, `--i2c` 등).
-- `--duration`을 주지 않으면 Ctrl-C까지 실행합니다.
-- `--num-threads`의 기본값은 3입니다. 카메라와 IMU 스레드가 나머지 코어를 씁니다.
+- `granite_vio --live`와 `granite_pi_cam_imu_vio`(VIO)는 같은 코드(`src/vio_app.h`)와 같은 Pangolin GUI를 씁니다. 옵션 이름만 다릅니다(`--cam-calib` 대 `--calib`, `--show-gui 0` 대 `--no-gui`).
+- VIO가 없는 두 모드(`--capture-only`, 보정 없는 `--record`)는 `granite_pi_cam_imu_vio`에만 있습니다. 이 두 모드는 Pangolin GUI 대신 이미지만 보이는 OpenCV 창을 씁니다.
+- 센서 옵션(`--fps`, `--downscale`, `--exposure`, `--max-exposure`, `--i2c` 등)은 두 프로그램이 같습니다. 명령줄 옵션은 설정 파일의 `camera.*` 키보다 우선합니다.
+- `--duration`을 주지 않으면 Ctrl-C 또는 창 닫기까지 실행합니다.
+- `--num-threads`는 3을 권장합니다. 카메라와 IMU 스레드가 나머지 코어를 씁니다.
+- GUI는 최근 이미지 300장(약 20 s)만 보관합니다. 더 오래된 프레임을 고르면 이미지가 바뀌지 않습니다.
 - 초기화 시도를 모두 보려면 `GRANITE_MONO_INIT_TRACE=1`을 앞에 붙입니다. 이미지마다 한 줄(이유, 앞·뒤 반의 이동, 가속도 표준편차)이 나옵니다.
+- 실행 중에는 매초 상태 줄(`t=... input_fps=... imu_hz=... tracking=... support=...`)이 나옵니다.
 
 ### 5.3 프레임률
 
@@ -340,11 +353,11 @@ $B/granite_pi_cam_imu_vio --calib $C/b0429_pi_640x400_calib.json --config-path $
 
 끝의 `LIVE` 줄의 값입니다.
 
-| 값 | 뜻 | Pi 4 정지 상태 실측 [검증, 2026-11-06] |
+| 값 | 뜻 | Pi 4 정지 상태 실측 [검증, 2026-11-06, 이전 live 앱 `live_1af850d`] |
 |---|---|---|
 | `fps` | 받은 이미지/초 | 14.90 (센서 15.00) |
 | `sensor_drops` | 센서가 버린 프레임(sequence 빈칸) | 0 |
-| `queue_drops` | flow 입력 큐가 버린 이미지 | 0 |
+| `queue_drops` | flow 입력 큐와 장치 큐가 버린 이미지 | 0 |
 | `imu_hz` | 받은 IMU 샘플/초 | 191~192 |
 | `imu_i2c_errors` | CP2112 전송 실패 수 | 30 s에 12, 60 s에 28 (`doc/mpu6500-cp2112-issue.md`) |
 | `image_delay_ms_mean/max` | 버퍼 시각부터 큐까지 | 37 / 53 ms |
@@ -362,11 +375,11 @@ $B/granite_pi_cam_imu_vio --calib $C/b0429_pi_640x400_calib.json --config-path $
 
 ### 7.1 live 녹화를 Pi 4에서 재생
 
-`--record`는 VIO와 같은 실행의 이미지와 IMU를 EuRoC로 씁니다. 재생은 4절의 데이터셋 러너를 씁니다. 재생은 live와 같은 실시간 규칙을 씁니다 [검증, 정지 녹화 60 s: live와 재생 모두 상태 0개, 초기화 시도의 이유와 이동 분포가 같음(중앙값 0.38 px)].
+`--record`는 VIO와 같은 실행의 이미지와 IMU를 EuRoC로 씁니다. 재생은 4절의 `granite_vio --realtime`을 씁니다. 재생은 live와 같은 실시간 규칙을 씁니다 [검증, 이전 live 앱과 평가 러너, 정지 녹화 60 s: live와 재생 모두 상태 0개, 초기화 시도의 이유와 이동 분포가 같음(중앙값 0.38 px)].
 
 ```bash
-cd ~/granite_eval; B=bin/live_1af850d; C=config/live
-$B/granite_mono_vio_dataset --dataset-path live/run1_euroc --cam-calib $C/b0429_pi_640x400_calib.json \
+cd ~/granite_eval; B=bin/live_355cc87; C=config/live
+$B/granite_vio --dataset-path live/run1_euroc --dataset-type euroc --use-imu 1 --cam-calib $C/b0429_pi_640x400_calib.json \
     --config-path $C/b0429_pi_640x400_handheld.json --out live/run1_replay --num-threads 3 --realtime
 ```
 
@@ -391,37 +404,43 @@ eval/bin/live/granite_mono_vio_dataset --dataset-path eval/data/smrig_cam1 \
     --out eval/results/smrig_c1 --cam-time-offset-ns 2653760
 ```
 
-- `--cam-time-offset-ns`는 변환 출력에 나오는 값입니다. 러너는 보정 JSON의 오프셋을 읽지 않습니다.
+- `--cam-time-offset-ns`는 변환 출력에 나오는 값입니다. 러너와 `granite_vio`는 보정 JSON의 오프셋을 읽지 않습니다.
+- GUI로 보려면 같은 옵션으로 `build_gui/granite_vio --dataset-path eval/data/smrig_cam1 --dataset-type euroc --use-imu 1 ... --cam-time-offset-ns 2653760`을 실행합니다(7.3절).
 - 이 capture의 IMU는 바이어스를 뺀 값(`calibrated: true`)입니다. 그래서 `--target capture`는 바이어스 0을 씁니다.
 
-### 7.3 GUI로 보기 (`granite_vio`, 데스크톱)
+### 7.3 GUI (`granite_vio`)
 
-`granite_vio`는 카메라 1대와 IMU(`--use-imu 1`)를 받으면 단안 VIO 추정기(`MonoVioEstimator`)를 씁니다(`a1e13b6`부터). 화면은 기존 스테레오 VIO와 단안 VO의 Pangolin 화면과 같습니다. 현재 Granite 기본 GUI로 단안 VIO를 볼 수 있는 프로그램은 이것 하나입니다. live 앱과 데이터셋 러너는 이 GUI를 쓰지 않습니다.
+`granite_vio`는 카메라 1대와 IMU(`--use-imu 1`)를 받으면 단안 VIO 추정기(`MonoVioEstimator`)를 씁니다. 화면은 기존 스테레오 VIO와 단안 VO의 Pangolin 화면과 같습니다. 데이터셋 실행, 실시간 실행, live 실행이 모두 이 화면을 씁니다.
 
-1. 데스크톱에서 빌드합니다. Pangolin이 필요합니다.
+데스크톱 빌드:
+
+1. GUI용 빌드 폴더를 만듭니다. 저장소의 `build/`는 GUI를 끈 설정이므로 쓰지 않습니다.
 
    ```bash
    cd ~/workspace/granite_reliability
-   mkdir -p build && cd build
-   cmake .. -DCMAKE_BUILD_TYPE=Release
-   make -j12 granite_vio
+   mkdir -p build_gui && cd build_gui
+   cmake .. -DCMAKE_BUILD_TYPE=Release -DGRANITE_BUILD_GUI=ON -DGRANITE_BUILD_PI_CAMERA=ON
+   make -j14 granite_vio granite_pi_cam_imu_vio
    ```
 
-2. 데이터셋으로 실행합니다. 예는 Unreal Cam1 1000 프레임입니다.
+2. 데이터셋으로 실행합니다. 예는 Unreal Cam1 1000 프레임의 실시간 실행입니다.
 
    ```bash
    cd ~/workspace/granite_reliability
-   build/granite_vio --dataset-path eval/data/cam1_1000 --dataset-type euroc --use-imu 1 --show-gui 1 \
+   build_gui/granite_vio --dataset-path eval/data/cam1_1000 --dataset-type euroc --use-imu 1 \
        --cam-calib eval/config/raw_cam1_kb4_calib.json --config-path eval/config/oi_g40_det_gauge_gate_rest.json \
-       --num-threads 4
+       --num-threads 4 --realtime
    ```
 
-- 검증 [검증, 데스크톱]: Cam1 1000 프레임 결정론 실행에서 `granite_vio`와 데이터셋 러너의 888개 포즈 위치 차이가 0.0 m입니다. 화면 캡처로 GUI 표시를 확인했습니다.
+Pi 4 모니터에 GUI 띄우기 [미검증]:
+
+1. Pi 4의 모니터에서 `uvify`로 데스크톱에 로그인합니다. 2026-11-06에는 로그인 화면 상태입니다.
+2. Pi 4의 터미널에서 실행합니다. SSH에서 실행하려면 앞에 `DISPLAY=:0`을 붙입니다. 이때 화면 세션의 X 권한이 필요합니다.
+3. 창을 닫거나 Ctrl-C를 누르면 실행이 끝나고 결과 파일을 씁니다.
+
 - 단안 VIO는 메트릭 결과입니다. 그래서 GT 정렬은 SE3입니다. 스케일 오차가 화면에 그대로 보입니다. 단안 VO(IMU 없음)는 Sim3로 정렬합니다.
-- `--show-gui 0 --save-trajectory tum`으로 화면 없이 궤적만 쓸 수 있습니다.
-- `granite_vio`에는 카메라 시간 오프셋 옵션이 없습니다. 보정 JSON의 `cam_time_offset_ns`도 쓰지 않습니다 [코드 확인]. 그래서 smrig(오프셋 2.65 ms)는 GUI 결과가 러너 결과와 조금 다를 수 있습니다 [미검증].
-- `granite_vio`는 실시간 규칙(입력 큐 4장, 오래된 이미지 버림)을 쓰지 않습니다. Pi 4 실시간 결과와 비교할 때는 4절의 러너를 씁니다.
-- Pi 4용 `granite_vio`는 빌드하지 않았습니다. Pi 4의 GUI 부하는 측정하지 않았습니다 [미검증].
+- Unreal EuRoC 폴더에는 GT가 없습니다. 그래서 화면에 GT 궤적이 없습니다. 평가는 4.4절로 합니다.
+- Pi 4에서 GUI가 실시간 처리(15 fps)에 주는 부하는 측정하지 않았습니다 [미검증]. 판정용 실행은 `--show-gui 0`으로 합니다. GUI가 있을 때 `dropped`(데이터셋) 또는 `queue_drops`(live)가 0보다 크면 GUI 부하를 의심합니다.
 
 ## 8. 문제 해결
 
@@ -431,14 +450,19 @@ eval/bin/live/granite_mono_vio_dataset --dataset-path eval/data/smrig_cam1 \
 | `Unexpected MPU WHO_AM_I value`, `Cannot open /dev/i2c-N` | `--i2c` 번호(5.1절), 사용자의 `i2c` 그룹 |
 | `imu_i2c_errors`가 0보다 큼 | Pi 4 리그의 CP2112는 약 150~200회에 1회 전송 시간 초과(`errno 110`, 약 54 ms 뒤)가 납니다. CP2112가 상태 질문에 응답하지 않는 것이 원인입니다. 앱은 FIFO를 유지하고 샘플 경계만 다시 맞춥니다. 그래서 손실은 약 0.3%입니다. 자세한 내용은 `doc/mpu6500-cp2112-issue.md`에 있습니다. |
 | 초기화되지 않음 | 2.5절. `GRANITE_MONO_INIT_TRACE=1`로 이유를 봅니다. `platform still`은 움직임이 부족합니다. `platform moving (moving start off)`는 정지 구간이 부족합니다. `no IMU excitation in the newer half`는 가속이 부족합니다. |
-| `queue_drops` 또는 `dropped_input` 증가 | 추정기가 카메라보다 느립니다. 다른 프로세스가 CPU를 쓰는지 확인합니다. live는 `--fps`를 낮추거나 `--num-threads`를 확인합니다. |
+| `queue_drops` 또는 `dropped_input` 증가 | 추정기가 카메라보다 느립니다. 다른 프로세스가 CPU를 쓰는지 확인합니다. GUI가 켜져 있으면 `--show-gui 0`으로 다시 확인합니다. live는 `--fps`를 낮추거나 `--num-threads`를 확인합니다. |
 | 밝기가 목표와 다름 | `camera.metering_circle`이 렌즈 원 안에 있는지 확인합니다. 노출은 `--max-exposure`(5 ms) 다음에 gain을 씁니다. |
 | `Calibration resolution ... is neither the sensor mode nor the output` | 보정 해상도는 센서 모드 또는 그 1/N이어야 합니다. 변환의 `--downscale`과 live의 `--downscale`을 맞춥니다. |
 | `ModuleNotFoundError: No module named 'numpy'` (Pi 4) | Pi 4에는 numpy가 없습니다. 평가와 변환은 데스크톱에서 합니다. |
+| `No DISPLAY: running without the GUI` | 화면이 없는 실행입니다(SSH). 결과 파일은 정상으로 씁니다. GUI가 필요하면 7.3절을 따릅니다. |
+| `Give --live, or --dataset-path and --dataset-type` | `granite_vio`에는 `--live` 또는 데이터셋 두 옵션 중 하나가 필요합니다. |
+| `Dataset type bag is not supported` (Pi 4) | Pi 4 빌드에는 rosbag이 없습니다. EuRoC 폴더를 씁니다. |
 
 ## 9. 에이전트용 요약
 
-- 코드: `src/device/pi_camera_imu.cpp`(rp1-cfe와 unicam, downscale, IMU 오류 복구), `src/pi_camera_imu_vio.cpp`(live 앱), `eval/src/mono_vio_dataset.cpp`(데이터셋 러너, `--realtime`), `src/vio.cpp`(`granite_vio` GUI), `eval/scripts/capture_to_granite.py`, `eval/scripts/capture_to_euroc.py`, `eval/src/imu_fifo_test.cc`(CP2112 시험).
+- 실행 프로그램: `granite_vio`. 데이터셋은 `--dataset-path --dataset-type euroc --use-imu 1 [--realtime] --out`. live는 `--live --use-imu 1 --cam-calib --config-path --i2c --out [--record]`.
+- 코드: `src/vio_app.h`(GUI, 실시간 공급, live 모드, `--out`, SUMMARY와 LIVE 줄), `src/vio.cpp`(`granite_vio` 옵션), `src/pi_camera_imu_vio.cpp`(live 앱 옵션, VIO 없는 확인 모드), `include/granite/device/pi_live_support.h`(녹화, `camera.*` 키, 센서 옵션), `src/device/pi_camera_imu.cpp`(카메라와 IMU, IMU 오류 복구), `eval/src/mono_vio_dataset.cpp`(평가 러너), `eval/scripts/capture_to_granite.py`, `eval/scripts/capture_to_euroc.py`, `eval/src/imu_fifo_test.cc`(CP2112 시험).
 - 설정: 데이터셋 실행은 `eval/config/oi_g40_det_gauge_gate_rest.json` + `eval/config/raw_cam1_kb4_calib.json`. Pi 4 live는 `eval/config/live/b0429_pi_640x400_calib.json` + `b0429_pi_640x400_handheld.json`.
-- Pi 4: 바이너리 `~/granite_eval/bin/live_1af850d/`, 데이터 `~/granite_eval/data/city_sky_cam1/`, 결과 `~/granite_eval/results/`, live 출력 `~/granite_eval/live/`.
-- 아직 없는 것: 움직이는 live 시험, 30 fps 실시간 시험, live 시간 오프셋 측정, IMU Allan 보정, CP2112 응답 손실의 위치(`doc/mpu6500-cp2112-issue.md` 5절).
+- 빌드: 데스크톱 `build_gui/`. Pi 4 크로스 빌드 `~/cross/granite-pi4/build_live`(Pangolin `~/cross/pangolin-pi4`).
+- Pi 4: 바이너리 `~/granite_eval/bin/live_355cc87/`, 데이터 `~/granite_eval/data/city_sky_cam1/`, 결과 `~/granite_eval/results/`, live 출력 `~/granite_eval/live/`.
+- 아직 없는 것: Pi 4의 `granite_vio` 실행 확인(데이터셋, live, GUI 부하), 움직이는 live 시험, 30 fps 실시간 시험, live 시간 오프셋 측정, IMU Allan 보정, CP2112 응답 손실의 위치(`doc/mpu6500-cp2112-issue.md` 5절).
