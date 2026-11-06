@@ -52,7 +52,7 @@
         "config.vio_mono_init_method": "inertial",
         "config.vio_use_deterministic": false,
         "config.vio_gauge_gate": true,
-        "config.vio_mono_init_max_rest_disparity": 0.0,
+        "config.vio_mono_init_max_rest_disparity": 1.532,
         "config.vio_mono_init_moving_start": false,
         "config.vio_mono_init_excitation_accel_std": 0.3,
         "config.vio_mono_init_max_still_disparity": 6.664,

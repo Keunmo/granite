@@ -32,7 +32,8 @@ with
                                         camera that the base was evaluated with). The other pixel values are noise
                                         or cell sizes in pixels and stay (as in openvio capture_to_config.py).
   --handheld                            config.vio_mono_init_excitation_accel_std 0.3 and
-                                        config.vio_mono_init_max_rest_disparity 0 for the slow start of a hand-held rig
+                                        config.vio_mono_init_max_rest_disparity 2.0 at the base camera (then scaled)
+                                        for the slow start of a hand-held rig
   camera.*                              the live sensor options of the live app (sensor mode, downscale, fps, auto
                                         exposure, metering circle inside the fisheye image circle, I2C device).
 The script prints every changed value and its reason.
@@ -427,8 +428,9 @@ def main():
                     help="largest fit error [px, written size] that keeps kb4 and that passes without a warning")
     ap.add_argument("--handheld", action="store_true",
                     help="start at rest of a hand-held rig: vio_mono_init_excitation_accel_std 0.3 and "
-                         "vio_mono_init_max_rest_disparity 0 (off), as openvio for hand-held starts. The base values "
-                         "(1.0 m/s^2, rest disparity on) did not initialize on the slow start of smrig_ar0234 cam1")
+                         "vio_mono_init_max_rest_disparity 2.0 px at the base camera (then scaled). The base values "
+                         "(1.0 m/s^2, 1.0 px) did not initialize on the slow start of smrig_ar0234 cam1. The value "
+                         "0 (off) started at a constant velocity in all 17 Unreal moving-start subsets and diverged")
     ap.add_argument("--fps", type=float, default=15.0, help="camera.fps of the live config (Granite ran at 15 fps)")
     ap.add_argument("--sensor-size", help="live sensor mode WxH (default: the calibrated size)")
     ap.add_argument("--i2c-device", help="camera.i2c_device of the live config (default: the IMU port of the capture)")
@@ -513,9 +515,11 @@ def main():
         set_key("config.vio_mono_init_excitation_accel_std", 0.3,
                 "hand-held start: the motion starts slowly; 0.3 m/s^2 is above the rest noise (0.02-0.04) and "
                 "detects the start before motion enters the still half (openvio 6.5)")
-        set_key("config.vio_mono_init_max_rest_disparity", 0.0,
-                "hand-held start: off. The check rejects a constant velocity that looks still (vehicles); a slow "
-                "hand-held start moves the older half above it before the newer half passes max_still_disparity")
+        set_key("config.vio_mono_init_max_rest_disparity", 2.0,
+                "hand-held start: the older half of a slow start moves above 1.0 px before the newer half passes "
+                "max_still_disparity. 2.0 px (Unreal camera) starts smrig_ar0234 cam1 at the same time as 0 (off), "
+                "and starts none of the 17 Unreal moving-start subsets (4 m/s gives 2.8 px). The value 0 starts "
+                "all 17 at a constant velocity and diverges")
     for key, what in SCALED_KEYS:
         value = float(cfg.get(key, GRANITE_DEFAULTS[key]))
         if value > 0:

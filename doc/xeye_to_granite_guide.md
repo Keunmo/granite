@@ -2,6 +2,14 @@
 
 이 문서는 xeye capture의 보정(`capture.yaml`)을 Granite 입력으로 바꾸는 절차입니다. 그리고 Raspberry Pi 4에서 live 센서로 Granite 단안 VIO를 실행하는 절차입니다. 구조는 openvio의 `doc/xeye_to_openvio_guide.md`를 따릅니다. 기준 리그는 Pi 4(`uvify@10.20.10.50`)의 Arducam B0429(AR0234)와 MPU-9250(CP2112)입니다.
 
+capture.yaml은 데이터셋마다 다릅니다. 각 데이터셋에는 그 데이터셋의 capture.yaml만 씁니다.
+
+| 데이터셋 또는 리그 | capture.yaml | 이 문서의 Granite 파일 |
+|---|---|---|
+| Pi 4 live 리그 (B0429 + MPU-9250) | Pi 4 `/home/uvify/workspace/openvio/config/capture.yaml` (데스크톱 사본 `~/workspace/openvio/config/capture.yaml`, md5 `d2d36cf7`) | `eval/config/live/b0429_pi_640x400_*.json` |
+| unreal_data_city_sky | Pi 4 `/media/uvify/uvify_ssd/Data/unreal_data_city_sky/capture.yaml` (데스크톱 사본 `~/multipleye_docker/data/unreal_data_city_sky/capture.yaml`, md5 `38643b4e`) | `eval/config/raw_cam0..3_kb4_calib.json` |
+| 260625_163357_smrig_ar0234 (다른 리그, 손으로 듦) | 그 데이터셋 폴더의 `capture.yaml` | `eval/config/live/smrig_cam1_672x600_*.json` |
+
 상태 표기는 세 가지입니다.
 
 - **[검증]**: 이 문서를 쓸 때 실행해서 확인한 내용입니다.
@@ -94,7 +102,7 @@ xeye의 uwfisheye는 Granite에 없습니다. 변환은 kb4, ds, eucm을 시야 
 |---|---|---|
 | `vio_use_deterministic` | false | live에서는 결정론 합산이 필요 없습니다(약 7% 느림). |
 | `vio_mono_init_max_still_disparity` | 8.7 → 6.05 px | 움직임 기준입니다. 평가 카메라 178.9 px/rad 대 이 카메라 124.5 px/rad의 비율로 줄입니다. |
-| `vio_mono_init_max_rest_disparity` | 1.0 → 0 (`--handheld`) | 2.5절 |
+| `vio_mono_init_max_rest_disparity` | 1.0 → 2.0 (`--handheld`), 다음에 해상도 비례 (640x400: 1.392 px) | 2.5절 |
 | `vio_mono_init_excitation_accel_std` | 1.0 → 0.3 (`--handheld`) | 2.5절 |
 | `camera.*` | 1920x1200, downscale 3, 15 fps, 자동 노출 5 ms 한도, 측광 원 `[310.2, 202.5, 203.7]`, `/dev/i2c-23` | live 센서 옵션 |
 
@@ -107,7 +115,7 @@ xeye의 uwfisheye는 Granite에 없습니다. 변환은 kb4, ds, eucm을 시야 
 
 1. 2 s 창의 앞쪽 반(1 s)은 정지입니다. 특징점의 평균 이동이 `max_still_disparity` 이하이고, 가속도 표준편차가 `excitation_accel_std` 이하입니다.
 2. 뒤쪽 반(1 s)은 움직입니다. 평균 이동이 `max_still_disparity`보다 크고, 가속도 표준편차가 `excitation_accel_std` 이상입니다.
-3. `max_rest_disparity`가 0보다 크면 앞쪽 반의 평균 이동이 이 값 이하여야 합니다.
+3. `max_rest_disparity`가 0보다 크면 앞쪽 반의 평균 이동이 이 값 이하여야 합니다. 이 조건은 등속 운동을 정지로 판단하지 않게 합니다(Unreal에서 4 m/s 등속은 2.8 px, 정지는 0.004 px).
 
 smrig_ar0234 cam1(손으로 든 리그, 0~8.3 s 정지 후 천천히 움직임) 재생 결과입니다 [검증, 데스크톱].
 
@@ -115,7 +123,22 @@ smrig_ar0234 cam1(손으로 든 리그, 0~8.3 s 정지 후 천천히 움직임) 
 |---|---|---|
 | 최종 후보 값(정지 이동 0.77 px, 가속 1.0) | 350 s 동안 없음 | 앞쪽 반의 이동이 0.77 px를 넘은 다음에야 뒤쪽 반이 6.7 px를 넘습니다. |
 | 정지 이동 끔, 가속 1.0 | 8.65 s | 앞쪽 반에 움직임이 들어감(이동 3.99 px, bg 0.03 rad/s) |
-| `--handheld` (정지 이동 끔, 가속 0.3) | 7.93 s (openvio도 7.93 s) | SE3 ATE 0.66 m, Sim3 스케일 1.019, 길이 204.7 m 대 202.7 m, 발산 없음 |
+| 정지 이동 끔, 가속 0.3 (서브에이전트의 첫 `--handheld`) | 7.93 s (openvio도 7.93 s) | SE3 ATE 0.66 m, Sim3 스케일 1.019, 길이 204.7 m 대 202.7 m, 발산 없음 |
+| 정지 이동 1.5 (Unreal 기준), 가속 0.3 | 8.2 s | 길이 207.3 m, 발산 없음 |
+| `--handheld` (정지 이동 2.0, Unreal 기준), 가속 0.3 | 7.93 s | 정지 이동을 끈 경우와 같은 시각, 길이 204.7 m, 발산 없음 |
+
+정지 이동 기준을 끄면 안 됩니다. Unreal(capture.yaml: `/media/uvify/uvify_ssd/Data/unreal_data_city_sky/capture.yaml`, Pi 4)에서 확인한 결과입니다 [검증, 데스크톱 결정론 실행].
+
+| 설정 | 정지 시작 Cam0–3 (1000 프레임) | 정지 시작 Cam0–3 (전체 구간) | 이동 중 시작 17개 |
+|---|---|---|---|
+| 최종 후보 (정지 이동 1.0, 가속 1.0) | 4/4 PASS | 4/4 PASS | 모두 초기화 안 함 |
+| 가속 0.3만 바꿈 | 4/4 PASS | 4/4 PASS, ATE 같음 | 모두 초기화 안 함 |
+| 정지 이동 끔, 가속 0.3 | 4/4 PASS | — | 17/17 발산 (등속을 정지로 판단) |
+| 정지 이동 1.5, 가속 0.3 | 4/4 PASS | — | 모두 초기화 안 함 |
+| `--handheld` (정지 이동 2.0, 가속 0.3) | 4/4 PASS | 4/4 PASS, ATE 같음 | 모두 초기화 안 함 |
+
+- 이동 중 시작 17개는 Cam0–3의 시작 프레임 1000, 1150, 2550, 3200과 Cam1의 5800입니다.
+- 기준 2.0은 Unreal 4 m/s 등속(2.8 px)보다 작습니다. 더 느린 등속(약 2.9 m/s 이하)은 정지로 판단할 수 있습니다 [미검증].
 
 리그를 움직일 때 다음을 지킵니다.
 
@@ -123,7 +146,8 @@ smrig_ar0234 cam1(손으로 든 리그, 0~8.3 s 정지 후 천천히 움직임) 
 - 그 다음 1초 안에 분명하게 움직입니다. 들어 올리거나 옮기는 움직임(가속)이 필요합니다. 제자리 회전만으로는 가속도 조건을 못 넘을 수 있습니다.
 - 초기화가 되지 않으면 리그를 다시 2초 이상 정지한 다음 다시 움직입니다. 초기화 전에는 상태 출력이 없습니다.
 - Pi 4 live 리그의 정지 상태 가속도 표준편차는 0.017~0.032 m/s²입니다 [검증]. 0.3보다 충분히 작습니다.
-- Pi 4 live 리그를 책상에 두었을 때 Granite 트랙의 앞쪽 반 이동은 중앙값 0.38 px, 최대 1.23 px입니다 [검증, 60 s]. 최종 후보 값을 비율로 줄인 정지 이동 기준(0.70 px)보다 클 때가 있습니다. 이것도 `--handheld`에서 이 기준을 끄는 이유입니다. 움직임 기준(6.05 px)보다는 충분히 작습니다.
+- Pi 4 live 리그를 책상에 두었을 때 Granite 트랙의 앞쪽 반 이동은 중앙값 0.38 px, 최대 1.23 px입니다 [검증, 60 s]. 최종 후보 값을 비율로 줄인 기준(0.70 px)보다 클 때가 있습니다. `--handheld` 기준(1.392 px)보다는 작지만 여유가 작습니다. 정지해 있어도 초기화가 늦어질 수 있습니다 [미검증].
+- 가속도 기준은 앞쪽 반에도 쓰입니다. 앞쪽 반의 가속도 표준편차가 기준 이하여야 정지입니다. 기준 0.3에서는 모터 진동처럼 작은 흔들림도 정지를 막을 수 있습니다. 드론은 모터를 켜기 전에 초기화합니다 [미검증, 드론 진동 미측정].
 
 ## 3. 크로스 빌드와 배포
 
