@@ -27,11 +27,25 @@ TEST(PiSensorUtils, HalfResolutionAveragesBayerQuads) {
       bayer.at<uint8_t>(y, x) = green ? 100 : (y % 2 == 0 ? 40 : 60);
     }
   }
-  const cv::Mat gray = granite::grbgToGray(bayer, true);
+  const cv::Mat gray = granite::grbgToGray(bayer, 2);
   ASSERT_EQ(gray.size(), cv::Size(2, 2));
   for (int y = 0; y < 2; ++y)
     for (int x = 0; x < 2; ++x) EXPECT_EQ(gray.at<uint8_t>(y, x), 75);
-  EXPECT_EQ(granite::grbgToGray(bayer, false).size(), cv::Size(4, 4));
+  EXPECT_EQ(granite::grbgToGray(bayer, 1).size(), cv::Size(4, 4));
+}
+
+TEST(PiSensorUtils, OddDownscaleHasNoBayerPattern) {
+  // A uniform scene through G R / B G: a plain 3x3 average would give
+  // different values in neighbouring output pixels.
+  cv::Mat bayer(12, 24, CV_8UC1);
+  for (int y = 0; y < bayer.rows; ++y)
+    for (int x = 0; x < bayer.cols; ++x)
+      bayer.at<uint8_t>(y, x) = (x + y) % 2 == 0 ? 100 : (y % 2 == 0 ? 40 : 60);
+  const cv::Mat gray = granite::grbgToGray(bayer, 3);
+  ASSERT_EQ(gray.size(), cv::Size(8, 4));
+  for (int y = 0; y < gray.rows; ++y)
+    for (int x = 0; x < gray.cols; ++x) EXPECT_EQ(gray.at<uint8_t>(y, x), 75);
+  EXPECT_THROW(granite::grbgToGray(cv::Mat(12, 15, CV_8UC1), 3), std::invalid_argument);
 }
 
 TEST(PiSensorUtils, ScalesCalibrationToHalfResolution) {
@@ -49,6 +63,23 @@ TEST(PiSensorUtils, ScalesCalibrationToHalfResolution) {
   EXPECT_DOUBLE_EQ(scaled[2], 319.5);
   EXPECT_DOUBLE_EQ(scaled[3], 179.5);
   EXPECT_EQ(calib.resolution[0], Eigen::Vector2i(640, 360));
+}
+
+TEST(PiSensorUtils, ScalesCalibrationToOneThird) {
+  granite::Calibration<double> calib;
+  Eigen::Matrix<double, 8, 1> params;
+  params << 300, 300, 931, 608, 0.1, 0.01, 0, 0;
+  granite::GenericCamera<double> camera;
+  camera.variant = granite::KannalaBrandtCamera4<double>(params);
+  calib.intrinsics = {camera};
+  calib.resolution = {Eigen::Vector2i(1920, 1200)};
+  granite::scaleCalibration(calib, 3);
+  const auto scaled = calib.intrinsics[0].getParam();
+  EXPECT_DOUBLE_EQ(scaled[0], 100);
+  EXPECT_DOUBLE_EQ(scaled[2], (931 + 0.5) / 3 - 0.5);
+  EXPECT_DOUBLE_EQ(scaled[3], (608 + 0.5) / 3 - 0.5);
+  EXPECT_DOUBLE_EQ(scaled[4], 0.1);
+  EXPECT_EQ(calib.resolution[0], Eigen::Vector2i(640, 400));
 }
 
 TEST(PiSensorUtils, DecodesMpuFifoSample) {

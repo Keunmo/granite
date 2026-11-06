@@ -3,6 +3,7 @@
 
 #include <cerrno>
 #include <chrono>
+#include <deque>
 #include <cstring>
 #include <fcntl.h>
 #include <fstream>
@@ -37,6 +38,11 @@ constexpr int VIDEO_BUFFERS = 8;
 // period longer. xeye measured the margin with the same module on Jetson.
 constexpr double EXPOSURE_MARGIN_NS = 100'000;
 constexpr uint32_t STARTUP_FRAMES = 3;
+// The sensor applies exposure and gain controls this many frames after the write.
+constexpr uint32_t CONTROL_DELAY_FRAMES = 2;
+// The CSI receivers: rp1-cfe on the Raspberry Pi 5, unicam on the Raspberry Pi 4.
+constexpr const char* RP1_CFE = "rp1-cfe";
+constexpr const char* UNICAM = "unicam";
 
 int64_t monotonicNs() {
   timespec time{};
@@ -72,8 +78,8 @@ struct MediaEntity {
   uint16_t pads = 0, links = 0;
 };
 
-// Finds the rp1-cfe media graph that contains the sensor. Pi 5 has one
-// graph per CSI port.
+// Finds the media graph of a CSI receiver (rp1-cfe or unicam) that contains
+// the sensor. The Pi 5 has one graph per CSI port.
 class MediaGraph {
  public:
   explicit MediaGraph(const std::string& sensor_prefix) {
@@ -83,21 +89,27 @@ class MediaGraph {
       if (candidate < 0) continue;
       media_device_info info{};
       if (xioctl(candidate, MEDIA_IOC_DEVICE_INFO, &info) == 0 &&
-          std::string(info.driver) == "rp1-cfe") {
+          (std::string(info.driver) == RP1_CFE || std::string(info.driver) == UNICAM)) {
         fd = candidate;
         entities = enumerate();
-        if (findPrefix(sensor_prefix)) break;
+        if (findPrefix(sensor_prefix)) {
+          driver_name = info.driver;
+          break;
+        }
         entities.clear();
         fd = -1;
       }
       close(candidate);
     }
     if (fd < 0)
-      throw std::runtime_error("No rp1-cfe media graph contains sensor '" + sensor_prefix +
+      throw std::runtime_error("No rp1-cfe or unicam media graph contains sensor '" +
+                               sensor_prefix +
                                "'. Check the camera cable and the dtoverlay in "
                                "/boot/firmware/config.txt");
   }
   ~MediaGraph() { if (fd >= 0) close(fd); }
+
+  const std::string& driver() const { return driver_name; }
 
   const MediaEntity* findPrefix(const std::string& prefix) const {
     for (const auto& entity : entities)
@@ -149,6 +161,7 @@ class MediaGraph {
 
   int fd = -1;
   std::vector<MediaEntity> entities;
+  std::string driver_name;
 };
 
 void setSubdevFormat(const std::string& node, uint32_t pad, int width, int height) {
@@ -206,8 +219,25 @@ PiCameraImuDevice::PiCameraImuDevice(const PiCameraImuOptions& options)
       !(options.max_exposure_ms > 0) ||
       !(options.gain_db >= 0 && options.gain_db <= B0429_MAX_GAIN_DB) || !(options.max_gain >= 1) ||
       !(options.brightness_target > 0 && options.brightness_target < 255) ||
-      options.imu_rate < 4 || options.imu_rate > 1000) {
+      options.imu_rate < 4 || options.imu_rate > 1000 || options.downscale < 1 ||
+      !(options.metering_circle.empty() || options.metering_circle.size() == 3)) {
     throw std::invalid_argument("Invalid camera or IMU option");
+  }
+  // grbgToGray needs whole blocks: N x N for an even N, 2N x 2N for an odd N > 1.
+  const int unit = options.downscale == 1 ? 1
+                   : options.downscale % 2 == 0 ? options.downscale : 2 * options.downscale;
+  if (options.width % unit != 0 || options.height % unit != 0)
+    throw std::invalid_argument("The sensor mode is not a multiple of the downscale block " +
+                                std::to_string(unit));
+  if (!options.metering_circle.empty()) {
+    metering_mask = cv::Mat::zeros(outputHeight(), outputWidth(), CV_8UC1);
+    cv::circle(metering_mask,
+               cv::Point(static_cast<int>(std::lround(options.metering_circle[0])),
+                         static_cast<int>(std::lround(options.metering_circle[1]))),
+               static_cast<int>(std::lround(options.metering_circle[2])), cv::Scalar(255),
+               cv::FILLED);
+    if (cv::countNonZero(metering_mask) == 0)
+      throw std::invalid_argument("The metering circle has no pixel in the image");
   }
 }
 
@@ -218,13 +248,9 @@ PiCameraImuDevice::~PiCameraImuDevice() {
   }
 }
 
-int PiCameraImuDevice::outputWidth() const {
-  return options.resize_half ? options.width / 2 : options.width;
-}
+int PiCameraImuDevice::outputWidth() const { return options.width / options.downscale; }
 
-int PiCameraImuDevice::outputHeight() const {
-  return options.resize_half ? options.height / 2 : options.height;
-}
+int PiCameraImuDevice::outputHeight() const { return options.height / options.downscale; }
 
 std::string PiCameraImuDevice::errorMessage() const {
   std::lock_guard<std::mutex> lock(error_mutex);
@@ -248,15 +274,49 @@ void PiCameraImuDevice::setSensorControl(uint32_t id, int value) {
 void PiCameraImuDevice::setupCamera() {
   MediaGraph graph(options.sensor);
   const MediaEntity& sensor = *graph.findPrefix(options.sensor);
-  const MediaEntity& csi2 = graph.get("csi2");
-  const MediaEntity& video = graph.get("rp1-cfe-csi2_ch0");
-  const uint16_t csi2_source = graph.enableLink(csi2, video);
-  setSubdevFormat(sensor.node, 0, options.width, options.height);
-  setSubdevFormat(csi2.node, 0, options.width, options.height);
-  setSubdevFormat(csi2.node, csi2_source, options.width, options.height);
+  receiver_driver = graph.driver();
+  const bool unicam = receiver_driver == UNICAM;
+  const MediaEntity& video = graph.get(unicam ? "unicam-image" : "rp1-cfe-csi2_ch0");
+  video_fd = open(video.node.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+  if (video_fd < 0) throw systemError("Cannot open " + video.node);
+  v4l2_capability capability{};
+  if (xioctl(video_fd, VIDIOC_QUERYCAP, &capability) < 0) throw systemError("VIDIOC_QUERYCAP");
+  const uint32_t device_caps = (capability.capabilities & V4L2_CAP_DEVICE_CAPS)
+                                   ? capability.device_caps
+                                   : capability.capabilities;
+  // unicam without the media controller (overlay parameter media-controller=0):
+  // the video node format sets the sensor mode, and the video node has the
+  // sensor controls.
+  const bool video_centric = unicam && !(device_caps & V4L2_CAP_IO_MC);
+  if (!unicam) {
+    const MediaEntity& csi2 = graph.get("csi2");
+    const uint16_t csi2_source = graph.enableLink(csi2, video);
+    setSubdevFormat(sensor.node, 0, options.width, options.height);
+    setSubdevFormat(csi2.node, 0, options.width, options.height);
+    setSubdevFormat(csi2.node, csi2_source, options.width, options.height);
+  } else if (!video_centric) {
+    // unicam has no csi2 entity; the link from the sensor to unicam-image is
+    // fixed and enabled.
+    setSubdevFormat(sensor.node, 0, options.width, options.height);
+  }
+  // The video format comes before the sensor controls: in the video centric
+  // case it sets the sensor mode, which changes the control ranges.
+  v4l2_format format{};
+  format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  format.fmt.pix.width = options.width;
+  format.fmt.pix.height = options.height;
+  format.fmt.pix.pixelformat = V4L2_PIX_FMT_SGRBG10P;
+  format.fmt.pix.field = V4L2_FIELD_NONE;
+  if (xioctl(video_fd, VIDIOC_S_FMT, &format) < 0) throw systemError("VIDIOC_S_FMT");
+  if (format.fmt.pix.pixelformat != V4L2_PIX_FMT_SGRBG10P ||
+      int(format.fmt.pix.width) != options.width || int(format.fmt.pix.height) != options.height)
+    throw std::runtime_error(receiver_driver +
+                             " does not accept packed SGRBG10 at the sensor mode");
+  bytes_per_line = format.fmt.pix.bytesperline;
+  frame_start_stamp = unicam;
 
-  sensor_fd = open(sensor.node.c_str(), O_RDWR | O_CLOEXEC);
-  if (sensor_fd < 0) throw systemError("Cannot open " + sensor.node);
+  sensor_fd = video_centric ? dup(video_fd) : open(sensor.node.c_str(), O_RDWR | O_CLOEXEC);
+  if (sensor_fd < 0) throw systemError("Cannot open the sensor controls");
   const double pixel_rate = getControl64(sensor_fd, V4L2_CID_PIXEL_RATE);
   const int hblank = getControl(sensor_fd, V4L2_CID_HBLANK);
   line_ns = (options.width + hblank) * 1e9 / pixel_rate;
@@ -274,10 +334,11 @@ void PiCameraImuDevice::setupCamera() {
   frame_exposure_lines = std::clamp(
       options.height + vblank - static_cast<int>(std::ceil(EXPOSURE_MARGIN_NS / line_ns)),
       exposure_range.minimum, exposure_range.maximum);
-  // The sensor reports gain as 100 x linear gain.
-  min_gain = gain_range.minimum;
-  max_gain = std::clamp(static_cast<int>(std::lround(options.max_gain * min_gain)),
-                        min_gain, gain_range.maximum);
+  // The sensor reports gain as 100 x linear gain. The driver range goes past
+  // the last value with an effect.
+  min_gain = std::max(gain_range.minimum, B0429_MIN_DRIVER_GAIN);
+  max_gain = std::clamp(static_cast<int>(std::lround(options.max_gain * min_gain)), min_gain,
+                        std::min(gain_range.maximum, B0429_MAX_DRIVER_GAIN));
   max_exposure_lines =
       std::clamp(static_cast<int>(options.max_exposure_ms * 1e6 / line_ns),
                  exposure_range.minimum, frame_exposure_lines);
@@ -285,8 +346,8 @@ void PiCameraImuDevice::setupCamera() {
   if (options.exposure_ms > 0) {
     setting.lines = std::clamp(static_cast<int>(std::lround(options.exposure_ms * 1e6 / line_ns)),
                                exposure_range.minimum, frame_exposure_lines);
-    setting.gain = std::clamp(b0429DriverGainFromDb(options.gain_db), gain_range.minimum,
-                              gain_range.maximum);
+    setting.gain = std::clamp(b0429DriverGainFromDb(options.gain_db), min_gain,
+                              std::min(gain_range.maximum, B0429_MAX_DRIVER_GAIN));
   } else {
     setting.lines = max_exposure_lines / 2;
     setting.gain = min_gain;
@@ -295,20 +356,6 @@ void PiCameraImuDevice::setupCamera() {
   setSensorControl(V4L2_CID_ANALOGUE_GAIN, setting.gain);
   exposure_lines = setting.lines;
   analogue_gain = setting.gain;
-
-  video_fd = open(video.node.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
-  if (video_fd < 0) throw systemError("Cannot open " + video.node);
-  v4l2_format format{};
-  format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-  format.fmt.pix.width = options.width;
-  format.fmt.pix.height = options.height;
-  format.fmt.pix.pixelformat = V4L2_PIX_FMT_SGRBG10P;
-  format.fmt.pix.field = V4L2_FIELD_NONE;
-  if (xioctl(video_fd, VIDIOC_S_FMT, &format) < 0) throw systemError("VIDIOC_S_FMT");
-  if (format.fmt.pix.pixelformat != V4L2_PIX_FMT_SGRBG10P ||
-      int(format.fmt.pix.width) != options.width || int(format.fmt.pix.height) != options.height)
-    throw std::runtime_error("rp1-cfe does not accept packed SGRBG10 at the sensor mode");
-  bytes_per_line = format.fmt.pix.bytesperline;
 
   v4l2_requestbuffers request{};
   request.count = VIDEO_BUFFERS;
@@ -396,9 +443,16 @@ void PiCameraImuDevice::cameraLoop() {
   try {
     bool have_sequence = false;
     uint32_t last_sequence = 0;
-    uint64_t frame = 0;
     std::vector<uint8_t> frame_bytes(bytes_per_line * options.height);
+    // The requested setting, and the exposure of the frame in process. A
+    // request waits in `pending` until the frame that it applies to.
     ExposureSetting setting{exposure_lines.load(), analogue_gain.load()};
+    int frame_lines = setting.lines;
+    struct Request {
+      uint32_t sequence;
+      int lines;
+    };
+    std::deque<Request> pending;
     while (running) {
       pollfd descriptor{video_fd, POLLIN, 0};
       const int ready = poll(&descriptor, 1, 200);
@@ -428,7 +482,7 @@ void PiCameraImuDevice::cameraLoop() {
         std::memcpy(frame_bytes.data(), buffers[buffer.index].first, frame_bytes.size());
         gray = grbgToGray(
             unpackRaw10Msb(frame_bytes.data(), options.width, options.height, bytes_per_line),
-            options.resize_half);
+            options.downscale);
       }
       // QBUF writes the queued state back into the struct, including sequence.
       const uint32_t sequence = buffer.sequence;
@@ -440,35 +494,59 @@ void PiCameraImuDevice::cameraLoop() {
       // The first frames after STREAMON use the default frame length.
       if (corrupt || sequence < STARTUP_FRAMES) continue;
 
-      // Global shutter: exposure, then readout of all rows. rp1-cfe stamps
-      // the end of frame, so the exposure center is a readout and half an
-      // exposure earlier.
-      const double exposure_ns = setting.lines * line_ns;
+      while (!pending.empty() && pending.front().sequence <= sequence) {
+        frame_lines = pending.front().lines;
+        pending.pop_front();
+      }
+      // Global shutter: exposure, then readout of all rows. The image time is
+      // the exposure center. rp1-cfe stamps the end of the frame: a readout
+      // and half an exposure earlier. unicam stamps the start of the frame
+      // (its first data): half an exposure earlier.
+      const double exposure_ns = frame_lines * line_ns;
       const double center_offset_ns =
-          start_of_exposure ? exposure_ns / 2 : -(options.height * line_ns + exposure_ns / 2);
+          start_of_exposure   ? exposure_ns / 2
+          : frame_start_stamp ? -exposure_ns / 2
+                              : -(options.height * line_ns + exposure_ns / 2);
       const int64_t t_ns = buffer_ns + static_cast<int64_t>(center_offset_ns) +
                            options.camera_time_offset_ns;
-      mean_brightness = cv::mean(gray)[0];
-      // New controls take effect after about two frames; skip the frame in between.
-      if (options.exposure_ms == 0 && ++frame % 2 == 0) {
-        const auto next = nextAutoExposure(setting, mean_brightness, options.brightness_target,
+      const double brightness =
+          metering_mask.empty() ? cv::mean(gray)[0] : cv::mean(gray, metering_mask)[0];
+      mean_brightness = brightness;
+      ++image_frames;
+      last_image_t_ns = t_ns;
+      if (capturing && image_data_queue) {
+        auto data = std::make_shared<OpticalFlowInput>();
+        data->t_ns = t_ns;
+        data->img_data.resize(1);
+        data->img_data[0].img = copyGrayImage(gray);
+        data->img_data[0].exposure = exposure_ns * 1e-9;
+        // A full queue drops its oldest image: the newest image has the
+        // newest information.
+        while (!image_data_queue->try_push(data)) {
+          OpticalFlowInput::Ptr old;
+          if (image_data_queue->try_pop(old)) ++dropped_frames;
+        }
+        if (queued_frames++ == 0) first_capture_t_ns = t_ns;
+        if (record_image_queue && !record_image_queue->try_push(data)) ++record_dropped_frames;
+        const int64_t delay_ns = monotonicNs() - buffer_ns;
+        image_delay_sum_ns += delay_ns;
+        if (delay_ns > image_delay_max_ns) image_delay_max_ns = delay_ns;
+      }
+
+      // Automatic exposure after the image is out: a control write takes some
+      // milliseconds of I2C. The next change waits until the sensor applies
+      // the last one.
+      if (options.exposure_ms == 0 && pending.empty()) {
+        const auto next = nextAutoExposure(setting, brightness, options.brightness_target,
                                            max_exposure_lines, min_gain, max_gain);
         if (next.lines != setting.lines) setSensorControl(V4L2_CID_EXPOSURE, next.lines);
         if (next.gain != setting.gain) setSensorControl(V4L2_CID_ANALOGUE_GAIN, next.gain);
+        if (next.lines != setting.lines || next.gain != setting.gain)
+          pending.push_back({sequence + CONTROL_DELAY_FRAMES, next.lines});
         setting = next;
         exposure_lines = setting.lines;
         analogue_gain = setting.gain;
       }
-      ++image_frames;
-      last_image_t_ns = t_ns;
-      if (!capturing || !image_data_queue) continue;
-      auto data = std::make_shared<OpticalFlowInput>();
-      data->t_ns = t_ns;
-      data->img_data.resize(1);
-      data->img_data[0].img = copyGrayImage(gray);
-      data->img_data[0].exposure = exposure_ns * 1e-9;
-      if (image_data_queue->try_push(data)) ++queued_frames;
-      else ++dropped_frames;
     }
   } catch (const std::exception& error) {
     fail(std::string("Camera: ") + error.what());
@@ -488,38 +566,71 @@ void PiCameraImuDevice::imuLoop() {
     reset_fifo();
     std::vector<uint8_t> bytes;
     auto next_poll = std::chrono::steady_clock::now();
+    int consecutive_errors = 0, empty_polls = 0;
+    bool need_reset = false;
     while (running) {
       next_poll += IMU_POLL_PERIOD;
       std::this_thread::sleep_until(next_poll);
-      uint8_t count_bytes[2];
-      const int64_t before_ns = monotonicNs();
-      readImu(MPU_FIFO_COUNT, count_bytes, 2);
-      const int64_t after_ns = monotonicNs();
-      const size_t count = (count_bytes[0] & 0x1F) << 8 | count_bytes[1];
-      // A full FIFO stops sampling, which breaks the sample index clock.
-      if (count + MPU_FIFO_SAMPLE_BYTES > MPU_FIFO_BYTES) {
-        ++imu_overflows;
-        reset_fifo();
+      const int64_t poll_start_ns = monotonicNs();
+      try {
+        // An empty FIFO for 10 polls (200 ms) means that it stopped, e.g.
+        // after a reset that failed half way.
+        if (need_reset || empty_polls >= 10) {
+          need_reset = true;
+          reset_fifo();
+          need_reset = false;
+          empty_polls = 0;
+          next_poll = std::chrono::steady_clock::now();
+          continue;
+        }
+        uint8_t count_bytes[2];
+        const int64_t before_ns = monotonicNs();
+        readImu(MPU_FIFO_COUNT, count_bytes, 2);
+        const int64_t after_ns = monotonicNs();
+        const size_t count = (count_bytes[0] & 0x1F) << 8 | count_bytes[1];
+        // A full FIFO stops sampling, which breaks the sample index clock.
+        if (count + MPU_FIFO_SAMPLE_BYTES > MPU_FIFO_BYTES) {
+          ++imu_overflows;
+          reset_fifo();
+          next_poll = std::chrono::steady_clock::now();
+          continue;
+        }
+        const size_t samples = count / MPU_FIFO_SAMPLE_BYTES;
+        consecutive_errors = 0;
+        if (samples == 0) {
+          ++empty_polls;
+          continue;
+        }
+        empty_polls = 0;
+        bytes.resize(samples * MPU_FIFO_SAMPLE_BYTES);
+        for (size_t offset = 0; offset < bytes.size(); offset += MPU_READ_CHUNK) {
+          readImu(MPU_FIFO_R_W, bytes.data() + offset,
+                  std::min(MPU_READ_CHUNK, bytes.size() - offset));
+        }
+        const auto times = imu_clock.assign(before_ns, after_ns, samples);
+        imu_period_ns = imu_clock.periodNs();
+        for (size_t i = 0; i < samples; ++i) {
+          ++imu_samples;
+          if (!capturing || !imu_data_queue) continue;
+          auto data = std::make_shared<ImuData>();
+          data->t_ns = times[i];
+          decodeMpuFifoSample(bytes.data() + i * MPU_FIFO_SAMPLE_BYTES, accel_scale, gyro_scale,
+                              data->accel, data->gyro);
+          imu_data_queue->push(data);
+          if (record_imu_queue) record_imu_queue->push(data);
+        }
+      } catch (const std::exception& error) {
+        // The CP2112 bridge of the Pi 4 rig times out transfers (about one in
+        // 200 polls, also without the camera), and the next transfer then
+        // fails too. A failed FIFO read can lose part of the FIFO, which
+        // breaks the 12-byte sample framing: reset the FIFO and continue.
+        // The IMU stream then has a gap of about 100-200 ms.
+        const int64_t lost_ns = monotonicNs() - poll_start_ns;
+        ++imu_i2c_errors;
+        if (lost_ns > imu_error_max_ns) imu_error_max_ns = lost_ns;
+        if (++consecutive_errors > 5) throw;
+        need_reset = true;
         next_poll = std::chrono::steady_clock::now();
-        continue;
-      }
-      const size_t samples = count / MPU_FIFO_SAMPLE_BYTES;
-      if (samples == 0) continue;
-      bytes.resize(samples * MPU_FIFO_SAMPLE_BYTES);
-      for (size_t offset = 0; offset < bytes.size(); offset += MPU_READ_CHUNK) {
-        readImu(MPU_FIFO_R_W, bytes.data() + offset,
-                std::min(MPU_READ_CHUNK, bytes.size() - offset));
-      }
-      const auto times = imu_clock.assign(before_ns, after_ns, samples);
-      imu_period_ns = imu_clock.periodNs();
-      for (size_t i = 0; i < samples; ++i) {
-        ++imu_samples;
-        if (!capturing || !imu_data_queue) continue;
-        auto data = std::make_shared<ImuData>();
-        data->t_ns = times[i];
-        decodeMpuFifoSample(bytes.data() + i * MPU_FIFO_SAMPLE_BYTES, accel_scale, gyro_scale,
-                            data->accel, data->gyro);
-        imu_data_queue->push(data);
       }
       // A slow bridge must not accumulate a backlog of sleep deadlines.
       next_poll = std::max(next_poll, std::chrono::steady_clock::now() - IMU_POLL_PERIOD);

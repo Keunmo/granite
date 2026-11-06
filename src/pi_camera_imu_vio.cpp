@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: MIT
-// Live mono VIO/VO on a Raspberry Pi 5 with an Arducam B0429 (AR0234) CSI
-// camera and an MPU-6500/9250 IMU on an I2C adapter.
+// Live mono VIO/VO on a Raspberry Pi 5 or 4 with an Arducam B0429 (AR0234)
+// CSI camera and an MPU-6500/9250 IMU on an I2C adapter.
+//
+// The estimator path is that of the offline runner eval/src/mono_vio_dataset.cpp
+// in its --realtime mode: the same VioConfig file, vio_enforce_realtime on,
+// initialize() with zero biases, a flow input queue of --queue-limit images
+// that drops its oldest image when it is full. --out writes the TUM trajectory
+// and the state CSV of the runner. --record writes the images and the IMU of
+// the same run as an EuRoC folder, which the runner replays.
 
 #include <chrono>
 #include <csignal>
@@ -8,12 +15,14 @@
 #include <filesystem>
 #include <fstream>
 #include <iomanip>
+#include <algorithm>
 #include <mutex>
 #include <thread>
 #include <utility>
 #include <CLI/CLI.hpp>
 #include <cereal/archives/json.hpp>
 #include <opencv2/imgcodecs.hpp>
+#include <tbb/concurrent_queue.h>
 #include <tbb/global_control.h>
 #include <granite/device/pi_camera_imu.h>
 #include <granite/device/t265_gui.h>
@@ -49,7 +58,7 @@ class EurocRecorder {
         pixels.at<uint8_t>(y, x) = static_cast<uint8_t>(image(x, y));
     }
     const std::string name = std::to_string(frame.t_ns) + ".png";
-    if (!cv::imwrite(root + "/cam0/data/" + name, pixels))
+    if (!cv::imwrite(root + "/cam0/data/" + name, pixels, {cv::IMWRITE_PNG_COMPRESSION, 1}))
       throw std::runtime_error("Cannot write image " + name);
     images << frame.t_ns << ',' << name << '\n';
   }
@@ -64,6 +73,70 @@ class EurocRecorder {
   std::string root;
   std::ofstream images, imu;
 };
+
+// Writes the recording on its own thread: PNG encoding must not delay the
+// main loop. A full image queue drops the image from the recording.
+class RecordWriter {
+ public:
+  explicit RecordWriter(const std::string& path) : recorder(path) {
+    images.set_capacity(60);
+    thread = std::thread([this] { run(); });
+  }
+  ~RecordWriter() { finish(); }
+
+  void finish() {
+    if (!thread.joinable()) return;
+    images.push(nullptr);
+    imu.push(nullptr);
+    thread.join();
+  }
+
+  tbb::concurrent_bounded_queue<granite::OpticalFlowInput::Ptr> images;
+  tbb::concurrent_bounded_queue<granite::ImuData::Ptr> imu;
+  std::atomic<uint64_t> written_images{0}, written_imu{0};
+
+ private:
+  void run() {
+    bool images_done = false, imu_done = false;
+    while (!images_done || !imu_done) {
+      bool idle = true;
+      granite::OpticalFlowInput::Ptr image;
+      if (!images_done && images.try_pop(image)) {
+        idle = false;
+        if (!image) images_done = true;
+        else {
+          recorder.write(*image);
+          ++written_images;
+        }
+      }
+      granite::ImuData::Ptr sample;
+      while (!imu_done && imu.try_pop(sample)) {
+        idle = false;
+        if (!sample) imu_done = true;
+        else {
+          recorder.write(*sample);
+          ++written_imu;
+        }
+      }
+      if (idle) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    }
+  }
+
+  EurocRecorder recorder;
+  std::thread thread;
+};
+
+double percentile(std::vector<double> values, double p) {
+  if (values.empty()) return -1;
+  std::sort(values.begin(), values.end());
+  return values[std::min(values.size() - 1, static_cast<size_t>(p * (values.size() - 1) + 0.5))];
+}
+
+int64_t monotonicNs() {
+  timespec time{};
+  clock_gettime(CLOCK_MONOTONIC, &time);
+  return int64_t(time.tv_sec) * 1'000'000'000 + time.tv_nsec;
+}
 
 // Reads the optional "camera.*" keys next to the VioConfig keys. VioConfig
 // ignores them. A command line option has priority over its key.
@@ -82,10 +155,21 @@ void loadCameraConfig(const std::string& path, const CLI::App& app,
       // The key is not in the file; keep the default.
     }
   };
+  load("camera.width", "--width", options.width);
+  load("camera.height", "--height", options.height);
   load("camera.fps", "--fps", options.fps);
   load("camera.exposure_ms", "--exposure", options.exposure_ms);
   load("camera.gain_db", "--gain", options.gain_db);
-  load("camera.resize_half", "--resize-half", options.resize_half);
+  load("camera.max_exposure_ms", "--max-exposure", options.max_exposure_ms);
+  load("camera.max_gain", "--max-gain", options.max_gain);
+  load("camera.brightness_target", "--brightness", options.brightness_target);
+  load("camera.metering_circle", "--metering-circle", options.metering_circle);
+  load("camera.i2c_device", "--i2c", options.i2c_device);
+  load("camera.imu_rate", "--imu-rate", options.imu_rate);
+  bool resize_half = false;
+  load("camera.resize_half", "--resize-half", resize_half);
+  if (resize_half && app.count("--downscale") == 0) options.downscale = 2;
+  load("camera.downscale", "--downscale", options.downscale);
   archive.finishNode();
 }
 
@@ -133,20 +217,27 @@ class VisualizationDrain {
 
 int main(int argc, char** argv) {
   granite::PiCameraImuOptions options;
-  bool use_imu = true, capture_only = false, no_gui = false;
-  int num_threads = 3;
+  bool use_imu = true, capture_only = false, no_gui = false, resize_half = false;
+  int num_threads = 3, queue_limit = 4;
   double duration = 0;
-  std::string calib_path, config_path, trajectory_path, record_path;
-  CLI::App app{"Granite live mono VIO: Raspberry Pi 5, Arducam B0429 and MPU-6500/9250"};
-  app.add_option("--calib", calib_path, "Granite camera/IMU calibration JSON at capture resolution");
+  std::string calib_path, config_path, trajectory_path, record_path, out_prefix;
+  CLI::App app{"Granite live mono VIO: Raspberry Pi 5 or 4, Arducam B0429 and MPU-6500/9250"};
+  app.add_option("--calib", calib_path,
+                 "Granite camera/IMU calibration JSON at the sensor mode or at 1/downscale of it");
   app.add_option("--config-path", config_path,
-                 "Granite VioConfig JSON; optional camera.fps, camera.exposure_ms, "
-                 "camera.gain_db and camera.resize_half keys set the camera");
+                 "Granite VioConfig JSON; optional camera.* keys (width, height, fps, downscale, "
+                 "exposure_ms, gain_db, max_exposure_ms, max_gain, brightness_target, "
+                 "metering_circle, i2c_device, imu_rate) set the sensors");
   app.add_option("--use-imu", use_imu, "1: VIO, 0: visual odometry");
   app.add_option("--width", options.width, "Sensor mode width (1920, 1280)");
   app.add_option("--height", options.height, "Sensor mode height (1200, 1080, 720)");
   app.add_option("--fps", options.fps, "Camera frame rate");
-  app.add_flag("--resize-half", options.resize_half, "Average 2x2 Bayer quads and halve the intrinsics");
+  app.add_option("--downscale", options.downscale,
+                 "Output image at 1/N of the sensor mode (N x N average without Bayer pattern)");
+  app.add_flag("--resize-half", resize_half, "Same as --downscale 2");
+  app.add_option("--metering-circle", options.metering_circle,
+                 "Auto exposure meters this circle cx cy r of the output image")
+      ->expected(3);
   app.add_option("--exposure", options.exposure_ms, "Manual exposure in ms (0: auto)");
   app.add_option("--max-exposure", options.max_exposure_ms, "Auto exposure limit in ms");
   app.add_option("--gain", options.gain_db, "Analogue gain in dB for manual exposure (0-11)");
@@ -158,13 +249,20 @@ int main(int argc, char** argv) {
   app.add_option("--num-threads", num_threads, "TBB worker limit");
   app.add_option("--duration", duration, "Stop after this many seconds (0: until SIGINT)");
   app.add_option("--trajectory", trajectory_path, "Output timestamp, pose and velocity CSV");
-  app.add_option("--record", record_path, "Record images and IMU as an EuRoC dataset; no VIO");
+  app.add_option("--out", out_prefix,
+                 "Output prefix: <out>_traj_tum.txt and <out>_states.csv of the offline runner");
+  app.add_option("--queue-limit", queue_limit,
+                 "Images that wait at the flow input; a new image drops the oldest above it");
+  app.add_option("--record", record_path,
+                 "Record the images and the IMU of this run as an EuRoC dataset (with VIO "
+                 "when --calib is given)");
   app.add_flag("--capture-only", capture_only, "Check image and IMU delivery without running VIO");
   app.add_flag("--no-gui", no_gui, "Disable the live window");
   CLI11_PARSE(app, argc, argv);
-  const bool estimate = !capture_only && record_path.empty();
-  if (num_threads < 1 || !std::isfinite(duration) || duration < 0) {
-    std::cerr << "Invalid thread count or duration" << std::endl;
+  if (resize_half && app.count("--downscale") == 0) options.downscale = 2;
+  const bool estimate = !capture_only && !(calib_path.empty() && !record_path.empty());
+  if (num_threads < 1 || queue_limit < 1 || !std::isfinite(duration) || duration < 0) {
+    std::cerr << "Invalid thread count, queue limit or duration" << std::endl;
     return 2;
   }
   if (estimate && calib_path.empty()) {
@@ -202,13 +300,22 @@ int main(int argc, char** argv) {
       archive(calib);
       if (calib.intrinsics.size() != 1 || calib.T_i_c.size() != 1 || calib.resolution.size() != 1)
         throw std::runtime_error("Expected a calibration with one camera");
-      if (calib.resolution[0] != Eigen::Vector2i(options.width, options.height))
-        throw std::runtime_error("Calibration resolution does not match the sensor mode");
+      const Eigen::Vector2i sensor_size(options.width, options.height);
+      const Eigen::Vector2i output_size = sensor_size / options.downscale;
+      if (calib.resolution[0] == sensor_size) {
+        granite::scaleCalibration(calib, options.downscale);
+      } else if (calib.resolution[0] != output_size) {
+        throw std::runtime_error(
+            "Calibration resolution " + std::to_string(calib.resolution[0].x()) + "x" +
+            std::to_string(calib.resolution[0].y()) + " is neither the sensor mode " +
+            std::to_string(sensor_size.x()) + "x" + std::to_string(sensor_size.y()) +
+            " nor the output " + std::to_string(output_size.x()) + "x" +
+            std::to_string(output_size.y()));
+      }
       calib.main_cam_idx = {0};
       calib.stereo_pairs.clear();
       // The estimators do not apply the calibrated camera time offset.
       options.camera_time_offset_ns = calib.cam_time_offset_ns;
-      if (options.resize_half) granite::scaleCalibrationHalf(calib);
     }
 
     std::ofstream trajectory;
@@ -217,8 +324,19 @@ int main(int argc, char** argv) {
       if (!trajectory) throw std::runtime_error("Cannot open trajectory output");
       trajectory << "timestamp_ns,tx,ty,tz,qx,qy,qz,qw,vx,vy,vz\n" << std::setprecision(16);
     }
-    std::unique_ptr<EurocRecorder> recorder;
-    if (!record_path.empty()) recorder = std::make_unique<EurocRecorder>(record_path);
+    std::ofstream tum, states_csv;
+    if (!out_prefix.empty()) {
+      tum.open(out_prefix + "_traj_tum.txt");
+      states_csv.open(out_prefix + "_states.csv");
+      if (!tum || !states_csv) throw std::runtime_error("Cannot open the --out files");
+      tum << std::setprecision(19);
+      states_csv << "t_ns,wall_s,x,y,z,qx,qy,qz,qw,vx,vy,vz,bgx,bgy,bgz,bax,bay,baz,support,"
+                    "connected_finite,connected_infinite,landmarks,map_idx,prev_corr_rot,"
+                    "prev_corr_pos,healthy,latency_ms\n"
+                 << std::setprecision(12);
+    }
+    std::unique_ptr<RecordWriter> recorder;
+    if (!record_path.empty()) recorder = std::make_unique<RecordWriter>(record_path);
     std::unique_ptr<granite::T265Gui> gui;
     if (!no_gui) {
       gui = std::make_unique<granite::T265Gui>();
@@ -229,6 +347,7 @@ int main(int argc, char** argv) {
     device.start();
     std::cout << "mode=" << (estimate ? (use_imu ? "mono VIO" : "mono VO") :
                              (recorder ? "record" : "capture"))
+              << " receiver=" << device.receiver()
               << " sensor=" << options.width << "x" << options.height
               << " output=" << device.outputWidth() << "x" << device.outputHeight()
               << " fps=" << device.frameRate() << " line_us=" << device.lineTimeNs() * 1e-3
@@ -237,7 +356,8 @@ int main(int argc, char** argv) {
                                                            device.lineTimeNs() * 1e-6)
                                           : "auto")
               << " gain_db=" << granite::b0429DbFromDriverGain(device.analogue_gain.load())
-              << " imu_rate=" << options.imu_rate << " threads=" << num_threads << std::endl;
+              << " imu_rate=" << options.imu_rate << " i2c=" << options.i2c_device
+              << " threads=" << num_threads << " queue_limit=" << queue_limit << std::endl;
     if (std::abs(device.frameRate() - options.fps) > 0.5)
       std::cerr << "The sensor mode limits " << options.fps << " fps to " << device.frameRate()
                 << " fps" << std::endl;
@@ -249,8 +369,7 @@ int main(int argc, char** argv) {
     tbb::concurrent_bounded_queue<granite::OpticalFlowInput::Ptr> capture_queue;
     tbb::concurrent_bounded_queue<granite::VioStateData::Ptr> state_queue;
     tbb::concurrent_bounded_queue<granite::VioVisualizationData::Ptr> visualization_queue;
-    // PNG encoding is slower than capture; keep a short burst for recording.
-    capture_queue.set_capacity(recorder ? 30 : 2);
+    capture_queue.set_capacity(30);
     // The estimator blocks on a full state queue; the window can hold the
     // main loop for some frames.
     state_queue.set_capacity(120);
@@ -260,12 +379,18 @@ int main(int argc, char** argv) {
     std::unique_ptr<VisualizationDrain> visualization_drain;
     if (estimate) {
       flow = granite::OpticalFlowFactory::getOpticalFlow(config, calib);
-      flow->input_queue.set_capacity(2);
+      flow->input_queue.set_capacity(queue_limit);
       device.image_data_queue = &flow->input_queue;
     } else {
       device.image_data_queue = &capture_queue;
     }
     device.imu_data_queue = &imu_queue;
+    if (recorder) {
+      device.record_image_queue = &recorder->images;
+      device.record_imu_queue = &recorder->imu;
+    }
+    const uint64_t start_images = device.image_frames.load();
+    const uint64_t start_imu = device.imu_samples.load();
     device.enableCapture();
     const auto start = std::chrono::steady_clock::now();
     const auto expired = [&] {
@@ -292,6 +417,9 @@ int main(int argc, char** argv) {
     const auto mono_vio = std::dynamic_pointer_cast<granite::MonoVioEstimator>(vio);
 
     uint64_t states = 0, previous_states = 0, previous_images = 0, previous_imu = 0;
+    std::vector<double> latencies, brightness_samples;
+    double first_state_wall = -1;
+    int64_t first_state_t_ns = 0, first_image_t_ns = 0;
     int64_t last_state_ns = 0, previous_image_ns = 0, previous_imu_ns = 0;
     bool invalid = false;
     size_t landmarks = 0, finite_landmarks = 0;
@@ -305,7 +433,6 @@ int main(int argc, char** argv) {
         if (!image) continue;
         if (image->t_ns <= previous_image_ns) invalid = true;
         previous_image_ns = image->t_ns;
-        if (recorder) recorder->write(*image);
         if (gui) gui->setFrame(image);
       }
       if (!estimate || !use_imu) {
@@ -317,7 +444,6 @@ int main(int argc, char** argv) {
               !sample->gyro.allFinite())
             invalid = true;
           previous_imu_ns = sample->t_ns;
-          if (recorder) recorder->write(*sample);
         }
       }
       granite::VioStateData::Ptr result;
@@ -329,6 +455,15 @@ int main(int argc, char** argv) {
           invalid = true;
         last_state_ns = state.t_ns;
         ++states;
+        const double wall = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        // From the exposure center (device clock) to the state output.
+        const double latency_ms =
+            (monotonicNs() - (state.t_ns - options.camera_time_offset_ns)) * 1e-6;
+        latencies.push_back(latency_ms);
+        if (first_state_wall < 0) {
+          first_state_wall = wall;
+          first_state_t_ns = state.t_ns;
+        }
         landmarks = result->num_landmarks;
         finite_landmarks = result->num_finite_landmarks;
         position = state.T_w_i.translation();
@@ -338,6 +473,25 @@ int main(int argc, char** argv) {
           case granite::MonoVioSupport::BEARING_ONLY: support = "bearing only"; break;
           case granite::MonoVioSupport::INERTIAL_ONLY: support = "inertial only"; break;
           case granite::MonoVioSupport::NOT_APPLICABLE: support = use_imu ? "visual-inertial" : "visual only"; break;
+        }
+        if (tum) {
+          const auto& p = state.T_w_i.translation();
+          const auto q = state.T_w_i.unit_quaternion();
+          tum << state.t_ns * 1e-9 << ' ' << p.x() << ' ' << p.y() << ' ' << p.z() << ' ' << q.x()
+              << ' ' << q.y() << ' ' << q.z() << ' ' << q.w() << '\n';
+          const int code = static_cast<int>(result->mono_vio_support);
+          const char* label = code == 1 ? "metric" : code == 2 ? "bearing" : code == 3 ? "inertial" : "n/a";
+          states_csv << state.t_ns << ',' << wall << ',' << p.x() << ',' << p.y() << ',' << p.z()
+                     << ',' << q.x() << ',' << q.y() << ',' << q.z() << ',' << q.w() << ','
+                     << state.vel_w_i.x() << ',' << state.vel_w_i.y() << ',' << state.vel_w_i.z()
+                     << ',' << state.bias_gyro.x() << ',' << state.bias_gyro.y() << ','
+                     << state.bias_gyro.z() << ',' << state.bias_accel.x() << ','
+                     << state.bias_accel.y() << ',' << state.bias_accel.z() << ',' << label << ','
+                     << result->num_connected_finite_landmarks << ','
+                     << result->num_connected_infinite_landmarks << ',' << result->num_landmarks
+                     << ',' << result->map_idx << ',' << result->prev_correction_rot << ','
+                     << result->prev_correction_pos << ',' << result->healthy << ','
+                     << latency_ms << '\n';
         }
         if (trajectory) {
           const auto& p = state.T_w_i.translation();
@@ -382,11 +536,14 @@ int main(int argc, char** argv) {
                   << " brightness=" << device.mean_brightness.load()
                   << " drops=" << device.dropped_frames.load() << "/" << device.sensor_frame_drops.load()
                   << " imu_overflows=" << device.imu_overflows.load()
+                  << " imu_errors=" << device.imu_i2c_errors.load()
                   << " lag_ms=" << (last_state_ns ? (device.last_image_t_ns.load() - last_state_ns) * 1e-6 : 0)
                   << " tracking=" << tracking() << " support=" << support
                   << " landmarks=" << landmarks << " finite=" << finite_landmarks
                   << " metric_initialized=" << (mono_vio ? mono_vio->metricInitialized() : false)
                   << " p=" << position.transpose() << std::endl;
+        if (first_image_t_ns == 0) first_image_t_ns = device.first_capture_t_ns.load();
+        brightness_samples.push_back(device.mean_brightness.load());
         previous_images = images;
         previous_states = states;
         previous_imu = imu;
@@ -419,10 +576,16 @@ int main(int argc, char** argv) {
         stalled = true;
         break;
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      // The offline runner polls its state queue every 2 ms.
+      std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
 
+    const double capture_seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    const uint64_t captured_images = device.image_frames.load() - start_images;
+    const uint64_t captured_imu = device.imu_samples.load() - start_imu;
     device.stop(false);
+    if (recorder) recorder->finish();
     // End the streams with sentinels instead of OpticalFlowBase::quit(true).
     // quit(true) clears the flow output queue while the flow thread can push
     // into it; TBB clear() is not thread safe and the push then never returns.
@@ -462,6 +625,34 @@ int main(int argc, char** argv) {
               << " states=" << states << " metric_initialized="
               << (mono_vio ? mono_vio->metricInitialized() : false)
               << " valid=" << !invalid << std::endl;
+    double brightness_mean = 0;
+    for (double b : brightness_samples) brightness_mean += b;
+    if (!brightness_samples.empty()) brightness_mean /= brightness_samples.size();
+    if (first_image_t_ns == 0) first_image_t_ns = device.first_capture_t_ns.load();
+    const uint64_t queued = device.queued_frames.load();
+    std::cout << std::setprecision(4) << "LIVE fps=" << captured_images / capture_seconds
+              << " sensor_fps=" << device.frameRate() << " sensor_drops=" << device.sensor_frame_drops.load()
+              << " queue_drops=" << device.dropped_frames.load()
+              << " imu_hz=" << captured_imu / capture_seconds
+              << " imu_period_ms=" << device.imu_period_ns.load() * 1e-6
+              << " imu_overflows=" << device.imu_overflows.load()
+              << " imu_i2c_errors=" << device.imu_i2c_errors.load()
+              << " imu_error_max_ms=" << device.imu_error_max_ns.load() * 1e-6
+              << " image_delay_ms_mean="
+              << (queued ? device.image_delay_sum_ns.load() * 1e-6 / queued : -1.0)
+              << " image_delay_ms_max=" << device.image_delay_max_ns.load() * 1e-6
+              << " latency_ms_p50=" << percentile(latencies, 0.5)
+              << " latency_ms_p95=" << percentile(latencies, 0.95)
+              << " latency_ms_max=" << percentile(latencies, 1.0)
+              << " brightness_mean=" << brightness_mean
+              << " first_state_wall_s=" << first_state_wall << " first_state_data_s="
+              << (first_state_t_ns && first_image_t_ns ? (first_state_t_ns - first_image_t_ns) * 1e-9 : -1.0)
+              << " states=" << states;
+    if (recorder)
+      std::cout << " recorded_images=" << recorder->written_images.load()
+                << " record_drops=" << device.record_dropped_frames.load()
+                << " recorded_imu=" << recorder->written_imu.load();
+    std::cout << std::endl;
     if (device.failed) std::cerr << device.errorMessage() << std::endl;
     return invalid || stalled || device.failed || device.image_frames == 0 ||
                    device.imu_samples == 0 ? 1 : 0;

@@ -36,16 +36,34 @@ inline cv::Mat unpackRaw10Msb(const uint8_t* data, int width, int height,
   return bayer;
 }
 
-// Full resolution demosaics GRBG to luminance. Half resolution averages each
-// 2x2 Bayer quad, so it does not need demosaicing.
-inline cv::Mat grbgToGray(const cv::Mat& bayer, bool resize_half) {
+// Converts a GRBG image to gray at 1/downscale of its size.
+//  1: demosaics to luminance.
+//  even N: averages N x N pixels. Each block holds whole 2x2 Bayer quads, so
+//    every output pixel has the same color mix and demosaicing is not necessary.
+//  odd N: averages each 2x2 quad, then resizes by 2/N with area weights. A
+//    direct N x N average would mix the colors differently in neighbouring
+//    blocks (5 G + 2 R + 2 B or 4 G + 4 R + 1 B for N = 3). That gives a
+//    fixed pattern of one-pixel period that the optical flow would track.
+// In all cases output pixel (u, v) covers the input pixels around
+// (N (u + 0.5) - 0.5, N (v + 0.5) - 0.5), which is what scaleCalibration expects.
+inline cv::Mat grbgToGray(const cv::Mat& bayer, int downscale) {
+  if (downscale < 1) throw std::invalid_argument("The downscale factor must be positive");
   cv::Mat gray;
-  if (resize_half) {
-    cv::resize(bayer, gray, cv::Size(bayer.cols / 2, bayer.rows / 2), 0, 0,
-               cv::INTER_AREA);
-  } else {
+  if (downscale == 1) {
     // OpenCV names Bayer codes by the second row; GRBG sensors use BayerGB.
     cv::cvtColor(bayer, gray, cv::COLOR_BayerGB2GRAY);
+    return gray;
+  }
+  const int unit = downscale % 2 == 0 ? downscale : 2 * downscale;
+  if (bayer.cols % unit != 0 || bayer.rows % unit != 0)
+    throw std::invalid_argument("The image size is not a multiple of the downscale block");
+  const cv::Size size(bayer.cols / downscale, bayer.rows / downscale);
+  if (downscale % 2 == 0) {
+    cv::resize(bayer, gray, size, 0, 0, cv::INTER_AREA);
+  } else {
+    cv::Mat quads;
+    cv::resize(bayer, quads, cv::Size(bayer.cols / 2, bayer.rows / 2), 0, 0, cv::INTER_AREA);
+    cv::resize(quads, gray, size, 0, 0, cv::INTER_AREA);
   }
   return gray;
 }
@@ -58,25 +76,33 @@ inline ManagedImage<PixelType>::Ptr copyGrayImage(const cv::Mat& gray) {
   return image;
 }
 
-// Halves the pixel scale of a calibration recorded at capture resolution.
-// INTER_AREA maps the center of each 2x2 block to one output pixel.
-inline void scaleCalibrationHalf(Calibration<double>& calib) {
+// Scales a calibration recorded at capture resolution to an image that is
+// `factor` times smaller (grbgToGray). The focal lengths divide by the factor,
+// and a principal point c moves to (c + 0.5) / factor - 0.5.
+inline void scaleCalibration(Calibration<double>& calib, int factor) {
+  if (factor < 1) throw std::invalid_argument("The calibration scale factor must be positive");
+  if (factor == 1) return;
   for (size_t i = 0; i < calib.intrinsics.size(); ++i) {
-    std::visit([](auto& camera) {
+    std::visit([factor](auto& camera) {
       using Camera = std::decay_t<decltype(camera)>;
       if constexpr (std::is_same_v<Camera, BalCamera<double>>) {
         throw std::invalid_argument("BAL camera intrinsics cannot be scaled");
       } else {
         auto params = camera.getParam();
-        params.template head<2>() *= 0.5;
+        params.template head<2>() /= factor;
         params.template segment<2>(2) =
-            (params.template segment<2>(2).array() + 0.5) * 0.5 - 0.5;
+            (params.template segment<2>(2).array() + 0.5) / factor - 0.5;
         camera = Camera(params);
       }
     }, calib.intrinsics[i].variant);
-    calib.resolution[i] /= 2;
+    if (calib.resolution[i].x() % factor != 0 || calib.resolution[i].y() % factor != 0)
+      throw std::invalid_argument("The calibration resolution is not a multiple of the factor");
+    calib.resolution[i] /= factor;
   }
 }
+
+// Halves the pixel scale of a calibration recorded at capture resolution.
+inline void scaleCalibrationHalf(Calibration<double>& calib) { scaleCalibration(calib, 2); }
 
 // One MPU-6500/9250 FIFO sample with ACCEL and GYRO enabled: six big-endian
 // accelerometer bytes, then six gyroscope bytes.
