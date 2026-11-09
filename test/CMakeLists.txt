@@ -54,3 +54,8 @@ gtest_add_tests(TARGET test_pi_sensor_utils AUTO)
 add_executable(test_t265_session src/test_t265_session.cpp)
 target_link_libraries(test_t265_session gtest gtest_main)
 gtest_add_tests(TARGET test_t265_session AUTO)
+
+# Standalone numerical checks include serialization and every analytic Jacobian.
+add_executable(test_brown_conrady src/test_brown_conrady.cpp)
+target_link_libraries(test_brown_conrady granite)
+add_test(NAME brown_conrady_camera COMMAND test_brown_conrady)

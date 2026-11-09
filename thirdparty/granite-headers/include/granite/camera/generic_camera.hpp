@@ -60,6 +60,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <granite/camera/fov_camera.hpp>
 #include <granite/camera/kannala_brandt_camera4.hpp>
 #include <granite/camera/pinhole_camera.hpp>
+#include <granite/camera/brown_conrady_camera.hpp>
 #include <granite/camera/unified_camera.hpp>
 
 #include <variant>
@@ -84,7 +85,7 @@ class GenericCamera {
   using VariantT =
       std::variant<ExtendedUnifiedCamera<Scalar>, DoubleSphereCamera<Scalar>,
                    KannalaBrandtCamera4<Scalar>, UnifiedCamera<Scalar>,
-                   PinholeCamera<Scalar>>;  ///< Possible variants of camera
+                   PinholeCamera<Scalar>, BrownConradyCamera<Scalar>>;  ///< Possible variants of camera
                                             ///< models.
 
  public:

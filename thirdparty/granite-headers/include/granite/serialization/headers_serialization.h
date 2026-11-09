@@ -155,6 +155,18 @@ inline void load(Archive& ar, granite::UnifiedCamera<Scalar>& cam) {
 }
 
 template <class Archive, class Scalar>
+inline void save(Archive& ar, const granite::BrownConradyCamera<Scalar>& cam) {
+  const auto& p=cam.getParam();
+  ar(cereal::make_nvp("fx",p[0]),cereal::make_nvp("fy",p[1]),cereal::make_nvp("cx",p[2]),cereal::make_nvp("cy",p[3]),cereal::make_nvp("k1",p[4]),cereal::make_nvp("k2",p[5]),cereal::make_nvp("p1",p[6]),cereal::make_nvp("p2",p[7]),cereal::make_nvp("k3",p[8]));
+}
+template <class Archive, class Scalar>
+inline void load(Archive& ar, granite::BrownConradyCamera<Scalar>& cam) {
+  Eigen::Matrix<Scalar,9,1> p;
+  ar(cereal::make_nvp("fx",p[0]),cereal::make_nvp("fy",p[1]),cereal::make_nvp("cx",p[2]),cereal::make_nvp("cy",p[3]),cereal::make_nvp("k1",p[4]),cereal::make_nvp("k2",p[5]),cereal::make_nvp("p1",p[6]),cereal::make_nvp("p2",p[7]),cereal::make_nvp("k3",p[8]));
+  cam=granite::BrownConradyCamera<Scalar>(p);
+}
+
+template <class Archive, class Scalar>
 inline void save(Archive& ar, const granite::PinholeCamera<Scalar>& cam) {
   ar(cereal::make_nvp("fx", cam.getParam()[0]),
      cereal::make_nvp("fy", cam.getParam()[1]),
