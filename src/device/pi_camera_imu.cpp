@@ -329,6 +329,41 @@ PiCameraImuDevice::PiCameraImuDevice(const PiCameraImuOptions& requested)
     throw std::invalid_argument("Invalid camera or IMU option");
   }
   if (options.xeyeProcessing()) {
+    // The Kurokesu driver has a 2x2 binning mode, 960x600 of the full array.
+    // At downscale 2 of 1920x1200 the sensor halves the image in place of the
+    // host: the output is the crop of the binning mode. The crop, the AE ROI
+    // and the AE circle are in the crop coordinates of the requested mode, so
+    // they are halved too. The binning crop needs even values.
+    if (options.kurokesu() && options.sensor_binning &&
+        options.downscale == 2 && options.width == 1920 &&
+        options.height == 1200) {
+      std::vector<int> crop = options.crop;
+      if (crop.empty()) crop = {0, 0, options.width, options.height};
+      const bool even =
+          crop.size() == 4 && std::all_of(crop.begin(), crop.end(),
+                                          [](int v) { return v % 4 == 0; });
+      if (even) {
+        for (int& v : crop) v /= 2;
+        options.crop = crop;
+        for (int& v : options.auto_exposure.roi) v /= 2;
+        for (int& v : options.auto_exposure.circle) v /= 2;
+        options.width = 960;
+        options.height = 600;
+        options.downscale = 1;
+        binning = true;
+      } else {
+        std::cerr << "Camera: the crop values are not multiples of 4, so the "
+                     "binning mode cannot keep the Bayer phase. The host "
+                     "halves the image."
+                  << std::endl;
+      }
+    }
+    // With a host reduction, the AE meters the output image: the ROI and the
+    // circle of the requested mode scale to it.
+    if (options.downscale > 1) {
+      for (int& v : options.auto_exposure.roi) v /= options.downscale;
+      for (int& v : options.auto_exposure.circle) v /= options.downscale;
+    }
     // ValidateProperty and CheckProcessingProperty of the xeye node.
     if (options.gain < 0) options.gain = options.kurokesu() ? 14 : 100;
     if (options.pixel_format != "gray8")
@@ -421,12 +456,14 @@ PiCameraImuDevice::PiCameraImuDevice(const PiCameraImuOptions& requested)
           ae.metering);
     if (!ae.roi.empty() && ae.roi.size() != 4)
       throw std::invalid_argument("auto_exposure_roi must be [x, y, w, h]");
+    const int out_w = crop_w / options.downscale;
+    const int out_h = crop_h / options.downscale;
     if (ae.roi.size() == 4 &&
         (ae.roi[0] < 0 || ae.roi[1] < 0 || ae.roi[2] < 2 || ae.roi[3] < 2 ||
-         ae.roi[0] + ae.roi[2] > crop_w || ae.roi[1] + ae.roi[3] > crop_h)) {
+         ae.roi[0] + ae.roi[2] > out_w || ae.roi[1] + ae.roi[3] > out_h)) {
       throw std::invalid_argument(
           "auto_exposure_roi must have x, y >= 0, w, h >= 2, and be in the " +
-          std::to_string(crop_w) + "x" + std::to_string(crop_h) + " crop");
+          std::to_string(out_w) + "x" + std::to_string(out_h) + " image");
     }
     if (!ae.circle.empty() && (ae.circle.size() != 3 || ae.circle[2] <= 0))
       throw std::invalid_argument(

@@ -223,6 +223,7 @@ int main(int argc, char** argv) {
         << (estimate ? (use_imu ? "mono VIO" : "mono VO")
                      : (recorder ? "record" : "capture"))
         << " receiver=" << device.receiver() << " camera=" << options.model
+        << " binning=" << device.sensorBinning()
         << " sensor=" << options.sensorWidth() << "x" << options.sensorHeight()
         << " output=" << device.outputWidth() << "x" << device.outputHeight()
         << " fps=" << device.frameRate()

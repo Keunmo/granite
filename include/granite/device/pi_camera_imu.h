@@ -43,6 +43,10 @@ struct PiCameraImuOptions {
   double fps = 30;  // frame_rate
   // The output image is 1/downscale of the sensor mode (grbgToGray).
   int downscale = 1;
+  // kurokesu_ar0234_pi at downscale 2 of 1920x1200: use the 2x2 binning mode
+  // of the sensor (960x600) with the halved crop in place of the host
+  // reduction.
+  bool sensor_binning = true;
   // Added to image times; the calibration convention is t_imu = t_cam + offset.
   int64_t camera_time_offset_ns = 0;
 
@@ -143,6 +147,8 @@ class PiCameraImuDevice {
   double maxExposureMs() const { return frame_exposure_lines * line_ns * 1e-6; }
   // The analogue gain of analogue_gain in dB.
   double gainDb() const;
+  // The sensor halves the image (sensor_binning) in place of the host.
+  bool sensorBinning() const { return binning; }
   std::string errorMessage() const;
 
   tbb::concurrent_bounded_queue<OpticalFlowInput::Ptr>* image_data_queue = nullptr;
@@ -196,6 +202,7 @@ class PiCameraImuDevice {
   uint32_t buffer_memory = 0;
   std::vector<int> dma_buffer_fds;
   int crop_x = 0, crop_y = 0, crop_w = 0, crop_h = 0;
+  bool binning = false;
   double exposure_time_ms = 0;
   std::optional<std::array<double, 2>> wb_gains;
   std::vector<uint8_t> gamma_curve;

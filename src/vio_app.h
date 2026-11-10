@@ -2252,6 +2252,7 @@ class VioDataset {
     const auto& o = run_opt.pi;
     std::cout << "mode=" << (use_imu ? "mono VIO" : "mono VO")
               << " receiver=" << device->receiver() << " camera=" << o.model
+              << " binning=" << device->sensorBinning()
               << " sensor=" << o.sensorWidth() << "x" << o.sensorHeight()
               << " output=" << device->outputWidth() << "x"
               << device->outputHeight() << " fps=" << device->frameRate()

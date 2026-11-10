@@ -14,6 +14,9 @@ Calibration JSON (--calib-out), at 1/N of the calibrated image size (--downscale
                A calibration at the sensor mode moves to the crop: c -> c - (x, y), size -> (w, h). A calibration at
                the crop size stays.
   downscale    an N x N reduction (grbgToGray of the live app): f / N, c -> (c + 0.5) / N - 0.5, size / N.
+               At --downscale 2 of a kurokesu_ar0234_pi node at 1920x1200, the live app uses the 2x2 binning mode of
+               the sensor (camera.sensor_binning, default true) with the halved crop when the crop values are multiples
+               of 4. Output pixel i covers the full resolution pixels 2i and 2i + 1, so the same formula holds.
   T_imu_cam    (imu2rig_pose)^-1 cam2rig_pose; a pose [rx, ry, rz, tx, ty, tz] maps the sensor frame into the rig frame.
   biases       calib_accel_bias / calib_gyro_bias = bias_acc / bias_gyro of the IMU (Granite subtracts them from the
                samples) for raw samples (--imu-samples raw: the live sensors). Zero for --imu-samples calibrated: an xeye
@@ -609,6 +612,14 @@ def main():
             print(f"warning: the images {output[0]}x{output[1]} of the node are not {a.downscale} x the calibration "
                   f"{size[0]}x{size[1]}; the live app rejects the calibration", file=sys.stderr)
         live = {"camera.model": capture["xeye_model"], "camera.downscale": a.downscale, "camera.fps": a.fps}
+        if a.downscale == 2 and capture["xeye_model"] == "kurokesu_ar0234_pi" and sensor == (1920, 1200):
+            full = [int(v) for v in crop] if len(crop) == 4 else [0, 0, 1920, 1200]
+            if all(v % 4 == 0 for v in full):
+                print(f"  live: the 2x2 binning mode of the sensor gives the {output[0] // 2}x{output[1] // 2} images "
+                      f"(crop {[v // 2 for v in full]} of 960x600; camera.sensor_binning false: the host halves)")
+            else:
+                print(f"  live: the crop {full} has values that are not multiples of 4; the host halves the image "
+                      f"(no binning)")
         if "port" in capture["camera_node"]:
             live["camera.port"] = capture["camera_node"]["port"]
         for key in XEYE_CAMERA_KEYS:

@@ -155,6 +155,10 @@ inline void addSensorOptions(CLI::App& app, PiCameraImuOptions& options, bool& r
   app.add_option("--downscale", options.downscale,
                  "Output image at 1/N of the sensor mode (N x N average without Bayer pattern)");
   app.add_flag("--resize-half", resize_half, "Same as --downscale 2");
+  app.add_option("--sensor_binning", options.sensor_binning,
+                 "kurokesu_ar0234_pi at --downscale 2 of 1920x1200: the 2x2 "
+                 "binning mode with the halved crop in place of the host "
+                 "reduction");
   app.add_option("--pixel_format", options.pixel_format,
                  "xeye models: gray8 (demosaiced)");
   app.add_option(
@@ -315,6 +319,7 @@ inline void loadCameraConfig(const std::string& path, const CLI::App& app,
   load("camera.resize_half", "--resize-half", resize_half);
   if (resize_half && app.count("--downscale") == 0) options.downscale = 2;
   load("camera.downscale", "--downscale", options.downscale);
+  load("camera.sensor_binning", "--sensor_binning", options.sensor_binning);
   archive.finishNode();
 }
 
@@ -329,6 +334,9 @@ inline void fitCalibration(Calibration<double>& calib, const PiCameraImuOptions&
   if (options.xeyeProcessing() && crop.size() == 4)
     sensor_size =
         Eigen::Vector2i(crop[2] - crop[2] % 2, crop[3] - crop[3] % 2);
+  // With sensor_binning at downscale 2, the output is the halved crop of the
+  // binning mode: the same size and the same scaleCalibration as the host
+  // reduction (output pixel i covers the full resolution pixels 2i and 2i + 1).
   const Eigen::Vector2i output_size = sensor_size / options.downscale;
   if (calib.resolution[0] == sensor_size) {
     scaleCalibration(calib, options.downscale);
