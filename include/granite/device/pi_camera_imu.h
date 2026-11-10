@@ -37,7 +37,7 @@ struct PiCameraImuOptions {
   // Sensor entity name prefix in the media graph. Empty: the prefix of the
   // model ("ar0234" or "arducam-pivariety").
   std::string sensor;
-  // Sensor mode. 0: 960x600 for kurokesu_ar0234_pi, 1280x720 for the B0429.
+  // Sensor mode. 0: 1920x1200 for kurokesu_ar0234_pi, 1280x720 for the B0429.
   int width = 0;
   int height = 0;
   double fps = 30;  // frame_rate
@@ -55,8 +55,9 @@ struct PiCameraImuOptions {
   int num_v4l_buffer = 4;
   bool h_flip = true;
   bool v_flip = true;
-  std::vector<int> crop;  // [x, y, w, h] in the sensor frame, even values.
-                          // Empty: the full frame
+  // [x, y, w, h] in the sensor frame, even values. Empty: kDefaultCrop for
+  // kurokesu_ar0234_pi in its default sensor mode, else the full frame.
+  std::vector<int> crop;
   bool auto_white_balance = true;
   bool fused_wb =
       true;  // The WB gains come from the statistics of the previous frame
@@ -97,10 +98,17 @@ struct PiCameraImuOptions {
   bool kurokesu() const { return model == "kurokesu_ar0234_pi"; }
   bool mavlink() const { return imu_type == "imu_mavlink"; }
   int sensorWidth() const {
-    return width > 0 ? width : kurokesu() ? 960 : 1280;
+    return width > 0 ? width : kurokesu() ? 1920 : 1280;
   }
   int sensorHeight() const {
-    return height > 0 ? height : kurokesu() ? 600 : 720;
+    return height > 0 ? height : kurokesu() ? 1200 : 720;
+  }
+  // The center 1344 columns of the default mode, as in
+  // configs/capture_kurokesu_ar0234_pi.yaml of xeye.
+  static constexpr int kDefaultCrop[4] = {288, 0, 1344, 1200};
+  std::vector<int> cropRect() const {
+    if (!crop.empty() || !kurokesu() || width > 0 || height > 0) return crop;
+    return {std::begin(kDefaultCrop), std::end(kDefaultCrop)};
   }
 };
 

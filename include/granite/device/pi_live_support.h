@@ -147,10 +147,10 @@ inline void addSensorOptions(CLI::App& app, PiCameraImuOptions& options, bool& r
       "--port", options.port,
       "Video node of the rp1-cfe (empty: the node of the sensor graph)");
   app.add_option("--width", options.width,
-                 "Sensor mode width (1920, 1280, 960; 0: 960 for "
+                 "Sensor mode width (1920, 1280, 960; 0: 1920 for "
                  "kurokesu_ar0234_pi, else 1280)");
   app.add_option("--height", options.height,
-                 "Sensor mode height (1200, 1080, 720, 600; 0: 600 or 720)");
+                 "Sensor mode height (1200, 1080, 720, 600; 0: 1200 or 720)");
   app.add_option("--fps,--frame_rate", options.fps, "Camera frame rate");
   app.add_option("--downscale", options.downscale,
                  "Output image at 1/N of the sensor mode (N x N average without Bayer pattern)");
@@ -171,7 +171,9 @@ inline void addSensorOptions(CLI::App& app, PiCameraImuOptions& options, bool& r
   app.add_option("--v_flip", options.v_flip,
                  "xeye models: sensor vertical flip");
   app.add_option("--crop", options.crop,
-                 "xeye models: crop x y w h of the sensor mode")
+                 "xeye models: crop x y w h of the sensor mode (default: 288 0 "
+                 "1344 1200 for kurokesu_ar0234_pi at 0x0; 0 0 1920 1200: no "
+                 "crop)")
       ->expected(4);
   app.add_option("--auto_white_balance", options.auto_white_balance,
                  "xeye models: WB");
@@ -323,9 +325,10 @@ inline void fitCalibration(Calibration<double>& calib, const PiCameraImuOptions&
     throw std::runtime_error("Expected a calibration with one camera");
   // The xeye models send the crop of the sensor mode.
   Eigen::Vector2i sensor_size(options.sensorWidth(), options.sensorHeight());
-  if (options.xeyeProcessing() && options.crop.size() == 4)
-    sensor_size = Eigen::Vector2i(options.crop[2] - options.crop[2] % 2,
-                                  options.crop[3] - options.crop[3] % 2);
+  const std::vector<int> crop = options.cropRect();
+  if (options.xeyeProcessing() && crop.size() == 4)
+    sensor_size =
+        Eigen::Vector2i(crop[2] - crop[2] % 2, crop[3] - crop[3] % 2);
   const Eigen::Vector2i output_size = sensor_size / options.downscale;
   if (calib.resolution[0] == sensor_size) {
     scaleCalibration(calib, options.downscale);

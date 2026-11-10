@@ -319,6 +319,8 @@ PiCameraImuDevice::PiCameraImuDevice(const PiCameraImuOptions& requested)
   }
   if (options.sensor.empty())
     options.sensor = options.kurokesu() ? "ar0234" : "arducam-pivariety";
+  // Resolve the default crop before the default sensor mode.
+  options.crop = options.cropRect();
   options.width = options.sensorWidth();
   options.height = options.sensorHeight();
   if (options.width % 4 != 0 || options.height % 2 != 0 || !(options.fps > 0) ||
@@ -364,20 +366,21 @@ PiCameraImuDevice::PiCameraImuDevice(const PiCameraImuOptions& requested)
     const auto floor2 = [](int v) { return v - v % 2; };
     crop_w = options.width;
     crop_h = options.height;
-    if (!options.crop.empty()) {
-      if (options.crop.size() != 4)
+    const std::vector<int> crop_rect = options.cropRect();
+    if (!crop_rect.empty()) {
+      if (crop_rect.size() != 4)
         throw std::invalid_argument("crop must be [x, y, w, h]");
       // Even values keep the Bayer phase.
-      crop_x = floor2(options.crop[0]);
-      crop_y = floor2(options.crop[1]);
-      crop_w = floor2(options.crop[2]);
-      crop_h = floor2(options.crop[3]);
+      crop_x = floor2(crop_rect[0]);
+      crop_y = floor2(crop_rect[1]);
+      crop_w = floor2(crop_rect[2]);
+      crop_h = floor2(crop_rect[3]);
       if (crop_x < 0 || crop_y < 0 || crop_w < 2 || crop_h < 2 ||
           crop_x + crop_w > options.width || crop_y + crop_h > options.height) {
-        throw std::invalid_argument("crop [" + std::to_string(options.crop[0]) +
-                                    ", " + std::to_string(options.crop[1]) +
-                                    ", " + std::to_string(options.crop[2]) +
-                                    ", " + std::to_string(options.crop[3]) +
+        throw std::invalid_argument("crop [" + std::to_string(crop_rect[0]) +
+                                    ", " + std::to_string(crop_rect[1]) +
+                                    ", " + std::to_string(crop_rect[2]) +
+                                    ", " + std::to_string(crop_rect[3]) +
                                     "] is outside the " +
                                     std::to_string(options.width) + "x" +
                                     std::to_string(options.height) + " frame");
