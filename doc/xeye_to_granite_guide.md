@@ -11,6 +11,8 @@
 
 capture.yaml은 데이터셋마다 다릅니다. 각 데이터셋에는 그 데이터셋의 capture.yaml만 씁니다.
 
+live 앱의 기본 입력은 이제 Pi 5의 Kurokesu AR0234와 PX4 IMU(`--model kurokesu_ar0234_pi --imu_type imu_mavlink`)입니다. 이 입력의 처리 방식, 설정 키, 변환 방식은 `doc/pi5_kurokesu_live_input.md`에 있습니다. 이 문서의 Pi 4 live 명령은 이전 입력을 쓰므로 `--model b0429 --imu_type mpu_i2c`를 붙입니다.
+
 | 데이터셋 또는 리그 | capture.yaml | 이 문서의 Granite 파일 |
 |---|---|---|
 | Pi 4 live 리그 (B0429 + MPU-9250) | Pi 4 `/home/uvify/workspace/openvio/config/capture.yaml` (데스크톱 사본 `~/workspace/openvio/config/capture.yaml`, md5 `d2d36cf7`) | `eval/config/live/b0429_pi_640x400_*.json` |

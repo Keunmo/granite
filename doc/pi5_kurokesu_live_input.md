@@ -8,7 +8,7 @@
 - IMU: `imu_mavlink` node (`capturelib/capture/nodes/imu_mavlink.cc`)
 - 설정: `xeye/configs/capture_kurokesu_ar0234_pi.yaml`
 
-이전 입력(Arducam B0429 + I2C MPU, Pi 4 리그)은 남아 있습니다. 선택 방법은 7절에 있습니다. Pi 4 절차는 `doc/xeye_to_granite_guide.md`에 있습니다.
+이전 입력(Arducam B0429 + I2C MPU, Pi 4 리그)은 남아 있습니다. 선택 방법은 8절에 있습니다. Pi 4 절차는 `doc/xeye_to_granite_guide.md`에 있습니다.
 
 상태 표기는 `doc/xeye_to_granite_guide.md`와 같습니다.
 
@@ -143,7 +143,7 @@ gain 모델은 센서마다 다릅니다.
 
 `auto_exposure_roi`와 `auto_exposure_circle`은 설정한 센서 모드의 crop 좌표로 해석합니다. binning에서는 2로 나누고, host 축소에서는 N으로 나눕니다. AE는 출력 이미지를 측광하기 때문입니다.
 
-binning 출력 pixel i는 전체 해상도 pixel 2i와 2i + 1을 덮는다고 가정합니다. 그래서 보정 식은 host 2x2 축소와 같습니다(5.3절). binning과 host 2x2 평균의 pixel 기하가 같다는 가정은 측정하지 않았습니다. [미검증]
+binning 출력 pixel i는 전체 해상도 pixel 2i와 2i + 1을 덮는다고 가정합니다. 그래서 보정 식은 host 2x2 축소와 같습니다(7.2절). binning과 host 2x2 평균의 pixel 기하가 같다는 가정은 측정하지 않았습니다. [미검증]
 
 ## 3. IMU 입력
 
@@ -250,7 +250,7 @@ Granite config 파일에서는 `camera.<키>`와 `imu.<키>`로 씁니다. 명�
 
 | 키 | 단위 | 기본값 | 범위와 검사 |
 |---|---|---|---|
-| `model` | - | `kurokesu_ar0234_pi` | `kurokesu_ar0234_pi`, `b0429_pi` (`arducam_b0429_pi`도 받음), `b0429` (7절) |
+| `model` | - | `kurokesu_ar0234_pi` | `kurokesu_ar0234_pi`, `b0429_pi` (`arducam_b0429_pi`도 받음), `b0429` (8절) |
 | `port` | - | `/dev/video0` | rp1-cfe의 video node. 비우면 센서가 있는 graph의 `rp1-cfe-csi2_ch0` |
 | `width`, `height` | px | 0 → Kurokesu 1920x1200, B0429 1280x720 | Kurokesu: 1920x1200, 1920x1080, 1280x720, 960x600. `b0429_pi`: 앞의 3개 |
 | `fps` (`frame_rate`) | Hz | 30 | > 0 |
@@ -270,7 +270,7 @@ Granite config 파일에서는 `camera.<키>`와 `imu.<키>`로 씁니다. 명�
 | `auto_gain_range` | dB | 비움 → driver 범위 | 최솟값 ≤ 최댓값, driver 범위 안 |
 | `auto_exp_prior` | - | `exposure` | `exposure`, `gain` |
 | `target_gray_value` | % | 20 | 1-99 |
-| `auto_exposure_ev_compensation` | EV | 0 | −3-3 |
+| `auto_exposure_ev_compensation` | EV | 0 | −3 이상 3 이하 |
 | `auto_exposure_damping` | - | 0.5 | 0 이상 1 미만 |
 | `auto_exposure_metering` | - | `average` | `average`, `spot`, `partial` |
 | `auto_exposure_roi` | px | 비움 | `[x, y, w, h]`, crop 좌표 |
@@ -284,7 +284,7 @@ Granite config 파일에서는 `camera.<키>`와 `imu.<키>`로 씁니다. 명�
 
 | 키 | 단위 | 기본값 | 범위와 검사 |
 |---|---|---|---|
-| `type` | - | `imu_mavlink` | `imu_mavlink`, `mpu_i2c` (7절) |
+| `type` | - | `imu_mavlink` | `imu_mavlink`, `mpu_i2c` (8절) |
 | `udp` | - | `udp`와 `port`가 모두 비면 `127.0.0.1:14601` | `<주소>:<port>`, port 1-65535 |
 | `port` | - | 비움 | serial device. `udp`와 같이 쓰면 오류 |
 | `baudrate` | baud | 921600 | 57600, 115200, 230400, 460800, 500000, 921600, 1000000, 1500000 |
