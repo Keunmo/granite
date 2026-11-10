@@ -31,3 +31,6 @@
 [submodule "thirdparty/ros/roscpp_core"]
 	path = thirdparty/ros/roscpp_core
 	url = https://github.com/ros/roscpp_core.git
+[submodule "thirdparty/mavlink"]
+	path = thirdparty/mavlink
+	url = https://github.com/mavlink/c_library_v2.git

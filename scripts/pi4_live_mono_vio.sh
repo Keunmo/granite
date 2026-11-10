@@ -73,7 +73,9 @@ fi
 
 OUT=$E/live/$(date +%Y%m%d_%H%M%S)
 mkdir -p "$OUT"
-args=(--live --use-imu 1 --cam-calib "$CALIB" --config-path "$CONFIG" --i2c "$I2C"
+# The Pi 4 rig: the B0429 on unicam and the MPU on the CP2112 bridge.
+args=(--live --use-imu 1 --cam-calib "$CALIB" --config-path "$CONFIG"
+      --model b0429 --imu_type mpu_i2c --i2c "$I2C"
       --num-threads "$threads" --out "$OUT/run")
 [ "$record" = 1 ] && args+=(--record "$OUT/euroc")
 [ "$gui" = 0 ] && args+=(--show-gui 0)

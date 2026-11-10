@@ -1,24 +1,33 @@
 // SPDX-License-Identifier: MIT
 #include <granite/device/pi_camera_imu.h>
 
-#include <cerrno>
-#include <chrono>
-#include <deque>
-#include <cstring>
+#include <arpa/inet.h>
 #include <fcntl.h>
-#include <fstream>
+#include <granite/utils/imu_types.h>
+#include <linux/dma-buf.h>
+#include <linux/dma-heap.h>
 #include <linux/i2c-dev.h>
 #include <linux/i2c.h>
 #include <linux/media-bus-format.h>
 #include <linux/media.h>
 #include <linux/v4l2-subdev.h>
 #include <linux/videodev2.h>
+#include <mavlink/common/mavlink.h>
+#include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
+#include <sys/socket.h>
+#include <termios.h>
 #include <unistd.h>
-#include <granite/utils/imu_types.h>
+#include <cerrno>
+#include <chrono>
+#include <cstring>
+#include <deque>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
 
 namespace granite {
 
@@ -43,6 +52,37 @@ constexpr uint32_t CONTROL_DELAY_FRAMES = 2;
 // The CSI receivers: rp1-cfe on the Raspberry Pi 5, unicam on the Raspberry Pi 4.
 constexpr const char* RP1_CFE = "rp1-cfe";
 constexpr const char* UNICAM = "unicam";
+
+// kurokesu_ar0234_pi and b0429_pi: the values of the xeye node.
+constexpr int FIRST_FRAME_TIMEOUT_MS = 2000;
+// Contiguous memory, as the rp1-cfe needs.
+constexpr const char* DMA_HEAP = "/dev/dma_heap/linux,cma";
+// The frames are GR16 (GRBG): the non-green pixel of the even rows is
+// in column 1. The sensor flip keeps the GRBG order.
+constexpr int GRBG_NON_GREEN_COL = 1;
+constexpr double MIN_EXPOSURE_MS = 0.03;
+// The image_sensor::Profile of the xeye models.
+struct XeyeSensorProfile {
+  std::vector<std::pair<int, int>> resolutions;
+  int min_exposure_us, max_exposure_us;
+  int min_gain, max_gain;
+};
+const XeyeSensorProfile KUROKESU_AR0234_PROFILE{
+    {{1920, 1200}, {1920, 1080}, {1280, 720}, {960, 600}}, 2, 65535, 13, 64};
+const XeyeSensorProfile AR0234_PROFILE{
+    {{1920, 1200}, {1920, 1080}, {1280, 720}}, 2, 65535, 100, 1200};
+// b0429_pi: measured on the Pi, 100 is 1x and each 408.5 adds 1x, with an
+// error of at most 3 %. Values from 1123 give less gain.
+constexpr double B0429_PI_GAIN_PER_X = 408.5;
+
+// imu_mavlink: the values of the xeye imu_mavlink node. Requests come from an
+// onboard computer of the vehicle system.
+constexpr uint8_t MAVLINK_SYSTEM_ID = 1;
+constexpr uint8_t MAVLINK_COMPONENT_ID = MAV_COMP_ID_ONBOARD_COMPUTER;
+constexpr int MAVLINK_READ_TIMEOUT_MS = 100;
+constexpr int64_t MAVLINK_REQUEST_RETRY_NS = 2'000'000'000;
+// No HIGHRES_IMU for this long while the rate is settled requests it again.
+constexpr int64_t MAVLINK_IMU_TIMEOUT_NS = 3'000'000'000;
 
 int64_t monotonicNs() {
   timespec time{};
@@ -82,7 +122,9 @@ struct MediaEntity {
 // the sensor. The Pi 5 has one graph per CSI port.
 class MediaGraph {
  public:
-  explicit MediaGraph(const std::string& sensor_prefix) {
+  // video_node: a video node that the graph must also have (empty: any).
+  explicit MediaGraph(const std::string& sensor_prefix,
+                      const std::string& video_node = "") {
     for (int index = 0; index < 16 && fd < 0; ++index) {
       const std::string path = "/dev/media" + std::to_string(index);
       const int candidate = open(path.c_str(), O_RDWR | O_CLOEXEC);
@@ -92,7 +134,8 @@ class MediaGraph {
           (std::string(info.driver) == RP1_CFE || std::string(info.driver) == UNICAM)) {
         fd = candidate;
         entities = enumerate();
-        if (findPrefix(sensor_prefix)) {
+        if (findPrefix(sensor_prefix) &&
+            (video_node.empty() || findNode(video_node))) {
           driver_name = info.driver;
           break;
         }
@@ -111,6 +154,18 @@ class MediaGraph {
 
   const std::string& driver() const { return driver_name; }
 
+  const MediaEntity* findNode(const std::string& path) const {
+    std::error_code error;
+    const auto target = std::filesystem::canonical(path, error);
+    if (error) return nullptr;
+    for (const auto& entity : entities) {
+      if (!entity.node.empty() &&
+          std::filesystem::canonical(entity.node, error) == target)
+        return &entity;
+    }
+    return nullptr;
+  }
+
   const MediaEntity* findPrefix(const std::string& prefix) const {
     for (const auto& entity : entities)
       if (entity.name.rfind(prefix, 0) == 0) return &entity;
@@ -121,6 +176,18 @@ class MediaGraph {
     for (const auto& entity : entities)
       if (entity.name == name) return entity;
     throw std::runtime_error("Media entity '" + name + "' not found");
+  }
+
+  std::vector<media_link_desc> links(const MediaEntity& source) const {
+    std::vector<media_pad_desc> pads(source.pads);
+    std::vector<media_link_desc> result(source.links);
+    media_links_enum query{};
+    query.entity = source.id;
+    query.pads = pads.data();
+    query.links = result.data();
+    if (xioctl(fd, MEDIA_IOC_ENUM_LINKS, &query) < 0)
+      throw systemError("MEDIA_IOC_ENUM_LINKS");
+    return result;
   }
 
   // Enables the link between two entities and returns the source pad.
@@ -164,7 +231,8 @@ class MediaGraph {
   std::string driver_name;
 };
 
-void setSubdevFormat(const std::string& node, uint32_t pad, int width, int height) {
+void setSubdevFormat(const std::string& node, uint32_t pad, int width,
+                     int height, uint32_t code = MEDIA_BUS_FMT_SGRBG10_1X10) {
   const int fd = open(node.c_str(), O_RDWR | O_CLOEXEC);
   if (fd < 0) throw systemError("Cannot open " + node);
   v4l2_subdev_format format{};
@@ -172,18 +240,32 @@ void setSubdevFormat(const std::string& node, uint32_t pad, int width, int heigh
   format.pad = pad;
   format.format.width = width;
   format.format.height = height;
-  format.format.code = MEDIA_BUS_FMT_SGRBG10_1X10;
+  format.format.code = code;
   // CFE link validation compares the field of both pads.
   format.format.field = V4L2_FIELD_NONE;
   format.format.colorspace = V4L2_COLORSPACE_RAW;
   const int result = xioctl(fd, VIDIOC_SUBDEV_S_FMT, &format);
   close(fd);
   if (result < 0) throw systemError("VIDIOC_SUBDEV_S_FMT " + node);
-  if (int(format.format.width) != width || int(format.format.height) != height ||
-      format.format.code != MEDIA_BUS_FMT_SGRBG10_1X10) {
-    throw std::runtime_error("Sensor mode " + std::to_string(width) + "x" +
-                             std::to_string(height) + " SGRBG10 is not supported");
+  if (int(format.format.width) != width ||
+      int(format.format.height) != height || format.format.code != code) {
+    throw std::runtime_error(node + " pad " + std::to_string(pad) +
+                             " does not take " + std::to_string(width) + "x" +
+                             std::to_string(height) + " code " +
+                             std::to_string(code));
   }
+}
+
+v4l2_mbus_framefmt getSubdevFormat(const std::string& node, uint32_t pad) {
+  const int fd = open(node.c_str(), O_RDWR | O_CLOEXEC);
+  if (fd < 0) throw systemError("Cannot open " + node);
+  v4l2_subdev_format format{};
+  format.which = V4L2_SUBDEV_FORMAT_ACTIVE;
+  format.pad = pad;
+  const int result = xioctl(fd, VIDIOC_SUBDEV_G_FMT, &format);
+  close(fd);
+  if (result < 0) throw systemError("VIDIOC_SUBDEV_G_FMT " + node);
+  return format.format;
 }
 
 v4l2_queryctrl queryControl(int fd, uint32_t id) {
@@ -212,16 +294,158 @@ int64_t getControl64(int fd, uint32_t id) {
 
 }  // namespace
 
-PiCameraImuDevice::PiCameraImuDevice(const PiCameraImuOptions& options)
-    : options(options), imu_clock(1e9 / options.imu_rate) {
-  if (options.width <= 0 || options.height <= 0 || options.width % 4 != 0 ||
-      options.height % 2 != 0 || !(options.fps > 0) || options.exposure_ms < 0 ||
-      !(options.max_exposure_ms > 0) ||
-      !(options.gain_db >= 0 && options.gain_db <= B0429_MAX_GAIN_DB) || !(options.max_gain >= 1) ||
-      !(options.brightness_target > 0 && options.brightness_target < 255) ||
-      options.imu_rate < 4 || options.imu_rate > 1000 || options.downscale < 1 ||
-      !(options.metering_circle.empty() || options.metering_circle.size() == 3)) {
+PiCameraImuDevice::PiCameraImuDevice(const PiCameraImuOptions& requested)
+    : options(requested), imu_clock(1e9 / requested.imu_rate) {
+  if (options.model == "arducam_b0429_pi") options.model = "b0429_pi";
+  if (options.model != "kurokesu_ar0234_pi" && options.model != "b0429_pi" &&
+      options.model != "b0429")
+    throw std::invalid_argument(
+        "model must be kurokesu_ar0234_pi, b0429_pi, or b0429: " +
+        options.model);
+  if (options.imu_type != "imu_mavlink" && options.imu_type != "mpu_i2c")
+    throw std::invalid_argument("imu type must be imu_mavlink or mpu_i2c: " +
+                                options.imu_type);
+  if (options.mavlink()) {
+    if (options.imu_freq_hz < 0)
+      throw std::invalid_argument(
+          "freq_hz must be >= 0 (0 keeps the FC rate), got " +
+          std::to_string(options.imu_freq_hz));
+    if (options.imu_udp.empty() && options.imu_port.empty())
+      options.imu_udp = "127.0.0.1:14601";
+    if (!options.imu_udp.empty() && !options.imu_port.empty())
+      throw std::invalid_argument(
+          "set exactly one of 'port' (serial device) or 'udp' (<bind "
+          "address>:<port>)");
+  }
+  if (options.sensor.empty())
+    options.sensor = options.kurokesu() ? "ar0234" : "arducam-pivariety";
+  options.width = options.sensorWidth();
+  options.height = options.sensorHeight();
+  if (options.width % 4 != 0 || options.height % 2 != 0 || !(options.fps > 0) ||
+      options.downscale < 1 || options.imu_rate < 4 ||
+      options.imu_rate > 1000) {
     throw std::invalid_argument("Invalid camera or IMU option");
+  }
+  if (options.xeyeProcessing()) {
+    // ValidateProperty and CheckProcessingProperty of the xeye node.
+    if (options.gain < 0) options.gain = options.kurokesu() ? 14 : 100;
+    if (options.pixel_format != "gray8")
+      throw std::invalid_argument(
+          "pixel_format must be gray8: the VIO takes gray images, got " +
+          options.pixel_format);
+    if (options.num_v4l_buffer < 2)
+      throw std::invalid_argument("num_v4l_buffer must be 2 or more");
+    const XeyeSensorProfile& profile =
+        options.kurokesu() ? KUROKESU_AR0234_PROFILE : AR0234_PROFILE;
+    if (std::find(profile.resolutions.begin(), profile.resolutions.end(),
+                  std::make_pair(options.width, options.height)) ==
+        profile.resolutions.end()) {
+      std::string available;
+      for (const auto& r : profile.resolutions)
+        available +=
+            std::to_string(r.first) + "x" + std::to_string(r.second) + ", ";
+      throw std::invalid_argument(
+          "Invalid resolution: " + std::to_string(options.width) + "x" +
+          std::to_string(options.height) + ". Available resolutions: [" +
+          available + "]");
+    }
+    const int exposure_us = static_cast<int>(options.exposure_time_ms * 1000);
+    if (exposure_us < profile.min_exposure_us ||
+        exposure_us > profile.max_exposure_us) {
+      std::cerr << "Camera: Exposure time out of range: " << exposure_us
+                << " us. Fallback to 1000 us" << std::endl;
+      options.exposure_time_ms = 1.0;
+    }
+    if (options.gain < profile.min_gain || options.gain > profile.max_gain) {
+      std::cerr << "Camera: Gain out of range: " << options.gain
+                << ". Fallback to 100" << std::endl;
+      options.gain = 100;
+    }
+    const auto floor2 = [](int v) { return v - v % 2; };
+    crop_w = options.width;
+    crop_h = options.height;
+    if (!options.crop.empty()) {
+      if (options.crop.size() != 4)
+        throw std::invalid_argument("crop must be [x, y, w, h]");
+      // Even values keep the Bayer phase.
+      crop_x = floor2(options.crop[0]);
+      crop_y = floor2(options.crop[1]);
+      crop_w = floor2(options.crop[2]);
+      crop_h = floor2(options.crop[3]);
+      if (crop_x < 0 || crop_y < 0 || crop_w < 2 || crop_h < 2 ||
+          crop_x + crop_w > options.width || crop_y + crop_h > options.height) {
+        throw std::invalid_argument("crop [" + std::to_string(options.crop[0]) +
+                                    ", " + std::to_string(options.crop[1]) +
+                                    ", " + std::to_string(options.crop[2]) +
+                                    ", " + std::to_string(options.crop[3]) +
+                                    "] is outside the " +
+                                    std::to_string(options.width) + "x" +
+                                    std::to_string(options.height) + " frame");
+      }
+    }
+    if (!options.auto_white_balance) options.fused_wb = false;
+    if (options.black_level < 0 || options.black_level > 255)
+      throw std::invalid_argument("black_level must be in [0, 255]: " +
+                                  std::to_string(options.black_level));
+    if (options.enable_gamma &&
+        (options.gamma_value < 0.25 || options.gamma_value > 1.0))
+      throw std::invalid_argument("gamma_value must be in [0.25, 1]: " +
+                                  std::to_string(options.gamma_value));
+    const auto& ae = options.auto_exposure;
+    const auto& exposure = ae.exposure_range_ms;
+    if (exposure.size() != 2 ||
+        !(exposure[0] > 0.0 && exposure[0] <= exposure[1]))
+      throw std::invalid_argument(
+          "auto_exposure_range must be [min, max] in ms, 0 < min <= max");
+    if (!ae.gain_range_db.empty() &&
+        (ae.gain_range_db.size() != 2 ||
+         !(ae.gain_range_db[0] <= ae.gain_range_db[1])))
+      throw std::invalid_argument("auto_gain_range must be [min, max] in dB");
+    if (ae.prior != "exposure" && ae.prior != "gain")
+      throw std::invalid_argument("auto_exp_prior must be exposure or gain: " +
+                                  ae.prior);
+    if (!(ae.target_gray_value >= 1.0 && ae.target_gray_value <= 99.0))
+      throw std::invalid_argument("target_gray_value must be in [1, 99] (%)");
+    if (!(std::abs(ae.ev_compensation) <= 3.0))
+      throw std::invalid_argument(
+          "auto_exposure_ev_compensation must be in [-3, 3]");
+    if (!(ae.damping >= 0.0 && ae.damping < 1.0))
+      throw std::invalid_argument("auto_exposure_damping must be in [0, 1)");
+    if (ae.metering != "average" && ae.metering != "spot" &&
+        ae.metering != "partial")
+      throw std::invalid_argument(
+          "auto_exposure_metering must be average, spot, or partial: " +
+          ae.metering);
+    if (!ae.roi.empty() && ae.roi.size() != 4)
+      throw std::invalid_argument("auto_exposure_roi must be [x, y, w, h]");
+    if (ae.roi.size() == 4 &&
+        (ae.roi[0] < 0 || ae.roi[1] < 0 || ae.roi[2] < 2 || ae.roi[3] < 2 ||
+         ae.roi[0] + ae.roi[2] > crop_w || ae.roi[1] + ae.roi[3] > crop_h)) {
+      throw std::invalid_argument(
+          "auto_exposure_roi must have x, y >= 0, w, h >= 2, and be in the " +
+          std::to_string(crop_w) + "x" + std::to_string(crop_h) + " crop");
+    }
+    if (!ae.circle.empty() && (ae.circle.size() != 3 || ae.circle[2] <= 0))
+      throw std::invalid_argument(
+          "auto_exposure_circle must be [cx, cy, r] with r > 0");
+    // grbgToGray needs whole blocks: N x N for an even N, 2N x 2N for an odd N
+    // > 1.
+    const int unit = options.downscale == 1       ? 1
+                     : options.downscale % 2 == 0 ? options.downscale
+                                                  : 2 * options.downscale;
+    if (crop_w % unit != 0 || crop_h % unit != 0)
+      throw std::invalid_argument(
+          "The crop is not a multiple of the downscale block " +
+          std::to_string(unit));
+    return;
+  }
+  if (options.exposure_ms < 0 || !(options.max_exposure_ms > 0) ||
+      !(options.gain_db >= 0 && options.gain_db <= B0429_MAX_GAIN_DB) ||
+      !(options.max_gain >= 1) ||
+      !(options.brightness_target > 0 && options.brightness_target < 255) ||
+      !(options.metering_circle.empty() ||
+        options.metering_circle.size() == 3)) {
+    throw std::invalid_argument("Invalid b0429 camera option");
   }
   // grbgToGray needs whole blocks: N x N for an even N, 2N x 2N for an odd N > 1.
   const int unit = options.downscale == 1 ? 1
@@ -248,9 +472,34 @@ PiCameraImuDevice::~PiCameraImuDevice() {
   }
 }
 
-int PiCameraImuDevice::outputWidth() const { return options.width / options.downscale; }
+int PiCameraImuDevice::outputWidth() const {
+  return (options.xeyeProcessing() ? crop_w : options.width) /
+         options.downscale;
+}
 
-int PiCameraImuDevice::outputHeight() const { return options.height / options.downscale; }
+int PiCameraImuDevice::outputHeight() const {
+  return (options.xeyeProcessing() ? crop_h : options.height) /
+         options.downscale;
+}
+
+double PiCameraImuDevice::linearGain(int value) const {
+  if (options.kurokesu()) return kurokesuLinearGain(value);
+  return 1.0 + (value - B0429_MIN_DRIVER_GAIN) / B0429_PI_GAIN_PER_X;
+}
+
+int PiCameraImuDevice::gainValue(double linear_gain) const {
+  if (options.kurokesu()) return kurokesuGainValue(linear_gain);
+  return std::clamp(
+      static_cast<int>(std::lround(B0429_MIN_DRIVER_GAIN +
+                                   B0429_PI_GAIN_PER_X * (linear_gain - 1.0))),
+      B0429_MIN_DRIVER_GAIN, B0429_MAX_DRIVER_GAIN);
+}
+
+double PiCameraImuDevice::gainDb() const {
+  if (options.xeyeProcessing())
+    return 20 * std::log10(linearGain(analogue_gain.load()));
+  return b0429DbFromDriverGain(analogue_gain.load());
+}
 
 std::string PiCameraImuDevice::errorMessage() const {
   std::lock_guard<std::mutex> lock(error_mutex);
@@ -272,6 +521,10 @@ void PiCameraImuDevice::setSensorControl(uint32_t id, int value) {
 }
 
 void PiCameraImuDevice::setupCamera() {
+  if (options.xeyeProcessing()) {
+    setupXeyeCamera();
+    return;
+  }
   MediaGraph graph(options.sensor);
   const MediaEntity& sensor = *graph.findPrefix(options.sensor);
   receiver_driver = graph.driver();
@@ -394,6 +647,10 @@ void PiCameraImuDevice::readImu(uint8_t reg, uint8_t* data, size_t size) {
 }
 
 void PiCameraImuDevice::setupImu() {
+  if (options.mavlink()) {
+    setupMavlink();
+    return;
+  }
   i2c_fd = open(options.i2c_device.c_str(), O_RDWR | O_CLOEXEC);
   if (i2c_fd < 0) throw systemError("Cannot open " + options.i2c_device);
   uint8_t id = 0;
@@ -429,11 +686,17 @@ void PiCameraImuDevice::start() {
   running = true;
   camera_thread = std::thread([this] {
     pthread_setname_np(pthread_self(), "pi_camera");
-    cameraLoop();
+    if (options.xeyeProcessing())
+      xeyeCameraLoop();
+    else
+      cameraLoop();
   });
   imu_thread = std::thread([this] {
     pthread_setname_np(pthread_self(), "pi_imu");
-    imuLoop();
+    if (options.mavlink())
+      mavlinkLoop();
+    else
+      imuLoop();
   });
 }
 
@@ -661,6 +924,647 @@ void PiCameraImuDevice::imuLoop() {
   }
 }
 
+void PiCameraImuDevice::setXeyeExposure(double exposure_ms) {
+  // The exposure control takes sensor lines. An exposure longer than the
+  // frame period makes the frame period longer.
+  const auto range = queryControl(sensor_fd, V4L2_CID_EXPOSURE);
+  const int lines =
+      std::clamp(static_cast<int>(std::lround(exposure_ms * 1e6 / line_ns)),
+                 range.minimum, range.maximum);
+  setSensorControl(V4L2_CID_EXPOSURE, lines);
+  exposure_time_ms = exposure_ms;
+  exposure_lines = lines;
+}
+
+void PiCameraImuDevice::setXeyeGain(int value) {
+  const auto range = queryControl(sensor_fd, V4L2_CID_ANALOGUE_GAIN);
+  value = std::clamp(value, range.minimum, range.maximum);
+  setSensorControl(V4L2_CID_ANALOGUE_GAIN, value);
+  analogue_gain = value;
+}
+
+// The media graph, the controls, and the buffers of the xeye node
+// (ArducamB0429Pi::Initialize and OnPreCaptureStart).
+void PiCameraImuDevice::setupXeyeCamera() {
+  MediaGraph graph(options.sensor, options.port);
+  receiver_driver = graph.driver();
+  if (receiver_driver != RP1_CFE)
+    throw std::runtime_error(options.model +
+                             " needs the rp1-cfe of a Raspberry Pi 5");
+  const MediaEntity& sensor = *graph.findPrefix(options.sensor);
+  const MediaEntity& csi2 = graph.get("csi2");
+  const MediaEntity& video = options.port.empty()
+                                 ? graph.get("rp1-cfe-csi2_ch0")
+                                 : *graph.findNode(options.port);
+  video_fd = open(video.node.c_str(), O_RDWR | O_NONBLOCK | O_CLOEXEC);
+  if (video_fd < 0) throw systemError("Cannot open " + video.node);
+  const int width = options.width;
+  const int height = options.height;
+  const uint16_t csi2_source = graph.enableLink(csi2, video);
+  setSubdevFormat(sensor.node, 0, width, height);
+  setSubdevFormat(csi2.node, 0, width, height);
+  // The 16-bit source code makes csi2 unpack RAW10 to 16-bit words with the
+  // value in the upper 10 bits. With the 10-bit code, STREAMON of GR16 fails.
+  setSubdevFormat(csi2.node, csi2_source, width, height,
+                  MEDIA_BUS_FMT_SGRBG16_1X16);
+  // STREAMON fails with EPIPE when another enabled source pad of the sensor,
+  // for example the embedded data pad, has a format other than its csi2 sink
+  // pad.
+  for (const auto& link : graph.links(sensor)) {
+    if (link.source.entity != sensor.id || link.source.index == 0 ||
+        link.sink.entity != csi2.id || !(link.flags & MEDIA_LNK_FL_ENABLED))
+      continue;
+    const v4l2_mbus_framefmt source =
+        getSubdevFormat(sensor.node, link.source.index);
+    setSubdevFormat(csi2.node, link.sink.index, source.width, source.height,
+                    source.code);
+  }
+
+  v4l2_format format{};
+  format.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  format.fmt.pix.width = width;
+  format.fmt.pix.height = height;
+  format.fmt.pix.pixelformat = V4L2_PIX_FMT_SGRBG16;
+  format.fmt.pix.field = V4L2_FIELD_NONE;
+  if (xioctl(video_fd, VIDIOC_S_FMT, &format) < 0)
+    throw systemError("VIDIOC_S_FMT");
+  if (format.fmt.pix.pixelformat != V4L2_PIX_FMT_SGRBG16 ||
+      format.fmt.pix.bytesperline != width * 2u)
+    throw std::runtime_error(
+        "rp1-cfe does not give GR16 at the sensor mode without row padding");
+  bytes_per_line = format.fmt.pix.bytesperline;
+
+  sensor_fd = open(sensor.node.c_str(), O_RDWR | O_CLOEXEC);
+  if (sensor_fd < 0) throw systemError("Cannot open " + sensor.node);
+  if (options.kurokesu()) {
+    line_ns = KUROKESU_LINE_TIME_NS;
+  } else {
+    const int hblank = getControl(sensor_fd, V4L2_CID_HBLANK);
+    line_ns = (width + hblank) * 1e9 /
+              static_cast<double>(getControl64(sensor_fd, V4L2_CID_PIXEL_RATE));
+  }
+  // The frame period is (height + vertical blanking) lines.
+  const auto vblank_range = queryControl(sensor_fd, V4L2_CID_VBLANK);
+  const int vblank = std::clamp(
+      static_cast<int>(std::lround(1e9 / options.fps / line_ns)) - height,
+      vblank_range.minimum, vblank_range.maximum);
+  setSensorControl(V4L2_CID_VBLANK, vblank);
+  frame_rate = 1e9 / ((height + vblank) * line_ns);
+  // An exposure longer than the frame period lowers the frame rate.
+  const double limit_ms = std::max(
+      1000.0 / options.fps - EXPOSURE_MARGIN_NS * 1e-6, MIN_EXPOSURE_MS);
+  frame_exposure_lines = static_cast<int>(limit_ms * 1e6 / line_ns);
+
+  auto& ae = options.auto_exposure;
+  const auto gain_range = queryControl(sensor_fd, V4L2_CID_ANALOGUE_GAIN);
+  const double min_gain_db = 20 * std::log10(linearGain(gain_range.minimum));
+  const double max_gain_db = 20 * std::log10(linearGain(gain_range.maximum));
+  if (ae.gain_range_db.empty()) ae.gain_range_db = {min_gain_db, max_gain_db};
+  if (ae.gain_range_db[0] < min_gain_db - 0.01 ||
+      ae.gain_range_db[1] > max_gain_db + 0.01)
+    throw std::invalid_argument("auto_gain_range must be [min, max] in [" +
+                                std::to_string(min_gain_db) + ", " +
+                                std::to_string(max_gain_db) + "] dB");
+  if (ae.auto_exposure) {
+    auto& range = ae.exposure_range_ms;
+    if (range[0] > limit_ms)
+      throw std::invalid_argument(
+          "auto_exposure_range is [" + std::to_string(range[0]) + ", " +
+          std::to_string(range[1]) + "] ms, but the max exposure at " +
+          std::to_string(options.fps) + " fps is " + std::to_string(limit_ms) +
+          " ms");
+    if (range[1] > limit_ms) {
+      std::cerr << "Camera: the max of auto_exposure_range changes from "
+                << range[1] << " to " << limit_ms
+                << " ms. A longer exposure lowers the frame rate." << std::endl;
+      range[1] = limit_ms;
+    }
+  }
+  setXeyeExposure(options.exposure_time_ms);
+  setXeyeGain(options.gain);
+  // The driver locks the flip controls during streaming.
+  setSensorControl(V4L2_CID_HFLIP, options.h_flip ? 1 : 0);
+  setSensorControl(V4L2_CID_VFLIP, options.v_flip ? 1 : 0);
+
+  gamma_curve = options.enable_gamma ? buildGammaCurve(options.gamma_value)
+                                     : std::vector<uint8_t>{};
+  gamma_linear10 = buildGammaLinear10(options.gamma_value, options.black_level);
+  bayer8.assign(static_cast<size_t>(crop_w) * crop_h, 0);
+  wb_gains.reset();
+  ae_wait_frames = 0;
+
+  // The CPU reads the MMAP buffers of the rp1-cfe without cache, at about
+  // 1.2 GB/s. It reads buffers from the dma-heap through its cache, at about
+  // 5 GB/s.
+  const size_t size = format.fmt.pix.sizeimage;
+  buffer_memory = V4L2_MEMORY_DMABUF;
+  try {
+    const int heap_fd = open(DMA_HEAP, O_RDWR | O_CLOEXEC);
+    if (heap_fd < 0) throw systemError(std::string("Cannot open ") + DMA_HEAP);
+    v4l2_requestbuffers request{};
+    request.count = options.num_v4l_buffer;
+    request.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    request.memory = V4L2_MEMORY_DMABUF;
+    if (xioctl(video_fd, VIDIOC_REQBUFS, &request) < 0) {
+      close(heap_fd);
+      throw systemError("VIDIOC_REQBUFS (DMABUF)");
+    }
+    for (uint32_t index = 0; index < request.count; ++index) {
+      dma_heap_allocation_data allocation{};
+      allocation.len = size;
+      allocation.fd_flags = O_RDWR | O_CLOEXEC;
+      if (xioctl(heap_fd, DMA_HEAP_IOCTL_ALLOC, &allocation) < 0) {
+        close(heap_fd);
+        throw systemError("DMA_HEAP_IOCTL_ALLOC");
+      }
+      dma_buffer_fds.push_back(static_cast<int>(allocation.fd));
+      void* memory = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED,
+                          static_cast<int>(allocation.fd), 0);
+      if (memory == MAP_FAILED) {
+        close(heap_fd);
+        throw systemError("mmap of a DMABUF");
+      }
+      buffers.emplace_back(memory, size);
+      v4l2_buffer buffer{};
+      buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+      buffer.memory = V4L2_MEMORY_DMABUF;
+      buffer.index = index;
+      buffer.m.fd = static_cast<int>(allocation.fd);
+      buffer.length = size;
+      if (xioctl(video_fd, VIDIOC_QBUF, &buffer) < 0) {
+        close(heap_fd);
+        throw systemError("VIDIOC_QBUF (DMABUF)");
+      }
+    }
+    close(heap_fd);
+  } catch (const std::exception& error) {
+    std::cerr << "Camera: " << error.what()
+              << ". The camera uses the uncached MMAP buffers." << std::endl;
+    v4l2_requestbuffers release{};
+    release.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    release.memory = V4L2_MEMORY_DMABUF;
+    xioctl(video_fd, VIDIOC_REQBUFS, &release);
+    for (const auto& buffer : buffers) munmap(buffer.first, buffer.second);
+    buffers.clear();
+    for (const int fd : dma_buffer_fds) close(fd);
+    dma_buffer_fds.clear();
+    buffer_memory = V4L2_MEMORY_MMAP;
+    v4l2_requestbuffers request{};
+    request.count = options.num_v4l_buffer;
+    request.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    request.memory = V4L2_MEMORY_MMAP;
+    if (xioctl(video_fd, VIDIOC_REQBUFS, &request) < 0)
+      throw systemError("VIDIOC_REQBUFS");
+    for (uint32_t index = 0; index < request.count; ++index) {
+      v4l2_buffer buffer{};
+      buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+      buffer.memory = V4L2_MEMORY_MMAP;
+      buffer.index = index;
+      if (xioctl(video_fd, VIDIOC_QUERYBUF, &buffer) < 0)
+        throw systemError("VIDIOC_QUERYBUF");
+      void* memory = mmap(nullptr, buffer.length, PROT_READ | PROT_WRITE,
+                          MAP_SHARED, video_fd, buffer.m.offset);
+      if (memory == MAP_FAILED) throw systemError("mmap");
+      buffers.emplace_back(memory, buffer.length);
+      if (xioctl(video_fd, VIDIOC_QBUF, &buffer) < 0)
+        throw systemError("VIDIOC_QBUF");
+    }
+  }
+
+  v4l2_buf_type type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+  if (xioctl(video_fd, VIDIOC_STREAMON, &type) < 0)
+    throw systemError("VIDIOC_STREAMON");
+  pollfd descriptor{video_fd, POLLIN, 0};
+  int ready = 0;
+  do ready = poll(&descriptor, 1, FIRST_FRAME_TIMEOUT_MS);
+  while (ready < 0 && errno == EINTR);
+  if (ready <= 0)
+    throw std::runtime_error(
+        "No frame for " + std::to_string(FIRST_FRAME_TIMEOUT_MS) +
+        " ms after stream on. Check the cable of the camera.");
+}
+
+// FillFrame of the xeye node: drops an invalid frame, and makes the gray
+// image of the crop from the 10-bit Bayer buffer.
+bool PiCameraImuDevice::processXeyeFrame(const v4l2_buffer& buffer,
+                                         cv::Mat* gray) {
+  const size_t frame_bytes =
+      static_cast<size_t>(options.width) * options.height * 2;
+  const int64_t buffer_ns = int64_t(buffer.timestamp.tv_sec) * 1'000'000'000 +
+                            buffer.timestamp.tv_usec * 1000;
+  if ((buffer.flags & V4L2_BUF_FLAG_ERROR) || buffer.bytesused < frame_bytes ||
+      buffer_ns <= 0)
+    return false;
+  const auto sync = [&](uint64_t flags) {
+    if (buffer_memory != V4L2_MEMORY_DMABUF) return;
+    // The device wrote the buffer, so the CPU cache can hold old data of it.
+    // DMA_BUF_SYNC_START before the reads drops that data.
+    dma_buf_sync request{};
+    request.flags = flags | DMA_BUF_SYNC_READ;
+    if (xioctl(dma_buffer_fds.at(buffer.index), DMA_BUF_IOCTL_SYNC, &request) <
+        0)
+      throw systemError("DMA_BUF_IOCTL_SYNC");
+  };
+  sync(DMA_BUF_SYNC_START);
+  const auto* src =
+      static_cast<const uint16_t*>(buffers.at(buffer.index).first) +
+      static_cast<size_t>(crop_y) * options.width + crop_x;
+  if (!options.auto_white_balance && !options.enable_gamma) {
+    copyBayer10LShift8(src, options.width, crop_w, crop_h, bayer8.data());
+  } else {
+    // Without fused_wb, or at the first frame, the gains come from the
+    // statistics of the same frame.
+    std::optional<std::array<double, 2>> gains =
+        options.fused_wb ? wb_gains : std::nullopt;
+    if (options.auto_white_balance && !gains) {
+      gains = gainsFromWbStats(
+          accumulateBayer10LStats(src, options.width, crop_w, crop_h,
+                                  GRBG_NON_GREEN_COL, options.black_level));
+    }
+    Bayer8Lut lut;
+    buildBayer8Lut(gamma_curve, gains.value_or(std::array<double, 2>{1.0, 1.0}),
+                   options.black_level, &lut);
+    WbStats stats{0, 0, 0};
+    const bool fused = options.auto_white_balance && options.fused_wb;
+    copyBayer10LTo8(src, options.width, crop_w, crop_h, GRBG_NON_GREEN_COL, lut,
+                    options.black_level, fused ? &stats : nullptr,
+                    bayer8.data());
+    if (fused) {
+      // Keep the previous gains when the frame has no usable estimate.
+      const auto new_gains = gainsFromWbStats(stats);
+      if (new_gains) wb_gains = new_gains;
+    }
+  }
+  sync(DMA_BUF_SYNC_END);
+  if (options.downscale == 1) {
+    *gray = cv::Mat(crop_h, crop_w, CV_8UC1);
+    bayer8ToGray8(bayer8.data(), crop_w, crop_h, GRBG_NON_GREEN_COL,
+                  gray->data);
+  } else {
+    *gray = grbgToGray(cv::Mat(crop_h, crop_w, CV_8UC1, bayer8.data()),
+                       options.downscale);
+  }
+  return true;
+}
+
+// The automatic exposure of the xeye node, on the output image.
+void PiCameraImuDevice::runXeyeAutoExposure(const cv::Mat& gray) {
+  const auto& ae = options.auto_exposure;
+  const PixelRegion region = autoExposureRegion(ae, gray.cols, gray.rows);
+  const auto* pixels = gray.ptr<uint8_t>(0);
+  const double percent =
+      options.enable_gamma
+          ? meanPercent(pixels, gray.cols, region, ae.circle, BAYER10_MAX,
+                        [&](uint8_t v) { return gamma_linear10[v]; })
+          : meanPercent(pixels, gray.cols, region, ae.circle, 255.0,
+                        [](uint8_t v) { return v; });
+  mean_brightness = percent * 2.55;
+  if (ae_wait_frames > 0) {
+    --ae_wait_frames;
+    return;
+  }
+  if (!ae.auto_exposure && !ae.auto_gain) return;
+  const double gain = linearGain(analogue_gain.load());
+  const auto next = nextXeyeExposure(ae, percent, exposure_time_ms, gain);
+  if (!next) return;
+  const int new_gain = gainValue(next->second);
+  const bool set_exposure =
+      std::abs(next->first - exposure_time_ms) > 1e-3 * exposure_time_ms;
+  const bool set_gain = new_gain != analogue_gain.load();
+  if (!set_exposure && !set_gain) return;
+  if (set_exposure) setXeyeExposure(next->first);
+  if (set_gain) setXeyeGain(new_gain);
+  ae_wait_frames = AE_SETTLE_FRAMES;
+}
+
+void PiCameraImuDevice::xeyeCameraLoop() {
+  try {
+    bool have_sequence = false;
+    uint32_t last_sequence = 0;
+    while (running) {
+      pollfd descriptor{video_fd, POLLIN, 0};
+      const int ready = poll(&descriptor, 1, 200);
+      if (ready < 0 && errno == EINTR) continue;
+      if (ready < 0) throw systemError("poll camera");
+      if (ready == 0) continue;
+      v4l2_buffer buffer{};
+      buffer.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+      buffer.memory = buffer_memory;
+      if (xioctl(video_fd, VIDIOC_DQBUF, &buffer) < 0) {
+        if (errno == EAGAIN) continue;
+        throw systemError("VIDIOC_DQBUF");
+      }
+      // The image time is the V4L2 buffer time, as in the xeye node.
+      const int64_t buffer_ns =
+          int64_t(buffer.timestamp.tv_sec) * 1'000'000'000 +
+          buffer.timestamp.tv_usec * 1000;
+      cv::Mat gray;
+      const bool valid = processXeyeFrame(buffer, &gray);
+      const uint32_t sequence = buffer.sequence;
+      if (xioctl(video_fd, VIDIOC_QBUF, &buffer) < 0)
+        throw systemError("VIDIOC_QBUF");
+      if (have_sequence && sequence > last_sequence + 1)
+        sensor_frame_drops += sequence - last_sequence - 1;
+      have_sequence = true;
+      last_sequence = sequence;
+      if (!valid) continue;
+
+      const int64_t t_ns = buffer_ns + options.camera_time_offset_ns;
+      ++image_frames;
+      last_image_t_ns = t_ns;
+      if (capturing && image_data_queue) {
+        auto data = std::make_shared<OpticalFlowInput>();
+        data->t_ns = t_ns;
+        data->img_data.resize(1);
+        data->img_data[0].img = copyGrayImage(gray);
+        data->img_data[0].exposure = exposure_time_ms * 1e-3;
+        // A full queue drops its oldest image: the newest image has the
+        // newest information.
+        while (!image_data_queue->try_push(data)) {
+          OpticalFlowInput::Ptr old;
+          if (image_data_queue->try_pop(old)) ++dropped_frames;
+        }
+        if (queued_frames++ == 0) first_capture_t_ns = t_ns;
+        if (record_image_queue && !record_image_queue->try_push(data))
+          ++record_dropped_frames;
+        const int64_t delay_ns = monotonicNs() - buffer_ns;
+        image_delay_sum_ns += delay_ns;
+        if (delay_ns > image_delay_max_ns) image_delay_max_ns = delay_ns;
+      }
+      runXeyeAutoExposure(gray);
+    }
+  } catch (const std::exception& error) {
+    fail(std::string("Camera: ") + error.what());
+  }
+}
+
+void PiCameraImuDevice::setupMavlink() {
+  if (!options.imu_port.empty()) {
+    // A serial port, 8N1 without flow control, as the xeye SerialLink.
+    speed_t speed;
+    switch (options.imu_baudrate) {
+      case 57600:
+        speed = B57600;
+        break;
+      case 115200:
+        speed = B115200;
+        break;
+      case 230400:
+        speed = B230400;
+        break;
+      case 460800:
+        speed = B460800;
+        break;
+      case 500000:
+        speed = B500000;
+        break;
+      case 921600:
+        speed = B921600;
+        break;
+      case 1000000:
+        speed = B1000000;
+        break;
+      case 1500000:
+        speed = B1500000;
+        break;
+      default:
+        throw std::invalid_argument("unsupported baudrate " +
+                                    std::to_string(options.imu_baudrate));
+    }
+    mavlink_fd = open(options.imu_port.c_str(), O_RDWR | O_NOCTTY | O_CLOEXEC);
+    if (mavlink_fd < 0) throw systemError("Cannot open " + options.imu_port);
+    termios tty{};
+    if (tcgetattr(mavlink_fd, &tty) != 0)
+      throw systemError("tcgetattr " + options.imu_port);
+    cfmakeraw(&tty);
+    tty.c_cflag |= CLOCAL | CREAD;
+    tty.c_cflag &= ~(CSTOPB | CRTSCTS);
+    cfsetispeed(&tty, speed);
+    cfsetospeed(&tty, speed);
+    if (tcsetattr(mavlink_fd, TCSANOW, &tty) != 0)
+      throw systemError("tcsetattr " + options.imu_port);
+    tcflush(mavlink_fd, TCIFLUSH);
+    mavlink_udp = false;
+    return;
+  }
+  const std::string& address = options.imu_udp;
+  const size_t colon = address.rfind(':');
+  if (colon == std::string::npos)
+    throw std::invalid_argument("udp must be <address>:<port>, got '" +
+                                address + "'");
+  const std::string port_text = address.substr(colon + 1);
+  if (port_text.empty() || port_text.size() > 5 ||
+      !std::all_of(port_text.begin(), port_text.end(),
+                   [](char c) { return c >= '0' && c <= '9'; }) ||
+      std::stoi(port_text) < 1 || std::stoi(port_text) > 65535)
+    throw std::invalid_argument("invalid udp port in '" + address + "'");
+  sockaddr_in socket_address{};
+  socket_address.sin_family = AF_INET;
+  socket_address.sin_port = htons(static_cast<uint16_t>(std::stoi(port_text)));
+  if (inet_pton(AF_INET, address.substr(0, colon).c_str(),
+                &socket_address.sin_addr) != 1)
+    throw std::invalid_argument("invalid udp address '" + address + "'");
+  mavlink_fd = socket(AF_INET, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+  if (mavlink_fd < 0) throw systemError("socket");
+  if (bind(mavlink_fd, reinterpret_cast<const sockaddr*>(&socket_address),
+           sizeof(socket_address)) != 0)
+    throw systemError("bind " + address);
+  mavlink_udp = true;
+}
+
+// The read loop of the xeye imu_mavlink node. The host time is CLOCK_MONOTONIC.
+void PiCameraImuDevice::mavlinkLoop() {
+  try {
+    mavlink_message_t parse_buffer{};
+    mavlink_status_t parse_status{};
+    FcClockMapper clock_mapper;
+    // System and component id of the autopilot, from its first HEARTBEAT.
+    std::optional<std::pair<uint8_t, uint8_t>> fc_address;
+    std::optional<sockaddr_in> peer;
+    const int rate = options.imu_freq_hz;
+    bool interval_settled = rate == 0;
+    // Whether the current request went out: an ACK before that answers
+    // another client on the link.
+    bool interval_requested = false;
+    int64_t last_request_ns = 0;
+    int64_t last_imu_rx_ns = monotonicNs();
+    int64_t last_fc_ns = -1;
+    std::vector<uint8_t> datagram(65536);
+
+    const auto from_fc = [&](const mavlink_message_t& message) {
+      return fc_address && message.sysid == fc_address->first &&
+             message.compid == fc_address->second;
+    };
+    const auto request_again = [&] {
+      interval_settled = rate == 0;
+      interval_requested = false;
+      last_request_ns = 0;
+    };
+    const auto send = [&](const mavlink_message_t& message) {
+      uint8_t bytes[MAVLINK_MAX_PACKET_LEN];
+      const uint16_t size = mavlink_msg_to_send_buffer(bytes, &message);
+      // A lost request is sent again until the FC answers.
+      if (!mavlink_udp) {
+        if (write(mavlink_fd, bytes, size) < 0)
+          std::cerr << "IMU: write failed" << std::endl;
+        return;
+      }
+      // UDP: nothing received yet, so no one to answer.
+      if (!peer) return;
+      sendto(mavlink_fd, bytes, size, 0,
+             reinterpret_cast<const sockaddr*>(&*peer), sizeof(*peer));
+    };
+    const auto handle = [&](const mavlink_message_t& message, int64_t rx_ns) {
+      switch (message.msgid) {
+        case MAVLINK_MSG_ID_HEARTBEAT: {
+          if (fc_address || message.compid != MAV_COMP_ID_AUTOPILOT1) return;
+          mavlink_heartbeat_t heartbeat;
+          mavlink_msg_heartbeat_decode(&message, &heartbeat);
+          if (heartbeat.autopilot == MAV_AUTOPILOT_INVALID ||
+              heartbeat.type == MAV_TYPE_GCS)
+            return;
+          fc_address.emplace(message.sysid, message.compid);
+          std::cout << "IMU: autopilot " << int(heartbeat.autopilot)
+                    << " found (sysid " << int(message.sysid) << ", compid "
+                    << int(message.compid) << ")" << std::endl;
+          return;
+        }
+        case MAVLINK_MSG_ID_COMMAND_ACK: {
+          if (!from_fc(message) || interval_settled || !interval_requested)
+            return;
+          mavlink_command_ack_t ack;
+          mavlink_msg_command_ack_decode(&message, &ack);
+          // Another client on the link sends the same command; a zero target
+          // is unaddressed.
+          if (ack.command != MAV_CMD_SET_MESSAGE_INTERVAL ||
+              (ack.target_system != 0 &&
+               ack.target_system != MAVLINK_SYSTEM_ID) ||
+              (ack.target_component != 0 &&
+               ack.target_component != MAVLINK_COMPONENT_ID))
+            return;
+          if (ack.result == MAV_RESULT_ACCEPTED) {
+            std::cout << "IMU: FC streams HIGHRES_IMU at " << rate << " Hz"
+                      << std::endl;
+            interval_settled = true;
+          } else if (ack.result != MAV_RESULT_TEMPORARILY_REJECTED &&
+                     ack.result != MAV_RESULT_IN_PROGRESS) {
+            // Retrying cannot change a denied or unsupported request.
+            std::cerr << "IMU: FC rejected the HIGHRES_IMU rate (MAV_RESULT "
+                      << int(ack.result) << "); using the FC stream rate"
+                      << std::endl;
+            interval_settled = true;
+          }
+          return;
+        }
+        case MAVLINK_MSG_ID_HIGHRES_IMU: {
+          if (!from_fc(message)) return;
+          mavlink_highres_imu_t imu;
+          mavlink_msg_highres_imu_decode(&message, &imu);
+          const int64_t fc_ns = static_cast<int64_t>(imu.time_usec) * 1000;
+          if (clock_mapper.isFcReboot(fc_ns)) {
+            std::cerr << "IMU: FC sample time went back; assuming an FC reboot"
+                      << std::endl;
+            clock_mapper.reset();
+            // A rebooted FC is back to its configured stream rates.
+            request_again();
+            last_fc_ns = -1;
+          }
+          last_imu_rx_ns = rx_ns;
+          if (last_fc_ns >= 0 && fc_ns > last_fc_ns) {
+            const double interval = static_cast<double>(fc_ns - last_fc_ns);
+            imu_period_ns = imu_period_ns == 0
+                                ? interval
+                                : 0.99 * imu_period_ns + 0.01 * interval;
+          }
+          last_fc_ns = std::max(last_fc_ns, fc_ns);
+          const std::optional<int64_t> host_ns =
+              clock_mapper.toHostNs(fc_ns, rx_ns);
+          if (!host_ns) return;
+          ++imu_samples;
+          if (!capturing || !imu_data_queue) return;
+          // HIGHRES_IMU of PX4: the FC body frame (FRD after SENS_BOARD_ROT),
+          // with the EKF2 bias estimates already subtracted.
+          auto data = std::make_shared<ImuData>();
+          data->t_ns = *host_ns;
+          data->accel << imu.xacc, imu.yacc, imu.zacc;
+          data->gyro << imu.xgyro, imu.ygyro, imu.zgyro;
+          imu_data_queue->push(data);
+          if (record_imu_queue) record_imu_queue->push(data);
+          return;
+        }
+        default:
+          return;
+      }
+    };
+
+    while (running) {
+      pollfd descriptor{mavlink_fd, POLLIN, 0};
+      const int ready = poll(&descriptor, 1, MAVLINK_READ_TIMEOUT_MS);
+      if (ready < 0 && errno != EINTR) throw systemError("poll MAVLink");
+      const int64_t rx_ns = monotonicNs();
+      while (ready > 0) {
+        ssize_t size = 0;
+        if (mavlink_udp) {
+          sockaddr_in from{};
+          socklen_t from_size = sizeof(from);
+          size = recvfrom(mavlink_fd, datagram.data(), datagram.size(),
+                          MSG_DONTWAIT, reinterpret_cast<sockaddr*>(&from),
+                          &from_size);
+          if (size > 0) peer = from;
+        } else {
+          pollfd more{mavlink_fd, POLLIN, 0};
+          if (poll(&more, 1, 0) <= 0) break;
+          size = read(mavlink_fd, datagram.data(), datagram.size());
+        }
+        if (size <= 0) break;
+        for (ssize_t i = 0; i < size; ++i) {
+          mavlink_message_t message;
+          mavlink_status_t status;
+          const uint8_t result = mavlink_frame_char_buffer(
+              &parse_buffer, &parse_status, datagram[i], &message, &status);
+          if (result == MAVLINK_FRAMING_OK) {
+            handle(message, rx_ns);
+          } else if (result == MAVLINK_FRAMING_BAD_CRC ||
+                     result == MAVLINK_FRAMING_BAD_SIGNATURE) {
+            // The resynchronization of mavlink_parse_char().
+            parse_status.msg_received = MAVLINK_FRAMING_INCOMPLETE;
+            parse_status.parse_state = MAVLINK_PARSE_STATE_IDLE;
+            if (datagram[i] == MAVLINK_STX) {
+              parse_status.parse_state = MAVLINK_PARSE_STATE_GOT_STX;
+              parse_buffer.len = 0;
+              mavlink_start_checksum(&parse_buffer);
+            }
+          }
+        }
+      }
+      if (fc_address && !interval_settled &&
+          rx_ns - last_request_ns >= MAVLINK_REQUEST_RETRY_NS) {
+        mavlink_message_t message;
+        // param7 = 0: the response target is the flight stack default.
+        mavlink_msg_command_long_pack_chan(
+            MAVLINK_SYSTEM_ID, MAVLINK_COMPONENT_ID, MAVLINK_COMM_0, &message,
+            fc_address->first, fc_address->second, MAV_CMD_SET_MESSAGE_INTERVAL,
+            0, static_cast<float>(MAVLINK_MSG_ID_HIGHRES_IMU),
+            1e6f / static_cast<float>(rate), 0, 0, 0, 0, 0);
+        send(message);
+        interval_requested = true;
+        last_request_ns = rx_ns;
+      }
+      // An FC that rebooted into a stream configuration without HIGHRES_IMU
+      // sends no sample time that would show the reboot.
+      if (interval_settled && rate > 0 &&
+          rx_ns - last_imu_rx_ns >= MAVLINK_IMU_TIMEOUT_NS) {
+        std::cerr << "IMU: no HIGHRES_IMU for 3 s; requesting it again"
+                  << std::endl;
+        request_again();
+        last_imu_rx_ns = rx_ns;
+      }
+    }
+  } catch (const std::exception& error) {
+    fail(std::string("IMU: ") + error.what());
+  }
+}
+
 void PiCameraImuDevice::stop(bool send_end_of_stream) {
   capturing = false;
   running = false;
@@ -673,6 +1577,12 @@ void PiCameraImuDevice::stop(bool send_end_of_stream) {
     buffers.clear();
     close(video_fd);
     video_fd = -1;
+  }
+  for (const int fd : dma_buffer_fds) close(fd);
+  dma_buffer_fds.clear();
+  if (mavlink_fd >= 0) {
+    close(mavlink_fd);
+    mavlink_fd = -1;
   }
   if (sensor_fd >= 0) {
     close(sensor_fd);

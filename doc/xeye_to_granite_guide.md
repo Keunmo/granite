@@ -73,7 +73,7 @@ C=config/live
 for d in /sys/bus/i2c/devices/i2c-*; do echo $d $(cat $d/name); done | grep CP2112
 # 2. VIO와 녹화를 같이 실행합니다. 리그를 2초 이상 정지한 다음 움직입니다. Ctrl-C 또는 창 닫기로 끝냅니다.
 $B/granite_vio --live --use-imu 1 --cam-calib $C/b0429_pi_640x400_calib.json \
-    --config-path $C/b0429_pi_640x400_handheld.json --i2c /dev/i2c-23 --out live/run1 --record live/run1_euroc
+    --config-path $C/b0429_pi_640x400_handheld.json --model b0429 --imu_type mpu_i2c --i2c /dev/i2c-23 --out live/run1 --record live/run1_euroc
 ```
 
 - 결과: `live/run1_traj_tum.txt`(TUM, T_w_i), `live/run1_states.csv`(상태 CSV), `live/run1_euroc/`(EuRoC 녹화).
@@ -333,14 +333,14 @@ $B/granite_vio $D --config-path $C --use-imu 1 --num-threads 4 --max-frames 1000
 cd ~/granite_eval; B=bin/granite; C=config/live
 # VIO + 녹화 (빠른 시작 B와 같음)
 $B/granite_vio --live --use-imu 1 --cam-calib $C/b0429_pi_640x400_calib.json \
-    --config-path $C/b0429_pi_640x400_handheld.json --i2c /dev/i2c-23 --out live/run1 --record live/run1_euroc
+    --config-path $C/b0429_pi_640x400_handheld.json --model b0429 --imu_type mpu_i2c --i2c /dev/i2c-23 --out live/run1 --record live/run1_euroc
 # 같은 실행을 live 앱의 옵션으로
 $B/granite_pi_cam_imu_vio --calib $C/b0429_pi_640x400_calib.json --config-path $C/b0429_pi_640x400_handheld.json \
-    --i2c /dev/i2c-23 --out live/run1 --record live/run1_euroc
+    --model b0429 --imu_type mpu_i2c --i2c /dev/i2c-23 --out live/run1 --record live/run1_euroc
 # 센서만 확인 (VIO 없음, 10 s)
-$B/granite_pi_cam_imu_vio --config-path $C/b0429_pi_640x400_handheld.json --i2c /dev/i2c-23 --capture-only --duration 10
+$B/granite_pi_cam_imu_vio --config-path $C/b0429_pi_640x400_handheld.json --model b0429 --imu_type mpu_i2c --i2c /dev/i2c-23 --capture-only --duration 10
 # 녹화만 (VIO 없음)
-$B/granite_pi_cam_imu_vio --config-path $C/b0429_pi_640x400_handheld.json --i2c /dev/i2c-23 --record live/rec1 --duration 30
+$B/granite_pi_cam_imu_vio --config-path $C/b0429_pi_640x400_handheld.json --model b0429 --imu_type mpu_i2c --i2c /dev/i2c-23 --record live/rec1 --duration 30
 ```
 
 - `granite_vio --live`와 `granite_pi_cam_imu_vio`(VIO)는 같은 코드(`src/vio_app.h`)와 같은 Pangolin GUI를 씁니다. 옵션 이름만 다릅니다(`--cam-calib` 대 `--calib`, `--show-gui 0` 대 `--no-gui`).

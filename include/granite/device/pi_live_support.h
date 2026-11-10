@@ -135,29 +135,118 @@ inline int64_t monotonicNs() {
 }
 
 // Adds the sensor options to the command line. loadCameraConfig() reads the
-// same values from the "camera.*" keys of the config file.
+// same values from the "camera.*" and "imu.*" keys of the config file. The
+// options of the xeye models and of imu_mavlink have the names of the xeye
+// capture keys (camera: --<key>, IMU: --imu_<key>).
 inline void addSensorOptions(CLI::App& app, PiCameraImuOptions& options, bool& resize_half) {
-  app.add_option("--width", options.width, "Sensor mode width (1920, 1280)");
-  app.add_option("--height", options.height, "Sensor mode height (1200, 1080, 720)");
-  app.add_option("--fps", options.fps, "Camera frame rate");
+  auto& ae = options.auto_exposure;
+  app.add_option(
+      "--model", options.model,
+      "kurokesu_ar0234_pi or b0429_pi (as the xeye node), or b0429 (granite)");
+  app.add_option(
+      "--port", options.port,
+      "Video node of the rp1-cfe (empty: the node of the sensor graph)");
+  app.add_option("--width", options.width,
+                 "Sensor mode width (1920, 1280, 960; 0: 960 for "
+                 "kurokesu_ar0234_pi, else 1280)");
+  app.add_option("--height", options.height,
+                 "Sensor mode height (1200, 1080, 720, 600; 0: 600 or 720)");
+  app.add_option("--fps,--frame_rate", options.fps, "Camera frame rate");
   app.add_option("--downscale", options.downscale,
                  "Output image at 1/N of the sensor mode (N x N average without Bayer pattern)");
   app.add_flag("--resize-half", resize_half, "Same as --downscale 2");
-  app.add_option("--metering-circle", options.metering_circle,
-                 "Auto exposure meters this circle cx cy r of the output image")
+  app.add_option("--pixel_format", options.pixel_format,
+                 "xeye models: gray8 (demosaiced)");
+  app.add_option(
+      "--exposure_time", options.exposure_time_ms,
+      "xeye models: exposure in ms, the start value of the auto exposure");
+  app.add_option(
+      "--gain", options.gain,
+      "xeye models: analogue_gain control value (kurokesu_ar0234_pi 13-64, "
+      "b0429_pi 100-1200; -1: 14 or 100)");
+  app.add_option("--num_v4l_buffer", options.num_v4l_buffer,
+                 "xeye models: V4L2 buffers");
+  app.add_option("--h_flip", options.h_flip,
+                 "xeye models: sensor horizontal flip");
+  app.add_option("--v_flip", options.v_flip,
+                 "xeye models: sensor vertical flip");
+  app.add_option("--crop", options.crop,
+                 "xeye models: crop x y w h of the sensor mode")
+      ->expected(4);
+  app.add_option("--auto_white_balance", options.auto_white_balance,
+                 "xeye models: WB");
+  app.add_option("--fused_wb", options.fused_wb,
+                 "xeye models: WB gains from the previous frame");
+  app.add_option("--black_level", options.black_level,
+                 "xeye models: black level [10-bit]");
+  app.add_option("--enable_gamma", options.enable_gamma,
+                 "xeye models: gamma curve");
+  app.add_option("--gamma_value", options.gamma_value,
+                 "xeye models: gamma exponent");
+  app.add_option("--auto_exposure", ae.auto_exposure,
+                 "xeye models: auto exposure");
+  app.add_option("--auto_gain", ae.auto_gain, "xeye models: auto gain");
+  app.add_option("--auto_exposure_range", ae.exposure_range_ms,
+                 "xeye models: auto exposure min max [ms]")
+      ->expected(2);
+  app.add_option(
+         "--auto_gain_range", ae.gain_range_db,
+         "xeye models: auto gain min max [dB] (default: the driver range)")
+      ->expected(2);
+  app.add_option("--auto_exp_prior", ae.prior,
+                 "xeye models: exposure or gain changes first");
+  app.add_option("--target_gray_value", ae.target_gray_value,
+                 "xeye models: auto exposure target [%] of the full scale");
+  app.add_option("--auto_exposure_ev_compensation", ae.ev_compensation,
+                 "xeye models: target x 2^ev, [-3, 3]");
+  app.add_option(
+      "--auto_exposure_damping", ae.damping,
+      "xeye models: part of the error that an update does not correct, [0, 1)");
+  app.add_option("--auto_exposure_metering", ae.metering,
+                 "xeye models: average, spot, or partial");
+  app.add_option("--auto_exposure_roi", ae.roi,
+                 "xeye models: metered region x y w h")
+      ->expected(4);
+  app.add_option("--auto_exposure_circle", ae.circle,
+                 "xeye models: only the pixels in the circle cx cy r")
       ->expected(3);
-  app.add_option("--exposure", options.exposure_ms, "Manual exposure in ms (0: auto)");
-  app.add_option("--max-exposure", options.max_exposure_ms, "Auto exposure limit in ms");
-  app.add_option("--gain", options.gain_db, "Analogue gain in dB for manual exposure (0-11)");
-  app.add_option("--max-gain", options.max_gain, "Auto exposure analogue gain limit (analogue_gain / 100)");
-  app.add_option("--brightness", options.brightness_target, "Auto exposure target mean (0-255)");
-  app.add_option("--i2c", options.i2c_device, "IMU I2C adapter device");
-  app.add_option("--imu-address", options.imu_address, "IMU 7-bit I2C address");
-  app.add_option("--imu-rate", options.imu_rate, "IMU sample rate in Hz");
+  app.add_option(
+         "--metering-circle", options.metering_circle,
+         "b0429: auto exposure meters this circle cx cy r of the output image")
+      ->expected(3);
+  app.add_option("--exposure", options.exposure_ms,
+                 "b0429: manual exposure in ms (0: auto)");
+  app.add_option("--max-exposure", options.max_exposure_ms,
+                 "b0429: auto exposure limit in ms");
+  app.add_option("--gain-db", options.gain_db,
+                 "b0429: analogue gain in dB for manual exposure (0-11)");
+  app.add_option(
+      "--max-gain", options.max_gain,
+      "b0429: auto exposure analogue gain limit (analogue_gain / 100)");
+  app.add_option("--brightness", options.brightness_target,
+                 "b0429: auto exposure target mean (0-255)");
+  app.add_option("--imu_type", options.imu_type,
+                 "imu_mavlink (PX4 HIGHRES_IMU, as the xeye node) or mpu_i2c");
+  app.add_option("--imu_udp", options.imu_udp,
+                 "imu_mavlink: <bind address>:<port> of the router endpoint "
+                 "(default 127.0.0.1:14601 without --imu_port)");
+  app.add_option("--imu_port", options.imu_port,
+                 "imu_mavlink: serial device in place of udp");
+  app.add_option("--imu_baudrate", options.imu_baudrate,
+                 "imu_mavlink: serial baud rate");
+  app.add_option(
+      "--imu_freq_hz", options.imu_freq_hz,
+      "imu_mavlink: requested HIGHRES_IMU rate [Hz] (0: the FC rate)");
+  app.add_option("--i2c", options.i2c_device,
+                 "mpu_i2c: IMU I2C adapter device");
+  app.add_option("--imu-address", options.imu_address,
+                 "mpu_i2c: IMU 7-bit I2C address");
+  app.add_option("--imu-rate", options.imu_rate,
+                 "mpu_i2c: IMU sample rate in Hz");
 }
 
-// Reads the optional "camera.*" keys next to the VioConfig keys. VioConfig
-// ignores them. A command line option has priority over its key.
+// Reads the optional "camera.*" and "imu.*" keys next to the VioConfig keys.
+// VioConfig ignores them. A command line option has priority over its key.
 inline void loadCameraConfig(const std::string& path, const CLI::App& app,
                              PiCameraImuOptions& options) {
   std::ifstream input(path);
@@ -173,15 +262,51 @@ inline void loadCameraConfig(const std::string& path, const CLI::App& app,
       // The key is not in the file; keep the default.
     }
   };
+  auto& ae = options.auto_exposure;
+  load("camera.model", "--model", options.model);
+  load("camera.port", "--port", options.port);
   load("camera.width", "--width", options.width);
   load("camera.height", "--height", options.height);
   load("camera.fps", "--fps", options.fps);
+  load("camera.frame_rate", "--fps", options.fps);
+  load("camera.pixel_format", "--pixel_format", options.pixel_format);
+  load("camera.exposure_time", "--exposure_time", options.exposure_time_ms);
+  load("camera.gain", "--gain", options.gain);
+  load("camera.num_v4l_buffer", "--num_v4l_buffer", options.num_v4l_buffer);
+  load("camera.h_flip", "--h_flip", options.h_flip);
+  load("camera.v_flip", "--v_flip", options.v_flip);
+  load("camera.crop", "--crop", options.crop);
+  load("camera.auto_white_balance", "--auto_white_balance",
+       options.auto_white_balance);
+  load("camera.fused_wb", "--fused_wb", options.fused_wb);
+  load("camera.black_level", "--black_level", options.black_level);
+  load("camera.enable_gamma", "--enable_gamma", options.enable_gamma);
+  load("camera.gamma_value", "--gamma_value", options.gamma_value);
+  load("camera.auto_exposure", "--auto_exposure", ae.auto_exposure);
+  load("camera.auto_gain", "--auto_gain", ae.auto_gain);
+  load("camera.auto_exposure_range", "--auto_exposure_range",
+       ae.exposure_range_ms);
+  load("camera.auto_gain_range", "--auto_gain_range", ae.gain_range_db);
+  load("camera.auto_exp_prior", "--auto_exp_prior", ae.prior);
+  load("camera.target_gray_value", "--target_gray_value", ae.target_gray_value);
+  load("camera.auto_exposure_ev_compensation",
+       "--auto_exposure_ev_compensation", ae.ev_compensation);
+  load("camera.auto_exposure_damping", "--auto_exposure_damping", ae.damping);
+  load("camera.auto_exposure_metering", "--auto_exposure_metering",
+       ae.metering);
+  load("camera.auto_exposure_roi", "--auto_exposure_roi", ae.roi);
+  load("camera.auto_exposure_circle", "--auto_exposure_circle", ae.circle);
   load("camera.exposure_ms", "--exposure", options.exposure_ms);
-  load("camera.gain_db", "--gain", options.gain_db);
+  load("camera.gain_db", "--gain-db", options.gain_db);
   load("camera.max_exposure_ms", "--max-exposure", options.max_exposure_ms);
   load("camera.max_gain", "--max-gain", options.max_gain);
   load("camera.brightness_target", "--brightness", options.brightness_target);
   load("camera.metering_circle", "--metering-circle", options.metering_circle);
+  load("imu.type", "--imu_type", options.imu_type);
+  load("imu.udp", "--imu_udp", options.imu_udp);
+  load("imu.port", "--imu_port", options.imu_port);
+  load("imu.baudrate", "--imu_baudrate", options.imu_baudrate);
+  load("imu.freq_hz", "--imu_freq_hz", options.imu_freq_hz);
   load("camera.i2c_device", "--i2c", options.i2c_device);
   load("camera.imu_rate", "--imu-rate", options.imu_rate);
   bool resize_half = false;
@@ -196,7 +321,11 @@ inline void loadCameraConfig(const std::string& path, const CLI::App& app,
 inline void fitCalibration(Calibration<double>& calib, const PiCameraImuOptions& options) {
   if (calib.intrinsics.size() != 1 || calib.T_i_c.size() != 1 || calib.resolution.size() != 1)
     throw std::runtime_error("Expected a calibration with one camera");
-  const Eigen::Vector2i sensor_size(options.width, options.height);
+  // The xeye models send the crop of the sensor mode.
+  Eigen::Vector2i sensor_size(options.sensorWidth(), options.sensorHeight());
+  if (options.xeyeProcessing() && options.crop.size() == 4)
+    sensor_size = Eigen::Vector2i(options.crop[2] - options.crop[2] % 2,
+                                  options.crop[3] - options.crop[3] % 2);
   const Eigen::Vector2i output_size = sensor_size / options.downscale;
   if (calib.resolution[0] == sensor_size) {
     scaleCalibration(calib, options.downscale);

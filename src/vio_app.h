@@ -2144,8 +2144,9 @@ class VioDataset {
         if (run_opt.live) {
           const uint64_t imu = device->imu_samples.load();
           line << " imu_hz=" << (imu - previous_imu) / interval
-               << " exposure_ms=" << device->exposure_lines.load() * device->lineTimeNs() * 1e-6
-               << " gain_db=" << granite::b0429DbFromDriverGain(device->analogue_gain.load())
+               << " exposure_ms="
+               << device->exposure_lines.load() * device->lineTimeNs() * 1e-6
+               << " gain_db=" << device->gainDb()
                << " brightness=" << device->mean_brightness.load()
                << " sensor_drops=" << device->sensor_frame_drops.load()
                << " imu_overflows=" << device->imu_overflows.load()
@@ -2249,22 +2250,37 @@ class VioDataset {
     device = std::make_unique<granite::PiCameraImuDevice>(run_opt.pi);
     device->start();
     const auto& o = run_opt.pi;
-    std::cout << "mode=" << (use_imu ? "mono VIO" : "mono VO") << " receiver=" << device->receiver()
-              << " sensor=" << o.width << "x" << o.height << " output=" << device->outputWidth()
-              << "x" << device->outputHeight() << " fps=" << device->frameRate()
+    std::cout << "mode=" << (use_imu ? "mono VIO" : "mono VO")
+              << " receiver=" << device->receiver() << " camera=" << o.model
+              << " sensor=" << o.sensorWidth() << "x" << o.sensorHeight()
+              << " output=" << device->outputWidth() << "x"
+              << device->outputHeight() << " fps=" << device->frameRate()
               << " line_us=" << device->lineTimeNs() * 1e-3 << " exposure_ms="
-              << (o.exposure_ms > 0 ? std::to_string(device->exposure_lines.load() *
-                                                     device->lineTimeNs() * 1e-6)
-                                    : "auto")
-              << " gain_db=" << granite::b0429DbFromDriverGain(device->analogue_gain.load())
-              << " imu_rate=" << o.imu_rate << " i2c=" << o.i2c_device
-              << " queue_limit=" << run_opt.queue_limit << " gui=" << show_gui << std::endl;
+              << ((o.xeyeProcessing() ? !o.auto_exposure.auto_exposure
+                                      : o.exposure_ms > 0)
+                      ? std::to_string(device->exposure_lines.load() *
+                                       device->lineTimeNs() * 1e-6)
+                      : "auto")
+              << " gain_db=" << device->gainDb() << " imu="
+              << (o.mavlink() ? "imu_mavlink " +
+                                    (o.imu_port.empty()
+                                         ? (o.imu_udp.empty()
+                                                ? std::string("127.0.0.1:14601")
+                                                : o.imu_udp)
+                                         : o.imu_port)
+                              : "mpu_i2c " + o.i2c_device)
+              << " queue_limit=" << run_opt.queue_limit << " gui=" << show_gui
+              << std::endl;
     if (std::abs(device->frameRate() - o.fps) > 0.5)
       std::cerr << "The sensor mode limits " << o.fps << " fps to " << device->frameRate()
                 << " fps" << std::endl;
-    if (o.exposure_ms > device->maxExposureMs())
-      std::cerr << "The exposure of " << o.exposure_ms << " ms is longer than the frame; "
-                << "the camera uses " << device->maxExposureMs() << " ms" << std::endl;
+    if ((o.xeyeProcessing() ? o.exposure_time_ms : o.exposure_ms) >
+        device->maxExposureMs())
+      std::cerr << "The exposure of "
+                << (o.xeyeProcessing() ? o.exposure_time_ms : o.exposure_ms)
+                << " ms is longer than the frame; "
+                << "the camera uses " << device->maxExposureMs() << " ms"
+                << std::endl;
     if (!run_opt.record_path.empty())
       recorder = std::make_unique<granite::pi_live::RecordWriter>(run_opt.record_path);
     // The forward thread moves the images to the flow input. It keeps a copy

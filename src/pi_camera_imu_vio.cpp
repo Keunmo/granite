@@ -218,25 +218,42 @@ int main(int argc, char** argv) {
 
     granite::PiCameraImuDevice device(options);
     device.start();
-    std::cout << "mode=" << (estimate ? (use_imu ? "mono VIO" : "mono VO") :
-                             (recorder ? "record" : "capture"))
-              << " receiver=" << device.receiver()
-              << " sensor=" << options.width << "x" << options.height
-              << " output=" << device.outputWidth() << "x" << device.outputHeight()
-              << " fps=" << device.frameRate() << " line_us=" << device.lineTimeNs() * 1e-3
-              << " exposure_ms="
-              << (options.exposure_ms > 0 ? std::to_string(device.exposure_lines.load() *
-                                                           device.lineTimeNs() * 1e-6)
-                                          : "auto")
-              << " gain_db=" << granite::b0429DbFromDriverGain(device.analogue_gain.load())
-              << " imu_rate=" << options.imu_rate << " i2c=" << options.i2c_device
-              << " threads=" << num_threads << " queue_limit=" << queue_limit << std::endl;
+    std::cout
+        << "mode="
+        << (estimate ? (use_imu ? "mono VIO" : "mono VO")
+                     : (recorder ? "record" : "capture"))
+        << " receiver=" << device.receiver() << " camera=" << options.model
+        << " sensor=" << options.sensorWidth() << "x" << options.sensorHeight()
+        << " output=" << device.outputWidth() << "x" << device.outputHeight()
+        << " fps=" << device.frameRate()
+        << " line_us=" << device.lineTimeNs() * 1e-3 << " exposure_ms="
+        << ((options.xeyeProcessing() ? !options.auto_exposure.auto_exposure
+                                      : options.exposure_ms > 0)
+                ? std::to_string(device.exposure_lines.load() *
+                                 device.lineTimeNs() * 1e-6)
+                : "auto")
+        << " gain_db=" << device.gainDb() << " imu="
+        << (options.mavlink()
+                ? "imu_mavlink " + (options.imu_port.empty()
+                                        ? (options.imu_udp.empty()
+                                               ? std::string("127.0.0.1:14601")
+                                               : options.imu_udp)
+                                        : options.imu_port)
+                : "mpu_i2c " + options.i2c_device)
+        << " threads=" << num_threads << " queue_limit=" << queue_limit
+        << std::endl;
     if (std::abs(device.frameRate() - options.fps) > 0.5)
       std::cerr << "The sensor mode limits " << options.fps << " fps to " << device.frameRate()
                 << " fps" << std::endl;
-    if (options.exposure_ms > device.maxExposureMs())
-      std::cerr << "The exposure of " << options.exposure_ms << " ms is longer than the frame; "
-                << "the camera uses " << device.maxExposureMs() << " ms" << std::endl;
+    if ((options.xeyeProcessing()
+             ? options.exposure_time_ms
+             : options.exposure_ms) > device.maxExposureMs())
+      std::cerr << "The exposure of "
+                << (options.xeyeProcessing() ? options.exposure_time_ms
+                                             : options.exposure_ms)
+                << " ms is longer than the frame; "
+                << "the camera uses " << device.maxExposureMs() << " ms"
+                << std::endl;
 
     tbb::concurrent_bounded_queue<granite::ImuData::Ptr> imu_queue;
     tbb::concurrent_bounded_queue<granite::OpticalFlowInput::Ptr> capture_queue;
@@ -404,16 +421,23 @@ int main(int argc, char** argv) {
         std::cout << std::fixed << std::setprecision(2) << "t=" << elapsed
                   << " input_fps=" << input_fps << " state_fps=" << state_fps
                   << " imu_hz=" << (imu - previous_imu) / interval
-                  << " exposure_ms=" << device.exposure_lines.load() * device.lineTimeNs() * 1e-6
-                  << " gain_db=" << granite::b0429DbFromDriverGain(device.analogue_gain.load())
+                  << " exposure_ms="
+                  << device.exposure_lines.load() * device.lineTimeNs() * 1e-6
+                  << " gain_db=" << device.gainDb()
                   << " brightness=" << device.mean_brightness.load()
-                  << " drops=" << device.dropped_frames.load() << "/" << device.sensor_frame_drops.load()
+                  << " drops=" << device.dropped_frames.load() << "/"
+                  << device.sensor_frame_drops.load()
                   << " imu_overflows=" << device.imu_overflows.load()
                   << " imu_errors=" << device.imu_i2c_errors.load()
-                  << " lag_ms=" << (last_state_ns ? (device.last_image_t_ns.load() - last_state_ns) * 1e-6 : 0)
+                  << " lag_ms="
+                  << (last_state_ns
+                          ? (device.last_image_t_ns.load() - last_state_ns) *
+                                1e-6
+                          : 0)
                   << " tracking=" << tracking() << " support=" << support
-                  << " landmarks=" << landmarks << " finite=" << finite_landmarks
-                  << " metric_initialized=" << (mono_vio ? mono_vio->metricInitialized() : false)
+                  << " landmarks=" << landmarks
+                  << " finite=" << finite_landmarks << " metric_initialized="
+                  << (mono_vio ? mono_vio->metricInitialized() : false)
                   << " p=" << position.transpose() << std::endl;
         if (first_image_t_ns == 0) first_image_t_ns = device.first_capture_t_ns.load();
         brightness_samples.push_back(device.mean_brightness.load());

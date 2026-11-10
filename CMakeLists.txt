@@ -269,6 +269,8 @@ if(GRANITE_BUILD_PI_CAMERA)
   # granite_vio --live: the Raspberry Pi camera and IMU.
   target_sources(granite_vio PRIVATE src/device/pi_camera_imu.cpp)
   target_compile_definitions(granite_vio PRIVATE GRANITE_WITH_PI_CAMERA)
+  # <mavlink/common/mavlink.h> of the c_library_v2 submodule.
+  target_include_directories(granite_vio SYSTEM PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty)
 endif()
 
 add_executable(granite_time_alignment src/time_alignment.cpp)
@@ -318,6 +320,8 @@ if(GRANITE_BUILD_PI_CAMERA AND GRANITE_BUILD_GUI)
     src/device/pi_camera_imu.cpp src/device/t265_gui.cpp)
   target_link_libraries(granite_pi_cam_imu_vio granite pangolin)
   target_compile_definitions(granite_pi_cam_imu_vio PRIVATE GRANITE_WITH_PI_CAMERA)
+  target_include_directories(granite_pi_cam_imu_vio SYSTEM PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty)
   install(TARGETS granite_pi_cam_imu_vio RUNTIME DESTINATION ${CMAKE_INSTALL_PREFIX}/bin)
 endif()
 

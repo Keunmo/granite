@@ -52,6 +52,8 @@
         "config.mapper_lm_lambda_min": 1e-32,
         "config.mapper_lm_lambda_max": 1e3,
 
+        "camera.model": "b0429",
+        "imu.type": "mpu_i2c",
         "camera.fps": 60,
         "camera.exposure_ms": 1.8,
         "camera.gain_db": 4.0,
