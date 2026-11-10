@@ -10,6 +10,9 @@ Calibration JSON (--calib-out), at 1/N of the calibrated image size (--downscale
                It writes kb4 when its largest error is at most --max-error-px (the model of the evaluated runs), else
                the model with the smallest largest error. opencv_fisheye is kb4 exactly; pinhole without distortion is
                pinhole.
+  crop         camera_v4l2_gen2 (model kurokesu_ar0234_pi, b0429_pi) sends the crop [x, y, w, h] of the sensor mode.
+               A calibration at the sensor mode moves to the crop: c -> c - (x, y), size -> (w, h). A calibration at
+               the crop size stays.
   downscale    an N x N reduction (grbgToGray of the live app): f / N, c -> (c + 0.5) / N - 0.5, size / N.
   T_imu_cam    (imu2rig_pose)^-1 cam2rig_pose; a pose [rx, ry, rz, tx, ty, tz] maps the sensor frame into the rig frame.
   biases       calib_accel_bias / calib_gyro_bias = bias_acc / bias_gyro of the IMU (Granite subtracts them from the
@@ -17,11 +20,14 @@ Calibration JSON (--calib-out), at 1/N of the calibrated image size (--downscale
                IMU node with calibrated: true records the samples with these biases already removed.
   IMU noise    the Allan variance of imu_intrinsics_calibrator (calib.<imu>.intrinsic.noise or --imu-intrinsics), else
                the openvio defaults of config/pi5_b0429.yaml (MPU-9250 datasheet value x 2; not calibrated).
-  time offset  cam_time_offset_ns. --target live: 0. The live app stamps the exposure center (CLOCK_MONOTONIC); the
-               xeye time_offset holds for the xeye image stamp (after DQBUF), which is later than the exposure center
-               by the readout, half the exposure and the DQBUF delay. Granite does not estimate the offset online.
-               --target capture: time_offset (t_imu = t_cam + time_offset) for the replay of the capture itself; the
-               runner applies it with --cam-time-offset-ns, which the script prints.
+  time offset  cam_time_offset_ns. --target capture: time_offset (t_imu = t_cam + time_offset) for the replay of the
+               capture itself; the runner applies it with --cam-time-offset-ns, which the script prints.
+               --target live with a camera_v4l2_gen2 node of model kurokesu_ar0234_pi or b0429_pi: time_offset too. The
+               live app stamps the images with the V4L2 buffer time and maps the imu_mavlink sample times as the xeye
+               nodes do, so the offset of the capture holds live.
+               --target live with the other nodes: 0. The live app (model b0429) stamps the exposure center; the xeye
+               time_offset holds for the xeye image stamp (after DQBUF), which is later than the exposure center by the
+               readout, half the exposure and the DQBUF delay. Granite does not estimate the offset online.
 
 VIO config JSON (--config-out): a copy of --base (default: the final candidate eval/config/oi_g40_det_gauge_gate_rest.json)
 with
@@ -34,8 +40,17 @@ with
   --handheld                            config.vio_mono_init_excitation_accel_std 0.3 and
                                         config.vio_mono_init_max_rest_disparity 2.0 at the base camera (then scaled)
                                         for the slow start of a hand-held rig
-  camera.*                              the live sensor options of the live app (sensor mode, downscale, fps, auto
-                                        exposure, metering circle inside the fisheye image circle, I2C device).
+  camera.*, imu.*                       the live sensor options of the live app.
+      camera_v4l2_gen2 node of model kurokesu_ar0234_pi or b0429_pi: camera.<key> for each property key of the node
+      with the xeye key names (model, port, width, height, frame_rate, pixel_format gray8, exposure_time, gain, h_flip,
+      v_flip, crop, auto_white_balance, fused_wb, black_level, enable_gamma, gamma_value, auto_exposure, auto_gain,
+      auto_exposure_range, auto_gain_range, auto_exp_prior, target_gray_value, auto_exposure_ev_compensation,
+      auto_exposure_damping, auto_exposure_metering, auto_exposure_roi, auto_exposure_circle, num_v4l_buffer) and
+      camera.downscale. The live app takes gray8 only.
+      Other camera nodes: camera.model b0429 with the granite options (sensor mode, downscale, fps, auto exposure,
+      metering circle inside the fisheye image circle).
+      imu_mavlink node: imu.type imu_mavlink, imu.udp or imu.port and imu.baudrate, imu.freq_hz.
+      Other IMU nodes: imu.type mpu_i2c, camera.i2c_device, camera.imu_rate.
 The script prints every changed value and its reason.
 """
 
@@ -60,6 +75,16 @@ SCALED_KEYS = (("config.vio_mono_init_max_still_disparity", "mean track motion t
 OPENVIO_IMU_NOISE = {"gyro_noise_density": 3.5e-4, "acc_noise_density": 6.0e-3, "gyro_bias_random_walk": 2.2e-5,
                      "acc_bias_random_walk": 3.0e-3}
 KB4_NEWTON_STEPS = 3  # KannalaBrandtCamera4::unproject: solve_theta<3>
+# camera_v4l2_gen2 models that the live app processes as the xeye node (its model names)
+XEYE_MODELS = {"kurokesu_ar0234_pi": "kurokesu_ar0234_pi", "b0429_pi": "b0429_pi", "arducam_b0429_pi": "b0429_pi"}
+# The property keys of these nodes that the live app takes (camera.<key>)
+XEYE_CAMERA_KEYS = ("width", "height", "pixel_format", "exposure_time", "gain", "num_v4l_buffer", "h_flip", "v_flip",
+                    "crop", "auto_white_balance", "fused_wb", "black_level", "enable_gamma", "gamma_value",
+                    "auto_exposure", "auto_gain", "auto_exposure_range", "auto_gain_range", "auto_exp_prior",
+                    "target_gray_value", "auto_exposure_ev_compensation", "auto_exposure_damping",
+                    "auto_exposure_metering", "auto_exposure_roi", "auto_exposure_circle")
+# PX4 sends new HIGHRES_IMU samples at IMU_INTEG_RATE (default 200 Hz); xeye received 193.6 Hz with freq_hz 400
+PX4_IMU_RATE = 200.0
 
 
 # ---------------------------------------------------------------------------------------------------------------- xeye
@@ -136,6 +161,13 @@ def read_capture(capture_yaml, camera_name):
     camera_property = camera_node.get("property") or {}
     fps = camera_node.get("fps", camera_property.get("frame_rate"))
     intrinsic = imu_calib.get("intrinsic") or imu_node.get("intrinsic") or {}
+    xeye_model = None
+    if node == camera and str(camera_node.get("type", "")) == "camera_v4l2_gen2":
+        xeye_model = XEYE_MODELS.get(str(camera_node.get("model", "")))
+    imu_type = str(imu_node.get("type", ""))
+    mavlink = None
+    if imu_type == "imu_mavlink":
+        mavlink = {k: imu_node[k] for k in ("udp", "port", "baudrate", "freq_hz") if k in imu_node}
     return {
         "name": name, "node": node, "imu": imu, "calib": cam, "T_ic": T_ic,
         "time_offset": float(imu_calib.get("time_offset", imu_property.get("time_offset", 0.0))),
@@ -143,8 +175,10 @@ def read_capture(capture_yaml, camera_name):
         "bias_acc": imu_calib.get("bias_acc", imu_property.get("bias_acc")),
         "samples_calibrated": bool(imu_property.get("calibrated", False)),
         "noise": intrinsic.get("noise"),
-        "imu_rate": float(imu_node.get("freq_hz", 200.0)),
-        "i2c_device": imu_node.get("port"),
+        "imu_rate": PX4_IMU_RATE if mavlink is not None else float(imu_node.get("freq_hz", 200.0)),
+        "i2c_device": None if mavlink is not None else imu_node.get("port"),
+        "xeye_model": xeye_model, "camera_node": camera_node, "camera_property": camera_property,
+        "mavlink": mavlink,
         "fps": float(fps) if fps else None,
         "live": capture.get("play_record") is False,
         "sensor_size": (int(camera_property["width"]), int(camera_property["height"]))
@@ -156,7 +190,7 @@ def read_capture(capture_yaml, camera_name):
 class UwFisheye:
     """xcv uwfisheye: pixel = c + f rho(theta) (x, y) / r, rho(theta) = sum a_i theta^i, valid up to max_theta."""
 
-    def __init__(self, calib, factor):
+    def __init__(self, calib, factor, crop=None):
         f, cx, cy = (float(v) for v in calib["intrinsic"])
         poly = calib["poly"]
         if int(poly[0]) != len(poly) - 1:
@@ -166,6 +200,10 @@ class UwFisheye:
         self.c = np.array([(cx + 0.5) / factor - 0.5, (cy + 0.5) / factor - 0.5])
         self.max_theta = math.radians(float(calib.get("max_theta", 0.0)) or 180.0)
         w, h = (int(v) for v in calib["image_size"])
+        if crop:
+            x0, y0, w, h = crop
+            cx, cy = cx - x0, cy - y0
+            self.c = np.array([(cx + 0.5) / factor - 0.5, (cy + 0.5) / factor - 0.5])
         if w % factor or h % factor:
             raise ValueError(f"the size {w}x{h} is not a multiple of {factor}")
         self.size = (w // factor, h // factor)
@@ -343,12 +381,34 @@ def intrinsics_json(name, p):
     return {"camera_type": name, "intrinsics": {k: float(v) for k, v in zip(keys, p)}}
 
 
+def calibration_crop(capture):
+    """The crop [x, y, w, h] that moves a calibration at the sensor mode to the images of a camera_v4l2_gen2 node with
+    a crop, or None (no crop, or a calibration at the crop size already)."""
+    prop = capture["camera_property"]
+    crop = prop.get("crop") or []
+    if capture["xeye_model"] is None or len(crop) != 4:
+        return None
+    x, y, w, h = (int(v) - int(v) % 2 for v in crop)
+    size = tuple(int(v) for v in capture["calib"]["image_size"])
+    if size == (w, h):
+        return None
+    sensor = (int(prop.get("width", 0)), int(prop.get("height", 0)))
+    if size != sensor:
+        raise ValueError(f"the calibration size {size[0]}x{size[1]} is neither the crop {w}x{h} nor the sensor mode "
+                         f"{sensor[0]}x{sensor[1]}")
+    return [x, y, w, h]
+
+
 def camera_intrinsics(capture, factor, max_error_px, force_model):
     """(model name, params, size, px/rad, report lines, rho_max or None)."""
     cam = capture["calib"]
     lines = []
+    crop = calibration_crop(capture)
+    if crop:
+        lines.append(f"crop {crop}: the calibration at the sensor mode moves to the crop (c - ({crop[0]}, {crop[1]}), "
+                     f"size {crop[2]}x{crop[3]})")
     if cam["model"] == "uwfisheye":
-        uw = UwFisheye(cam, factor)
+        uw = UwFisheye(cam, factor, crop)
         fits = fit_models(uw)
         results = {name: evaluate(uw, name, p) for name, p in fits.items()}
         lines.append(f"uwfisheye {uw.size[0]}x{uw.size[1]}: f {uw.f:.4f}, c ({uw.c[0]:.4f}, {uw.c[1]:.4f}), "
@@ -376,10 +436,14 @@ def camera_intrinsics(capture, factor, max_error_px, force_model):
         lines.append(f"model: {choice} ({reason})")
         return choice, fits[choice], uw.size, uw.pixels_per_radian(), lines, (uw.c, uw.rho(uw.max_theta))
     w, h = (int(v) for v in cam["image_size"])
+    center = [float(v) for v in cam["center"]]
+    if crop:
+        w, h = crop[2], crop[3]
+        center = [center[0] - crop[0], center[1] - crop[1]]
     if w % factor or h % factor:
         raise ValueError(f"the size {w}x{h} is not a multiple of {factor}")
     fx, fy = (float(v) / factor for v in cam["focal_length"])
-    cx, cy = ((float(v) + 0.5) / factor - 0.5 for v in cam["center"])
+    cx, cy = ((v + 0.5) / factor - 0.5 for v in center)
     if cam["model"] == "opencv_fisheye":
         if float(cam.get("alpha", 0.0)) != 0.0:
             raise ValueError("opencv_fisheye with a skew (alpha) has no Granite model")
@@ -431,7 +495,9 @@ def main():
                          "vio_mono_init_max_rest_disparity 2.0 px at the base camera (then scaled). The base values "
                          "(1.0 m/s^2, 1.0 px) did not initialize on the slow start of smrig_ar0234 cam1. The value "
                          "0 (off) started at a constant velocity in all 17 Unreal moving-start subsets and diverged")
-    ap.add_argument("--fps", type=float, default=15.0, help="camera.fps of the live config (Granite ran at 15 fps)")
+    ap.add_argument("--fps", type=float,
+                    help="camera.fps of the live config (default: frame_rate of a kurokesu_ar0234_pi or b0429_pi "
+                         "node, else 15: Granite ran at 15 fps)")
     ap.add_argument("--sensor-size", help="live sensor mode WxH (default: the calibrated size)")
     ap.add_argument("--i2c-device", help="camera.i2c_device of the live config (default: the IMU port of the capture)")
     ap.add_argument("--max-exposure-ms", type=float, default=5.0,
@@ -442,6 +508,9 @@ def main():
 
     path = a.capture_yaml / "capture.yaml" if a.capture_yaml.is_dir() else a.capture_yaml
     capture = read_capture(path, a.camera)
+    xeye = capture["xeye_model"] is not None
+    if a.fps is None:
+        a.fps = float(capture["camera_property"].get("frame_rate", 30)) if xeye else 15.0
     if a.downscale < 1:
         raise ValueError("--downscale must be positive")
     model, params, size, px_per_rad, lines, circle = camera_intrinsics(capture, a.downscale, a.max_error_px, a.model)
@@ -462,7 +531,7 @@ def main():
         noise, noise_source = result.get("noise"), f"{a.imu_intrinsics} (Allan variance)"
     if not noise:
         noise, noise_source = OPENVIO_IMU_NOISE, "openvio config/pi5_b0429.yaml (MPU-9250 datasheet value x 2; not calibrated)"
-    offset_s = capture["time_offset"] if a.target == "capture" else 0.0
+    offset_s = capture["time_offset"] if a.target == "capture" or xeye else 0.0
     T = capture["T_ic"]
     qw, qx, qy, qz = rot_to_quat(T[:3, :3])
     calib = {"value0": {
@@ -490,7 +559,10 @@ def main():
     print(f"  IMU biases: {'zero (the samples are calibrated)' if zero_bias else 'accel ' + str(bias_acc) + ', gyro ' + str(bias_gyro)}")
     print(f"  IMU noise: {noise_source}: accel {noise['acc_noise_density']:g}, gyro {noise['gyro_noise_density']:g}, "
           f"accel walk {noise['acc_bias_random_walk']:g}, gyro walk {noise['gyro_bias_random_walk']:g}")
-    if a.target == "live":
+    if a.target == "live" and xeye:
+        print(f"  cam_time_offset_ns {calib['value0']['cam_time_offset_ns']}: time_offset of the capture; the live app "
+              f"stamps the images and the IMU samples as the xeye nodes ({capture['xeye_model']})")
+    elif a.target == "live":
         print(f"  cam_time_offset_ns 0: the live image time is the exposure center; the capture time_offset "
               f"{capture['time_offset']:.6f} s holds for the xeye image stamps only")
     else:
@@ -525,26 +597,60 @@ def main():
         if value > 0:
             set_key(key, round(value * ratio, 3),
                     f"{what} [px]; {value:g} at {base_scale:.1f} px/rad of the base camera, here {px_per_rad:.1f} px/rad")
-    for key in [k for k in cfg if k.startswith("camera.")]:
-        changes.append(f"{key}: {cfg.pop(key)} -> removed (replaced by the camera.* keys of this camera)")
-    sensor = capture["sensor_size"] if capture["live"] and capture["sensor_size"] else \
-        tuple(int(v) for v in capture["calib"]["image_size"])
-    if a.sensor_size:
-        sensor = tuple(int(v) for v in a.sensor_size.split("x"))
-    if sensor != (size[0] * a.downscale, size[1] * a.downscale):
-        print(f"warning: the sensor mode {sensor[0]}x{sensor[1]} is not {a.downscale} x the calibration "
-              f"{size[0]}x{size[1]}; the live app rejects the calibration", file=sys.stderr)
-    live = {"camera.width": sensor[0], "camera.height": sensor[1], "camera.downscale": a.downscale,
-            "camera.fps": a.fps, "camera.exposure_ms": 0.0, "camera.gain_db": 0.0,
-            "camera.max_exposure_ms": a.max_exposure_ms, "camera.brightness_target": 100.0}
-    if circle is not None:
-        c, r = circle
-        live["camera.metering_circle"] = [round(float(c[0]), 2), round(float(c[1]), 2),
-                                          round(float(r) * a.metering_fraction, 1)]
-    i2c = a.i2c_device or capture["i2c_device"]
-    if i2c:
-        live["camera.i2c_device"] = i2c
-    live["camera.imu_rate"] = capture["imu_rate"]
+    for key in [k for k in cfg if k.startswith("camera.") or k.startswith("imu.")]:
+        changes.append(f"{key}: {cfg.pop(key)} -> removed (replaced by the camera.* and imu.* keys of this capture)")
+    prop = capture["camera_property"]
+    if xeye:
+        # The sensor mode of the node, and its crop
+        sensor = (int(prop.get("width", 0)), int(prop.get("height", 0)))
+        crop = prop.get("crop") or []
+        output = (int(crop[2]) - int(crop[2]) % 2, int(crop[3]) - int(crop[3]) % 2) if len(crop) == 4 else sensor
+        if output != (size[0] * a.downscale, size[1] * a.downscale):
+            print(f"warning: the images {output[0]}x{output[1]} of the node are not {a.downscale} x the calibration "
+                  f"{size[0]}x{size[1]}; the live app rejects the calibration", file=sys.stderr)
+        live = {"camera.model": capture["xeye_model"], "camera.downscale": a.downscale, "camera.fps": a.fps}
+        if "port" in capture["camera_node"]:
+            live["camera.port"] = capture["camera_node"]["port"]
+        for key in XEYE_CAMERA_KEYS:
+            if key in prop:
+                live["camera." + key] = prop[key]
+        pixel_format = str(live.get("camera.pixel_format", "gray8"))
+        if pixel_format != "gray8":
+            print(f"warning: the node sends {pixel_format}; the live app takes gray8 only (the same demosaiced gray "
+                  f"as an xeye gray8 node)", file=sys.stderr)
+            live["camera.pixel_format"] = "gray8"
+        if circle is not None and "camera.auto_exposure_circle" not in live:
+            c, r = circle
+            print(f"  note: the node has no auto_exposure_circle; --auto_exposure_circle {round(float(c[0]))} "
+                  f"{round(float(c[1]))} {round(float(r) * a.metering_fraction)} meters inside the fisheye image circle "
+                  f"(at the written size)")
+    else:
+        sensor = capture["sensor_size"] if capture["live"] and capture["sensor_size"] else \
+            tuple(int(v) for v in capture["calib"]["image_size"])
+        if a.sensor_size:
+            sensor = tuple(int(v) for v in a.sensor_size.split("x"))
+        if sensor != (size[0] * a.downscale, size[1] * a.downscale):
+            print(f"warning: the sensor mode {sensor[0]}x{sensor[1]} is not {a.downscale} x the calibration "
+                  f"{size[0]}x{size[1]}; the live app rejects the calibration", file=sys.stderr)
+        live = {"camera.model": "b0429", "camera.width": sensor[0], "camera.height": sensor[1],
+                "camera.downscale": a.downscale, "camera.fps": a.fps, "camera.exposure_ms": 0.0,
+                "camera.gain_db": 0.0, "camera.max_exposure_ms": a.max_exposure_ms, "camera.brightness_target": 100.0}
+        if circle is not None:
+            c, r = circle
+            live["camera.metering_circle"] = [round(float(c[0]), 2), round(float(c[1]), 2),
+                                              round(float(r) * a.metering_fraction, 1)]
+    mavlink = capture["mavlink"]
+    if mavlink is not None:
+        live["imu.type"] = "imu_mavlink"
+        for key in ("udp", "port", "baudrate", "freq_hz"):
+            if key in mavlink:
+                live["imu." + key] = mavlink[key]
+    else:
+        live["imu.type"] = "mpu_i2c"
+        i2c = a.i2c_device or capture["i2c_device"]
+        if i2c:
+            live["camera.i2c_device"] = i2c
+        live["camera.imu_rate"] = capture["imu_rate"]
     for key, value in live.items():
         cfg[key] = value
     a.config_out.write_text(json.dumps(base, indent=4) + "\n")
@@ -553,7 +659,7 @@ def main():
         print("  " + line)
     print("  kept in pixels: optical_flow_detection_grid_size, optical_flow_max_recovered_dist2, vio_obs_std_dev, "
           "vio_obs_huber_thresh, vio_mono_init_pixel_sigma (cell size and pixel noise, as openvio)")
-    print("  live options: " + ", ".join(f"{k[7:]}={v}" for k, v in live.items()))
+    print("  live options: " + ", ".join(f"{k}={v}" for k, v in live.items()))
 
 
 if __name__ == "__main__":
