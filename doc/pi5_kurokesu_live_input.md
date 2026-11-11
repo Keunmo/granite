@@ -405,7 +405,7 @@ granite_vio --live --use-imu 1 --cam-calib calib.json --config-path config.json
 | `pose_covariance`, `velocity_covariance` | 모든 원소가 NaN |
 | `reset_counter` | 9.4절 |
 | `estimator_type` | `MAV_ESTIMATOR_TYPE_VIO` (3) |
-| `quality` | 정상이면 0(unknown). mono VIO의 health 검사가 실패한 상태이면 −1(failed) |
+| `quality` | 0(unknown). live 설정의 `inertial` 초기화에서는 항상 0입니다. 아래의 주의를 보십시오 |
 
 ArduPilot은 다음과 같이 처리합니다.
 
@@ -413,6 +413,13 @@ ArduPilot은 다음과 같이 처리합니다.
 - `pose_covariance[0]`이 NaN이면 위치 오차와 각도 오차로 `VISO_POS_M_NSE`와 `VISO_YAW_M_NSE`를 씁니다.
 - 속도에 `q`를 곱해 body FRD에서 LOCAL_FRD로 회전합니다.
 - `quality`가 `VISO_QUAL_MIN`(기본 0)보다 작으면 쓰지 않습니다. 그래서 기본 설정에서 −1인 상태는 쓰지 않습니다.
+
+> **주의:** live 설정(`vio_mono_init_method: inertial`)의 granite는 실패해도 `quality` −1을 보내지 않습니다.
+> - `sendOdometry()`는 `VioStateData::healthy`가 false일 때 −1을 보냅니다.
+> - 이 값은 `vo_alignment` 초기화의 health 검사(`MonoVioEstimator::run()`)만 바꿉니다.
+> - `inertial` 초기화(`runInertial()`)에는 health 검사가 없습니다. 그래서 `healthy`는 기본값 true로 남습니다.
+> - FC는 granite의 실패를 `quality`로 알 수 없습니다. FC가 실패를 아는 경우는 ODOMETRY 송신이 멈출 때뿐입니다. 예를 들어 프로세스가 끝나거나 상태에 NaN이 생기면 송신이 멈춥니다(9.1절).
+> - 발산해도 상태 값이 유한하면 granite는 그 상태를 계속 보냅니다.
 
 ### 9.3 좌표 변환
 
