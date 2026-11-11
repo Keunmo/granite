@@ -6,3 +6,4 @@ scripts/eval/eval_*
 scripts/eval_full/eval_*
 *marg_data/
 *.pyc
+tools/vio_viewer/dist/

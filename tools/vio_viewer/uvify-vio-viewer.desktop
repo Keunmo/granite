@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=UVIFY VIO Viewer
+Comment=Viewer of the visualization messages of the Granite VIO (UDP)
+Exec=uvify-vio-viewer
+Icon=uvify-vio-viewer
+Terminal=false
+Categories=Science;
