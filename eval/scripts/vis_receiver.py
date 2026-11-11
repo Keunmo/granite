@@ -21,7 +21,8 @@ import time
 FIELDS = {1: "version", 2: "seq", 3: "t_ns", 4: "map_idx", 5: "pose", 6: "velocity", 7: "bias_gyro",
           8: "bias_accel", 9: "healthy", 10: "keyframe", 11: "window_states", 12: "window_frames", 13: "points",
           16: "image", 17: "image_width", 18: "image_height", 19: "skipped", 21: "point_ids", 22: "keypoints",
-          23: "keypoint_ids", 24: "image_codec", 25: "image_keyframe", 29: "image_seq"}
+          23: "keypoint_ids", 24: "image_codec", 25: "image_keyframe", 29: "image_seq", 40: "fragment_seq",
+          41: "fragment_index", 42: "fragment_count", 43: "fragment_data"}
 FLOAT_FIELDS = {"pose", "velocity", "bias_gyro", "bias_accel", "window_states", "window_frames", "points"}
 DELTA_FIELDS = {"point_ids", "keypoint_ids"}
 
@@ -40,8 +41,8 @@ def varint(buf, i):
 def parse(buf):
     """GraniteVis bytes -> dict (proto3 defaults for the absent fields)."""
     msg = {name: 0 for name in FIELDS.values()}
-    msg.update({name: [] for name in FLOAT_FIELDS | DELTA_FIELDS}, keypoints=[], image=b"", healthy=False,
-               keyframe=False)
+    msg.update({name: [] for name in FLOAT_FIELDS | DELTA_FIELDS}, keypoints=[], image=b"", fragment_data=b"",
+               healthy=False, keyframe=False)
     i = 0
     while i < len(buf):
         key, i = varint(buf, i)
@@ -76,6 +77,39 @@ def parse(buf):
         else:
             msg[name] = value
     return msg
+
+
+class Joiner:
+    """Joins the fragments of the large messages (fragment_seq != 0); keeps at most `keep` messages."""
+
+    def __init__(self, keep=4):
+        self.pending = collections.OrderedDict()
+        self.keep = keep
+
+    def add(self, msg):
+        """A parsed datagram -> the bytes of a complete message, or None."""
+        seq, count = msg["fragment_seq"], msg["fragment_count"]
+        parts = self.pending.setdefault((seq, count), {})
+        parts[msg["fragment_index"]] = msg["fragment_data"]
+        while len(self.pending) > self.keep:
+            self.pending.popitem(last=False)
+        if len(parts) < count:
+            return None
+        del self.pending[(seq, count)]
+        return b"".join(parts[i] for i in range(count))
+
+
+def messages(datagrams):
+    """Datagrams -> parsed messages, with the fragments joined."""
+    joiner = Joiner()
+    for buf in datagrams:
+        msg = parse(buf)
+        if msg["fragment_seq"]:
+            joined = joiner.add(msg)
+            if joined is None:
+                continue
+            msg = parse(joined)
+        yield msg
 
 
 class View:
@@ -153,19 +187,25 @@ def main():
     last_seq, last_print = None, time.monotonic()
     msg = detail = None
     landmarks = 0
+    joiner = Joiner()
     while True:
         try:
             buf = sock.recv(65535)
         except socket.timeout:
             buf = None
         if buf:
+            window["bytes"] += len(buf) + 28
             msg = parse(buf)
+            if msg["fragment_seq"]:
+                joined = joiner.add(msg)
+                if joined is None:
+                    continue
+                msg = parse(joined)
             if msg["image"]:
                 detail = msg
             if msg["points"]:
                 landmarks = len(msg["points"]) // 3
             window["messages"] += 1
-            window["bytes"] += len(buf)
             window["images"] += bool(msg["image"])
             if last_seq is not None and msg["seq"] > last_seq + 1:
                 window["lost"] += msg["seq"] - last_seq - 1
