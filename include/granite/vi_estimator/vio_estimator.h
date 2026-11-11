@@ -73,6 +73,9 @@ struct VioStateData {
   // Mono VIO: false after the health monitor flagged the metric estimator
   // that produced this state (see MonoVioEstimator).
   bool healthy = true;
+  // Mono VIO: the index of the metric estimator that produced this state. A
+  // re-initialization starts the next one with a new estimate.
+  size_t metric_run = 0;
 
   // How much the optimization of this frame moved the previously published
   // state: rotation [rad] and translation [m].

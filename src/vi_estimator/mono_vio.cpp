@@ -106,6 +106,7 @@ struct MetricRun {
   tbb::concurrent_bounded_queue<VioStateData::Ptr> states;
   std::thread publisher;
   Sophus::SE3d T_out_w;
+  size_t index = 0;
   int64_t init_t_ns = 0;
   // Publish no state after this time (set when a successor takes over).
   std::atomic<int64_t> publish_until_ns{std::numeric_limits<int64_t>::max()};
@@ -198,6 +199,7 @@ void MonoVioEstimator::run(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba)
         run->unhealthy = true;
       }
       data->healthy = !run->unhealthy;
+      data->metric_run = run->index;
       if (t > run->publish_until_ns) continue;
       if (!run->T_out_w.matrix().isIdentity(0)) {
         data->state.T_w_i = run->T_out_w * data->state.T_w_i;
@@ -326,6 +328,7 @@ void MonoVioEstimator::run(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba)
       next->estimator->initializeFromMonoMap(*visual, *alignment, frames, history, ba);
       next->init_t_ns = frames.back().t_ns;
       if (metric) {
+        next->index = metric->index + 1;
         // Hand over at the newest frame. Wait until the current estimator has
         // published it, then express the successor in the output world: keep
         // the published position and heading (gravity fixes roll and pitch).

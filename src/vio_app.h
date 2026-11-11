@@ -1000,6 +1000,7 @@ class VioDataset {
         vio_ba[data->map_idx].emplace_back(ba);
         vio_t_ns[data->map_idx].emplace_back(data->state.t_ns);
         writeState(*data);
+        sendOdometry(*data);
         scale_variance.emplace_back(data->scale_variance);
         drift_variance.emplace_back(data->drift_variance);
 
@@ -2213,6 +2214,9 @@ class VioDataset {
               << (first_state_t_ns && first_image ? (first_state_t_ns - first_image) * 1e-9 : -1.0)
               << " states=" << num_states.load()
               << " metric_initialized=" << metricInitialized();
+    if (send_odometry)
+      std::cout << " odometry_sent=" << device->odometry_sent.load()
+                << " odometry_errors=" << device->odometry_errors.load();
     if (recorder)
       std::cout << " recorded_images=" << recorder->written_images.load()
                 << " record_drops=" << device->record_dropped_frames.load()
@@ -2237,6 +2241,11 @@ class VioDataset {
   double capture_seconds = 0, brightness_sum = 0;
   size_t brightness_count = 0;
   Clock::time_point capture_start;
+  // imu_send_odometry: the estimate of the last sent state (map and metric
+  // estimator of mono VIO). A new estimate increments the reset counter.
+  bool send_odometry = false, odometry_started = false;
+  size_t odometry_map_idx = 0, odometry_metric_run = 0;
+  uint8_t odometry_reset_counter = 0;
 
  public:
   // Exit status of a live run: 1 when the device failed or delivered no data.
@@ -2250,6 +2259,11 @@ class VioDataset {
     device = std::make_unique<granite::PiCameraImuDevice>(run_opt.pi);
     device->start();
     const auto& o = run_opt.pi;
+    // VO has no gravity-aligned metric world for the FC.
+    send_odometry = o.imu_send_odometry && use_imu;
+    if (o.imu_send_odometry && !use_imu)
+      std::cerr << "send_odometry needs VIO (--use-imu 1); not sending ODOMETRY"
+                << std::endl;
     std::cout << "mode=" << (use_imu ? "mono VIO" : "mono VO")
               << " receiver=" << device->receiver() << " camera=" << o.model
               << " binning=" << device->sensorBinning()
@@ -2271,7 +2285,7 @@ class VioDataset {
                                          : o.imu_port)
                               : "mpu_i2c " + o.i2c_device)
               << " queue_limit=" << run_opt.queue_limit << " gui=" << show_gui
-              << std::endl;
+              << " odometry=" << send_odometry << std::endl;
     if (std::abs(device->frameRate() - o.fps) > 0.5)
       std::cerr << "The sensor mode limits " << o.fps << " fps to " << device->frameRate()
                 << " fps" << std::endl;
@@ -2342,6 +2356,19 @@ class VioDataset {
     }));
   }
 
+  // Sends each state to the FC (imu_send_odometry). The estimator publishes
+  // states only after its initialization.
+  void sendOdometry(const granite::VioStateData& r) {
+    if (!send_odometry) return;
+    if (odometry_started && (r.map_idx != odometry_map_idx ||
+                             r.metric_run != odometry_metric_run))
+      ++odometry_reset_counter;
+    odometry_started = true;
+    odometry_map_idx = r.map_idx;
+    odometry_metric_run = r.metric_run;
+    device->sendOdometry(r.state, odometry_reset_counter, r.healthy ? 0 : -1);
+  }
+
   void stopLive() {
     capture_seconds = std::chrono::duration<double>(Clock::now() - capture_start).count();
     device->stop(false);
@@ -2369,6 +2396,7 @@ class VioDataset {
 #else
   void startLiveDevice() {}
   void liveForwardLoop() {}
+  void sendOdometry(const granite::VioStateData&) {}
   void stopLive() {}
 
  public:

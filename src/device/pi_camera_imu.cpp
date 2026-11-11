@@ -21,6 +21,7 @@
 #include <sys/socket.h>
 #include <termios.h>
 #include <unistd.h>
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -28,6 +29,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 
 namespace granite {
 
@@ -305,6 +307,9 @@ PiCameraImuDevice::PiCameraImuDevice(const PiCameraImuOptions& requested)
   if (options.imu_type != "imu_mavlink" && options.imu_type != "mpu_i2c")
     throw std::invalid_argument("imu type must be imu_mavlink or mpu_i2c: " +
                                 options.imu_type);
+  if (options.imu_send_odometry && !options.mavlink())
+    throw std::invalid_argument(
+        "send_odometry needs imu type imu_mavlink, got " + options.imu_type);
   if (options.mavlink()) {
     if (options.imu_freq_hz < 0)
       throw std::invalid_argument(
@@ -1420,7 +1425,6 @@ void PiCameraImuDevice::mavlinkLoop() {
     FcClockMapper clock_mapper;
     // System and component id of the autopilot, from its first HEARTBEAT.
     std::optional<std::pair<uint8_t, uint8_t>> fc_address;
-    std::optional<sockaddr_in> peer;
     const int rate = options.imu_freq_hz;
     bool interval_settled = rate == 0;
     // Whether the current request went out: an ACK before that answers
@@ -1443,16 +1447,10 @@ void PiCameraImuDevice::mavlinkLoop() {
     const auto send = [&](const mavlink_message_t& message) {
       uint8_t bytes[MAVLINK_MAX_PACKET_LEN];
       const uint16_t size = mavlink_msg_to_send_buffer(bytes, &message);
-      // A lost request is sent again until the FC answers.
-      if (!mavlink_udp) {
-        if (write(mavlink_fd, bytes, size) < 0)
-          std::cerr << "IMU: write failed" << std::endl;
-        return;
-      }
-      // UDP: nothing received yet, so no one to answer.
-      if (!peer) return;
-      sendto(mavlink_fd, bytes, size, 0,
-             reinterpret_cast<const sockaddr*>(&*peer), sizeof(*peer));
+      // A lost request is sent again until the FC answers. UDP: nothing
+      // received yet, so no one to answer.
+      if (writeMavlink(bytes, size) < 0 && !mavlink_udp)
+        std::cerr << "IMU: write failed" << std::endl;
     };
     const auto handle = [&](const mavlink_message_t& message, int64_t rx_ns) {
       switch (message.msgid) {
@@ -1550,7 +1548,10 @@ void PiCameraImuDevice::mavlinkLoop() {
           size = recvfrom(mavlink_fd, datagram.data(), datagram.size(),
                           MSG_DONTWAIT, reinterpret_cast<sockaddr*>(&from),
                           &from_size);
-          if (size > 0) peer = from;
+          if (size > 0) {
+            std::lock_guard<std::mutex> lock(mavlink_mutex);
+            mavlink_peer = from;
+          }
         } else {
           pollfd more{mavlink_fd, POLLIN, 0};
           if (poll(&more, 1, 0) <= 0) break;
@@ -1580,6 +1581,8 @@ void PiCameraImuDevice::mavlinkLoop() {
       if (fc_address && !interval_settled &&
           rx_ns - last_request_ns >= MAVLINK_REQUEST_RETRY_NS) {
         mavlink_message_t message;
+        // sendOdometry() packs on the same channel from the state thread.
+        std::lock_guard<std::mutex> lock(mavlink_mutex);
         // param7 = 0: the response target is the flight stack default.
         mavlink_msg_command_long_pack_chan(
             MAVLINK_SYSTEM_ID, MAVLINK_COMPONENT_ID, MAVLINK_COMM_0, &message,
@@ -1605,6 +1608,88 @@ void PiCameraImuDevice::mavlinkLoop() {
   }
 }
 
+ssize_t PiCameraImuDevice::writeMavlink(const uint8_t* bytes, size_t size) {
+  if (!mavlink_udp) return write(mavlink_fd, bytes, size);
+  if (!mavlink_peer) return 0;
+  return sendto(mavlink_fd, bytes, size, 0,
+                reinterpret_cast<const sockaddr*>(&*mavlink_peer),
+                sizeof(*mavlink_peer));
+}
+
+void PiCameraImuDevice::sendOdometry(const PoseVelBiasState& state,
+                                     uint8_t reset_counter, int8_t quality) {
+  if (!options.imu_send_odometry) return;
+  if (!state.T_w_i.matrix().allFinite() || !state.vel_w_i.allFinite()) return;
+  // The VIO world is gravity aligned with z up (constants::g); LOCAL_FRD has
+  // z down: a rotation of 180 deg about x. The IMU frame i is the FC body
+  // frame (FRD), because mavlinkLoop() keeps the HIGHRES_IMU axes.
+  const Eigen::Matrix3d R_frd_w = Eigen::Vector3d(1, -1, -1).asDiagonal();
+  const Eigen::Matrix3d R_frd_body = R_frd_w * state.T_w_i.so3().matrix();
+  const Eigen::Vector3d position = R_frd_w * state.T_w_i.translation();
+  // ArduPilot rotates the velocity with q, so it is in the body frame.
+  const Eigen::Vector3d velocity =
+      R_frd_body.transpose() * (R_frd_w * state.vel_w_i);
+  const Eigen::Quaterniond q(R_frd_body);
+  const float nan = std::numeric_limits<float>::quiet_NaN();
+
+  mavlink_odometry_t odometry{};
+  odometry.time_usec = static_cast<uint64_t>(state.t_ns / 1000);
+  odometry.frame_id = MAV_FRAME_LOCAL_FRD;
+  odometry.child_frame_id = MAV_FRAME_BODY_FRD;
+  odometry.x = static_cast<float>(position.x());
+  odometry.y = static_cast<float>(position.y());
+  odometry.z = static_cast<float>(position.z());
+  odometry.q[0] = static_cast<float>(q.w());
+  odometry.q[1] = static_cast<float>(q.x());
+  odometry.q[2] = static_cast<float>(q.y());
+  odometry.q[3] = static_cast<float>(q.z());
+  odometry.vx = static_cast<float>(velocity.x());
+  odometry.vy = static_cast<float>(velocity.y());
+  odometry.vz = static_cast<float>(velocity.z());
+  // ArduPilot does not use the angular speed. A NaN covariance makes it use
+  // VISO_POS_M_NSE and VISO_YAW_M_NSE.
+  odometry.rollspeed = nan;
+  odometry.pitchspeed = nan;
+  odometry.yawspeed = nan;
+  std::fill(std::begin(odometry.pose_covariance),
+            std::end(odometry.pose_covariance), nan);
+  std::fill(std::begin(odometry.velocity_covariance),
+            std::end(odometry.velocity_covariance), nan);
+  odometry.reset_counter = reset_counter;
+  odometry.estimator_type = MAV_ESTIMATOR_TYPE_VIO;
+  odometry.quality = quality;
+
+  std::lock_guard<std::mutex> lock(mavlink_mutex);
+  if (mavlink_fd < 0) return;
+  if (state.t_ns <= last_odometry_t_ns) {
+    std::cerr << "ODOMETRY: state time " << state.t_ns
+              << " ns is not after the last sent " << last_odometry_t_ns
+              << " ns; not sent" << std::endl;
+    return;
+  }
+  mavlink_message_t message;
+  mavlink_msg_odometry_encode_chan(MAVLINK_SYSTEM_ID, MAVLINK_COMPONENT_ID,
+                                   MAVLINK_COMM_0, &message, &odometry);
+  uint8_t bytes[MAVLINK_MAX_PACKET_LEN];
+  const uint16_t size = mavlink_msg_to_send_buffer(bytes, &message);
+  const ssize_t written = writeMavlink(bytes, size);
+  if (written < 0) {
+    const int error = errno;
+    ++odometry_errors;
+    // One message per failure period; the VIO continues.
+    if (!odometry_failing)
+      std::cerr << "ODOMETRY: send failed: " << std::strerror(error)
+                << std::endl;
+    odometry_failing = true;
+    return;
+  }
+  // UDP: no datagram from the router yet.
+  if (written == 0) return;
+  last_odometry_t_ns = state.t_ns;
+  odometry_failing = false;
+  ++odometry_sent;
+}
+
 void PiCameraImuDevice::stop(bool send_end_of_stream) {
   capturing = false;
   running = false;
@@ -1621,8 +1706,12 @@ void PiCameraImuDevice::stop(bool send_end_of_stream) {
   for (const int fd : dma_buffer_fds) close(fd);
   dma_buffer_fds.clear();
   if (mavlink_fd >= 0) {
+    std::lock_guard<std::mutex> lock(mavlink_mutex);
     close(mavlink_fd);
     mavlink_fd = -1;
+    mavlink_peer.reset();
+    last_odometry_t_ns = -1;
+    odometry_failing = false;
   }
   if (sensor_fd >= 0) {
     close(sensor_fd);

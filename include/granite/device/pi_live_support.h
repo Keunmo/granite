@@ -243,6 +243,9 @@ inline void addSensorOptions(CLI::App& app, PiCameraImuOptions& options, bool& r
   app.add_option(
       "--imu_freq_hz", options.imu_freq_hz,
       "imu_mavlink: requested HIGHRES_IMU rate [Hz] (0: the FC rate)");
+  app.add_option("--imu_send_odometry", options.imu_send_odometry,
+                 "imu_mavlink: send each VIO state to the FC as ODOMETRY on "
+                 "the same link");
   app.add_option("--i2c", options.i2c_device,
                  "mpu_i2c: IMU I2C adapter device");
   app.add_option("--imu-address", options.imu_address,
@@ -313,6 +316,7 @@ inline void loadCameraConfig(const std::string& path, const CLI::App& app,
   load("imu.port", "--imu_port", options.imu_port);
   load("imu.baudrate", "--imu_baudrate", options.imu_baudrate);
   load("imu.freq_hz", "--imu_freq_hz", options.imu_freq_hz);
+  load("imu.send_odometry", "--imu_send_odometry", options.imu_send_odometry);
   load("camera.i2c_device", "--i2c", options.i2c_device);
   load("camera.imu_rate", "--imu-rate", options.imu_rate);
   bool resize_half = false;

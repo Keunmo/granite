@@ -5,6 +5,7 @@
 #include <granite/optical_flow/optical_flow.h>
 #include <granite/utils/imu_types.h>
 #include <linux/videodev2.h>
+#include <netinet/in.h>
 #include <tbb/concurrent_queue.h>
 #include <array>
 #include <atomic>
@@ -94,6 +95,9 @@ struct PiCameraImuOptions {
   // HIGHRES_IMU rate requested with MAV_CMD_SET_MESSAGE_INTERVAL. 0 keeps the
   // FC rate.
   int imu_freq_hz = 400;
+  // Send each VIO state to the FC as ODOMETRY on the same link (imu_mavlink
+  // only).
+  bool imu_send_odometry = false;
   std::string i2c_device = "/dev/i2c-15";
   int imu_address = 0x68;
   double imu_rate = 200;
@@ -150,6 +154,11 @@ class PiCameraImuDevice {
   // The sensor halves the image (sensor_binning) in place of the host.
   bool sensorBinning() const { return binning; }
   std::string errorMessage() const;
+  // imu_send_odometry: sends one VIO state as ODOMETRY to the FC. Safe to call
+  // from another thread than the IMU thread; does nothing before start() and
+  // after stop(). A failed send is counted and logged, not thrown.
+  void sendOdometry(const PoseVelBiasState& state, uint8_t reset_counter,
+                    int8_t quality);
 
   tbb::concurrent_bounded_queue<OpticalFlowInput::Ptr>* image_data_queue = nullptr;
   tbb::concurrent_bounded_queue<ImuData::Ptr>* imu_data_queue = nullptr;
@@ -169,6 +178,7 @@ class PiCameraImuDevice {
   std::atomic<int> exposure_lines{0}, analogue_gain{0};
   std::atomic<double> mean_brightness{0}, imu_period_ns{0};
   std::atomic<bool> failed{false};
+  std::atomic<uint64_t> odometry_sent{0}, odometry_errors{0};
 
  private:
   void setupCamera();
@@ -179,6 +189,10 @@ class PiCameraImuDevice {
   void xeyeCameraLoop();
   void imuLoop();
   void mavlinkLoop();
+  // Writes one packed MAVLink message. The caller holds mavlink_mutex.
+  // Returns -1 on an error (errno set), 0 when UDP has no peer yet, else the
+  // bytes written.
+  ssize_t writeMavlink(const uint8_t* bytes, size_t size);
   bool processXeyeFrame(const v4l2_buffer& buffer, cv::Mat* gray);
   void runXeyeAutoExposure(const cv::Mat& gray);
   void setXeyeExposure(double exposure_ms);
@@ -195,6 +209,13 @@ class PiCameraImuDevice {
   PiCameraImuOptions options;
   int video_fd = -1, sensor_fd = -1, i2c_fd = -1, mavlink_fd = -1;
   bool mavlink_udp = false;
+  // Guards the MAVLink output: mavlink_fd for writes and close, the peer, the
+  // sequence numbers of MAVLINK_COMM_0, and the ODOMETRY state.
+  std::mutex mavlink_mutex;
+  // UDP: the sender of the last datagram (the router).
+  std::optional<sockaddr_in> mavlink_peer;
+  int64_t last_odometry_t_ns = -1;
+  bool odometry_failing = false;
   std::vector<std::pair<void*, size_t>> buffers;
   // kurokesu_ar0234_pi and b0429_pi: V4L2_MEMORY_DMABUF with buffers from a
   // dma-heap, which the CPU reads through its cache, or V4L2_MEMORY_MMAP when

@@ -289,6 +289,7 @@ Granite config 파일에서는 `camera.<키>`와 `imu.<키>`로 씁니다. 명�
 | `port` | - | 비움 | serial device. `udp`와 같이 쓰면 오류 |
 | `baudrate` | baud | 921600 | 57600, 115200, 230400, 460800, 500000, 921600, 1000000, 1500000 |
 | `freq_hz` | Hz | 400 | 0 이상. 0이면 FC의 rate를 유지 |
+| `send_odometry` | - | false | Granite 옵션. VIO 상태를 FC에 `ODOMETRY`로 보냄 (9절). `imu_mavlink`이 아니면 오류 |
 
 ## 7. capture_to_granite.py 변환
 
@@ -359,7 +360,105 @@ granite_vio --live --use-imu 1 --cam-calib calib.json --config-path config.json
 
 `scripts/pi4_live_mono_vio.sh`와 `data/uvify_config_mono_vio.json`은 이전 경로를 선택합니다. 다른 B0429 설정 파일에는 `camera.model`과 `imu.type`을 추가하거나 명령줄 옵션을 주십시오.
 
-## 9. 검증 상태 요약
+## 9. ODOMETRY 출력
+
+`imu.send_odometry: true`(명령줄 `--imu_send_odometry 1`)이면 live 앱이 VIO 상태마다 MAVLink `ODOMETRY`(#331) 메시지 하나를 FC에 보냅니다. 기본값은 false입니다. 메시지 내용은 ArduPilot 4.7.2(UVify V6X)의 `GCS_MAVLINK::handle_odometry`에 맞춥니다. [코드 확인]
+
+### 9.1 송신 경로
+
+| 부분 | 코드 |
+|---|---|
+| 상태 하나를 보냄 | `src/vio_app.h` (`VioDataset::sendOdometry`). state thread가 `writeState()` 다음에 호출합니다 |
+| 메시지를 만들고 씀 | `src/device/pi_camera_imu.cpp` (`PiCameraImuDevice::sendOdometry`, `writeMavlink`) |
+
+- `granite_vio --live`와 `granite_pi_cam_imu_vio`(VIO)가 같은 코드를 씁니다.
+- IMU 입력과 같은 MAVLink 연결을 씁니다. 새 socket을 열지 않습니다.
+  - UDP: router가 보낸 마지막 datagram의 송신 주소로 보냅니다. router가 이 메시지를 FC의 UART로 전달합니다. router의 datagram을 받기 전에는 보내지 않습니다.
+  - serial: IMU를 읽는 같은 port에 씁니다.
+- system id와 component id는 `HIGHRES_IMU` rate 요청과 같습니다: 1, `MAV_COMP_ID_ONBOARD_COMPUTER`(191).
+- IMU thread와 state thread는 mutex 하나(`mavlink_mutex`)를 같이 씁니다. 이 mutex는 fd 쓰기와 close, 송신 주소, `MAVLINK_COMM_0`의 sequence 번호를 보호합니다.
+- 송신이 실패하면 경고를 냅니다. 실패가 이어지는 동안에는 경고를 한 번만 냅니다. VIO는 멈추지 않습니다.
+- 종료할 때 `LIVE` 줄에 `odometry_sent`(보낸 메시지 수)와 `odometry_errors`(실패 수)를 씁니다.
+
+보내지 않는 경우:
+
+| 조건 | 동작 |
+|---|---|
+| `imu.type`이 `imu_mavlink`이 아님 | 시작할 때 오류 |
+| `--use-imu 0` (VO) | 경고 후 보내지 않음. VO의 world는 중력 정렬이 아니고 scale이 없습니다 |
+| 초기화 전 | 보내지 않음. estimator는 metric 초기화 뒤에만 상태를 냅니다 |
+| 상태 시각이 이전에 보낸 시각보다 크지 않음 | 경고 후 그 상태를 보내지 않음 |
+| 위치, 자세, 속도에 NaN 또는 Inf가 있음 | 보내지 않음 |
+| `stop()` 뒤 | 보내지 않음. 종료할 때 estimator가 남은 상태를 내도 보내지 않습니다 |
+
+### 9.2 필드
+
+| 필드 | 값 |
+|---|---|
+| `time_usec` | 상태 시각 [ns] / 1000. 이미지 시각과 같은 CLOCK_MONOTONIC 기준입니다(4절) |
+| `frame_id` | `MAV_FRAME_LOCAL_FRD` (20) |
+| `child_frame_id` | `MAV_FRAME_BODY_FRD` (12) |
+| `x`, `y`, `z` [m] | LOCAL_FRD의 위치 (9.3절) |
+| `q` | LOCAL_FRD에 대한 body FRD의 자세. 순서는 w, x, y, z입니다 |
+| `vx`, `vy`, `vz` [m/s] | body FRD의 속도 |
+| `rollspeed`, `pitchspeed`, `yawspeed` | NaN. ArduPilot은 이 값을 쓰지 않습니다 |
+| `pose_covariance`, `velocity_covariance` | 모든 원소가 NaN |
+| `reset_counter` | 9.4절 |
+| `estimator_type` | `MAV_ESTIMATOR_TYPE_VIO` (3) |
+| `quality` | 정상이면 0(unknown). mono VIO의 health 검사가 실패한 상태이면 −1(failed) |
+
+ArduPilot은 다음과 같이 처리합니다.
+
+- `frame_id`가 LOCAL_FRD가 아니거나 `child_frame_id`가 BODY_FRD가 아니면 메시지를 버립니다.
+- `pose_covariance[0]`이 NaN이면 위치 오차와 각도 오차로 `VISO_POS_M_NSE`와 `VISO_YAW_M_NSE`를 씁니다.
+- 속도에 `q`를 곱해 body FRD에서 LOCAL_FRD로 회전합니다.
+- `quality`가 `VISO_QUAL_MIN`(기본 0)보다 작으면 쓰지 않습니다. 그래서 기본 설정에서 −1인 상태는 쓰지 않습니다.
+
+### 9.3 좌표 변환
+
+기호는 다음과 같습니다.
+
+- w: VIO world. 중력 정렬이고 z축이 위쪽입니다. 중력 벡터는 (0, 0, −9.81) m/s²입니다(`constants::g`, `include/granite/utils/imu_types.h`). 초기화가 정렬한 중력을 이 벡터로 회전합니다(`src/vi_estimator/keypoint_vio.cpp`).
+- i: VIO의 IMU frame. `mavlinkLoop()`이 `HIGHRES_IMU`의 x, y, z 값을 축을 바꾸지 않고 넘깁니다. 그래서 i는 FC body frame(FRD)입니다.
+- frd: LOCAL_FRD. z축이 아래쪽입니다.
+- T_w_i: VIO 상태의 자세 R_w_i와 위치 p_w [m]. v_w [m/s]: VIO 상태의 world 속도.
+
+R_frd_w = diag(1, −1, −1)입니다. 이것은 x축에 대한 180° 회전입니다. world의 x축 방향은 그대로이고, yaw 원점은 VIO 초기화가 정합니다. body = i이므로 R_i_body = I입니다.
+
+- 위치 [m]: p = R_frd_w · p_w
+- 자세: R_frd_body = R_frd_w · R_w_i
+- 속도 [m/s]: v_body = R_frd_bodyᵀ · (R_frd_w · v_w). 이 값은 body frame의 속도 R_w_iᵀ · v_w와 같습니다.
+
+### 9.4 reset_counter
+
+시작 값은 0입니다. 연속한 두 상태의 estimate가 다르면 1 올립니다. 255 다음은 0입니다.
+
+| 조건 | 코드 |
+|---|---|
+| mono VIO가 새 metric estimator로 바뀜 (`VioStateData::metric_run`) | `src/vi_estimator/mono_vio.cpp` (`MetricRun::index`) |
+| `map_idx`가 바뀜 | `src/vio_app.h` (`sendOdometry`) |
+
+- mono VIO(`vio_mono_init_method: vo_alignment`)는 metric estimator의 health 검사가 실패하면 새 estimator를 초기화합니다(`vio_mono_reinit_max` > 0일 때, 기본값 0). 새 estimator는 이전 estimator가 낸 위치와 yaw에서 시작합니다. 그래서 원점은 바뀌지 않습니다. 그러나 속도, roll, pitch, scale, bias는 새로 추정한 값입니다. MAVLink 정의는 position, velocity, attitude 중 하나가 reset되어도 counter를 올리라고 합니다. 그래서 이때 1 올립니다.
+- live VIO의 metric estimator(`KeypointVioEstimator`)는 `map_idx`가 항상 0입니다. `map_idx`가 바뀌는 estimator는 VO(`KeypointVoEstimator`)이고, VO는 ODOMETRY를 보내지 않습니다. `map_idx` 검사는 다른 estimator를 위해 남깁니다.
+- `vio_mono_init_method: inertial`은 estimator를 다시 초기화하지 않습니다. counter는 0으로 유지됩니다.
+
+### 9.5 시각과 FC 설정
+
+`time_usec`는 측정 시각입니다(이미지 시각 + `camera_time_offset_ns`). 상태는 이 시각보다 VIO 처리 시간만큼 늦게 나갑니다. 이 지연은 `LIVE` 줄의 `latency_ms_p50`, `latency_ms_p95`입니다.
+
+ArduPilot은 `correct_offboard_timestamp_usec_to_ms()`로 `time_usec`를 FC 시각으로 바꿉니다. 이 함수는 jitter correction으로 두 시계의 차이를 추정합니다. 이 추정은 가장 빨리 도착한 메시지의 지연을 0으로 봅니다. 그러면 최소 VIO 처리 시간도 0으로 보입니다. 이 경우 `VISO_DELAY_MS`를 VIO 지연에 맞추어야 합니다. [미검증] ArduPilot 코드와 FC 동작으로 확인하지 않았습니다.
+
+FC 설정(ArduPilot 4.7.2)입니다. [미검증]
+
+| 파라미터 | 값 |
+|---|---|
+| `VISO_TYPE` | 1 (MAVLink) |
+| `VISO_QUAL_MIN` | 0 (기본). −1인 상태는 쓰지 않습니다 |
+| `VISO_POS_M_NSE`, `VISO_YAW_M_NSE` | covariance를 NaN으로 보내므로 이 값이 위치 오차와 yaw 오차입니다 |
+| `VISO_DELAY_MS` | 위의 시각 설명을 보십시오 |
+| `EK3_SRC1_POSXY`, `EK3_SRC1_VELXY`, `EK3_SRC1_YAW` 등 | ExternalNav (6) |
+
+## 10. 검증 상태 요약
 
 | 내용 | 상태 |
 |---|---|
@@ -377,3 +476,6 @@ granite_vio --live --use-imu 1 --cam-calib calib.json --config-path config.json
 | binning과 host 2x2 평균의 pixel 기하가 같다는 가정 | [미검증] 측정하지 않음 |
 | rp1-cfe 버퍼 시각의 의미 | [미검증] |
 | `capture_to_granite.py`의 키 매핑, crop·downscale 식, 이전 형식 호환 | [검증] 합성 capture와 기존 capture의 dry-run |
+| ODOMETRY 송신 코드 (9절) | [코드 확인] |
+| FC가 ODOMETRY를 받아 EKF에 쓰는지, 축 방향이 맞는지 | [미검증] |
+| ArduPilot의 시각 변환과 `VISO_DELAY_MS` | [미검증] |
