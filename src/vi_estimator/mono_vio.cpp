@@ -122,6 +122,56 @@ Sophus::SO3d yawOnly(const Eigen::Matrix3d& R) {
   const double yaw = std::atan2(R(1, 0) - R(0, 1), R(0, 0) + R(1, 1));
   return Sophus::SO3d::rotZ(yaw);
 }
+
+// Health of one metric estimator (vio_mono_health_*). Once a rule fails, the
+// estimator stays unhealthy.
+class HealthMonitor {
+ public:
+  HealthMonitor(const VioConfig& config, int64_t init_t_ns)
+      : settle_s(config.vio_mono_health_settle_s),
+        window_s(config.vio_mono_health_window_s),
+        rot_limit(config.vio_mono_health_rot_deg * M_PI / 180.0),
+        pos_limit(config.vio_mono_health_pos_m),
+        max_ba(config.vio_mono_health_max_accel_bias),
+        max_bg(config.vio_mono_health_max_gyro_bias),
+        init_t_ns(init_t_ns) {}
+
+  // Returns true when the estimator is unhealthy.
+  bool update(const VioStateData& data) {
+    const int64_t t = data.state.t_ns;
+    // The optimization of every frame moved the previously published state
+    // by a large rotation but by almost no translation in the metric states
+    // that never recovered (bad initialization before a near-stop); healthy
+    // states move both by a little.
+    if (std::isfinite(data.prev_correction_rot) && std::isfinite(data.prev_correction_pos)) {
+      recent.emplace_back(t, data.prev_correction_rot, data.prev_correction_pos);
+      while (!recent.empty() && std::get<0>(recent.front()) < t - int64_t(window_s * 1e9)) recent.pop_front();
+      if ((t - init_t_ns) * 1e-9 >= settle_s + window_s && recent.size() >= 10) {
+        double rot2 = 0, pos2 = 0;
+        for (const auto& r : recent) {
+          rot2 += std::get<1>(r) * std::get<1>(r);
+          pos2 += std::get<2>(r) * std::get<2>(r);
+        }
+        const double rot = std::sqrt(rot2 / recent.size()), pos = std::sqrt(pos2 / recent.size());
+        if (rot > rot_limit && pos < pos_limit) failed = true;
+      }
+    }
+    // Plausibility: the bias estimates of a diverged estimator grow far
+    // beyond any IMU bias (a Cam0 run reached |ba| = 6 m/s^2, |bg| = 0.13
+    // rad/s at a true 0.45 m/s^2, 0.02 rad/s).
+    if (!failed && (t - init_t_ns) * 1e-9 >= settle_s &&
+        (data.state.bias_accel.norm() > max_ba || data.state.bias_gyro.norm() > max_bg)) {
+      failed = true;
+    }
+    return failed;
+  }
+
+ private:
+  const double settle_s, window_s, rot_limit, pos_limit, max_ba, max_bg;
+  const int64_t init_t_ns;
+  std::deque<std::tuple<int64_t, double, double>> recent;
+  bool failed = false;
+};
 }  // namespace
 
 void MonoVioEstimator::run(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba) {
@@ -158,46 +208,15 @@ void MonoVioEstimator::run(const Eigen::Vector3d& bg, const Eigen::Vector3d& ba)
   // Successive successful alignments of the current bootstrap map that agree.
   std::vector<MonoVioAlignment> agreeing;
 
-  const double settle_s = configuration.vio_mono_health_settle_s;
-  const double window_s = configuration.vio_mono_health_window_s;
-  const double rot_limit = configuration.vio_mono_health_rot_deg * M_PI / 180.0;
-  const double pos_limit = configuration.vio_mono_health_pos_m;
-  const double max_ba = configuration.vio_mono_health_max_accel_bias;
-  const double max_bg = configuration.vio_mono_health_max_gyro_bias;
-  auto publish = [this, settle_s, window_s, rot_limit, pos_limit, max_ba, max_bg](MetricRun* run) {
-    std::deque<std::tuple<int64_t, double, double>> recent;
+  auto publish = [this](MetricRun* run) {
+    HealthMonitor health(configuration, run->init_t_ns);
     VioStateData::Ptr data;
     while (true) {
       run->states.pop(data);
       if (!data) break;
       const int64_t t = data->state.t_ns;
       run->last_seen_ns = t;
-      // Health: the optimization of every frame moved the previously
-      // published state by a large rotation but by almost no translation in
-      // the metric states that never recovered (bad initialization before a
-      // near-stop); healthy states move both by a little.
-      if (std::isfinite(data->prev_correction_rot) && std::isfinite(data->prev_correction_pos)) {
-        recent.emplace_back(t, data->prev_correction_rot, data->prev_correction_pos);
-        while (!recent.empty() && std::get<0>(recent.front()) < t - int64_t(window_s * 1e9)) recent.pop_front();
-        if ((t - run->init_t_ns) * 1e-9 >= settle_s + window_s && recent.size() >= 10) {
-          double rot2 = 0, pos2 = 0;
-          for (const auto& r : recent) {
-            rot2 += std::get<1>(r) * std::get<1>(r);
-            pos2 += std::get<2>(r) * std::get<2>(r);
-          }
-          const double rot = std::sqrt(rot2 / recent.size()), pos = std::sqrt(pos2 / recent.size());
-          if (rot > rot_limit && pos < pos_limit && !run->unhealthy) {
-            run->unhealthy = true;
-          }
-        }
-      }
-      // Plausibility: the bias estimates of a diverged estimator grow far
-      // beyond any IMU bias (a Cam0 run reached |ba| = 6 m/s^2, |bg| = 0.13
-      // rad/s at a true 0.45 m/s^2, 0.02 rad/s).
-      if (!run->unhealthy && (t - run->init_t_ns) * 1e-9 >= settle_s &&
-          (data->state.bias_accel.norm() > max_ba || data->state.bias_gyro.norm() > max_bg)) {
-        run->unhealthy = true;
-      }
+      if (health.update(*data)) run->unhealthy = true;
       data->healthy = !run->unhealthy;
       data->metric_run = run->index;
       if (t > run->publish_until_ns) continue;
@@ -385,7 +404,9 @@ void MonoVioEstimator::runInertial(const Eigen::Vector3d& bg, const Eigen::Vecto
   MonoInertialInitializer initializer(options, calibration, gravity);
   tbb::concurrent_bounded_queue<OpticalFlowResult::Ptr> metric_vision;
   tbb::concurrent_bounded_queue<ImuData::Ptr> metric_imu;
+  tbb::concurrent_bounded_queue<VioStateData::Ptr> metric_states;
   std::shared_ptr<KeypointVioEstimator> metric;
+  std::thread publisher;
   Eigen::aligned_deque<ImuData> samples;  // Raw samples (the metric VIO calibrates them itself)
   Eigen::aligned_map<int64_t, OpticalFlowResult::Ptr> history;
   ImuData::Ptr pending;
@@ -448,9 +469,19 @@ void MonoVioEstimator::runInertial(const Eigen::Vector3d& bg, const Eigen::Vecto
       metric = std::make_shared<KeypointVioEstimator>(gravity, calibration, configuration);
       metric->vision_data_queue = &metric_vision;
       metric->imu_data_queue = &metric_imu;
-      metric->out_state_queue = out_state_queue;
+      metric->out_state_queue = &metric_states;
       metric->out_vis_queue = out_vis_queue;
       metric->out_marg_queue = out_marg_queue;
+      publisher = std::thread([this, &metric_states, init_t_ns = result.t_ns] {
+        HealthMonitor health(configuration, init_t_ns);
+        VioStateData::Ptr data;
+        while (true) {
+          metric_states.pop(data);
+          if (data) data->healthy = !health.update(*data);
+          if (out_state_queue) out_state_queue->push(data);
+          if (!data) break;
+        }
+      });
       // IMU from the last sample at or before the start state, then the images
       // from the start state on (replayed from the history)
       size_t first = 0;
@@ -472,6 +503,7 @@ void MonoVioEstimator::runInertial(const Eigen::Vector3d& bg, const Eigen::Vecto
     metric_vision.push(nullptr);
     metric_imu.push(nullptr);
     metric->join();
+    publisher.join();
   } else {
     if (out_state_queue) out_state_queue->push(nullptr);
     if (out_vis_queue) out_vis_queue->push(nullptr);

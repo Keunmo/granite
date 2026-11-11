@@ -405,7 +405,7 @@ granite_vio --live --use-imu 1 --cam-calib calib.json --config-path config.json
 | `pose_covariance`, `velocity_covariance` | 모든 원소가 NaN |
 | `reset_counter` | 9.4절 |
 | `estimator_type` | `MAV_ESTIMATOR_TYPE_VIO` (3) |
-| `quality` | 0(unknown). live 설정의 `inertial` 초기화에서는 항상 0입니다. 아래의 주의를 보십시오 |
+| `quality` | 정상이면 0(unknown). health 검사가 실패하면 −1(failed). 아래의 health 검사를 보십시오 |
 
 ArduPilot은 다음과 같이 처리합니다.
 
@@ -414,12 +414,19 @@ ArduPilot은 다음과 같이 처리합니다.
 - 속도에 `q`를 곱해 body FRD에서 LOCAL_FRD로 회전합니다.
 - `quality`가 `VISO_QUAL_MIN`(기본 0)보다 작으면 쓰지 않습니다. 그래서 기본 설정에서 −1인 상태는 쓰지 않습니다.
 
-> **주의:** live 설정(`vio_mono_init_method: inertial`)의 granite는 실패해도 `quality` −1을 보내지 않습니다.
-> - `sendOdometry()`는 `VioStateData::healthy`가 false일 때 −1을 보냅니다.
-> - 이 값은 `vo_alignment` 초기화의 health 검사(`MonoVioEstimator::run()`)만 바꿉니다.
-> - `inertial` 초기화(`runInertial()`)에는 health 검사가 없습니다. 그래서 `healthy`는 기본값 true로 남습니다.
-> - FC는 granite의 실패를 `quality`로 알 수 없습니다. FC가 실패를 아는 경우는 ODOMETRY 송신이 멈출 때뿐입니다. 예를 들어 프로세스가 끝나거나 상태에 NaN이 생기면 송신이 멈춥니다(9.1절).
-> - 발산해도 상태 값이 유한하면 granite는 그 상태를 계속 보냅니다.
+**health 검사:** `sendOdometry()`는 `VioStateData::healthy`가 false이면 `quality` −1을 보냅니다. 두 초기화 방법(`vo_alignment`, `inertial`)은 같은 규칙(`HealthMonitor`, `src/vi_estimator/mono_vio.cpp`)으로 이 값을 정합니다.
+
+| 규칙 | 조건 | 설정 (기본값) |
+|---|---|---|
+| 회전 보정 | 초기화 뒤 settle + window가 지나면 검사합니다. 최근 window 동안 직전 출력 상태의 rms 보정이 회전으로 기준보다 크고, 이동으로 기준보다 작으면 실패입니다(나쁜 초기화 뒤 거의 정지) | `vio_mono_health_settle_s` (3 s), `vio_mono_health_window_s` (2 s), `vio_mono_health_rot_deg` (0.07°), `vio_mono_health_pos_m` (5 mm) |
+| bias 크기 | 초기화 뒤 settle이 지나면 검사합니다. bias 추정값이 기준보다 크면 실패입니다(발산) | `vio_mono_health_max_accel_bias` (2.0 m/s²), `vio_mono_health_max_gyro_bias` (0.1 rad/s) |
+
+- 한 번 실패하면 그 estimator가 끝날 때까지 −1입니다. live 설정의 `inertial` 초기화는 다시 초기화하지 않습니다(9.4절).
+- 검사는 상태 시각으로 합니다. 초기화 뒤 처음 3 s는 실패를 알리지 않습니다.
+- 확인한 결과 [데스크톱, 각 1회]:
+  - 오검출: Unreal Cam0, Cam3 전체(각 6008 상태)와 EuRoC MH_01-05에서 0회입니다.
+  - 발산 검출: 이동 시작으로 발산한 Unreal Cam3 실행에서 초기화 7.0 s 뒤에 실패로 바꿨습니다. 그때 위치는 출발점에서 117 m였고, 실행이 끝날 때 6.9 km였습니다.
+- 규칙은 Unreal 데이터에서 정했습니다. 실제 기체의 진동과 영상에서 오검출하는지는 확인하지 않았습니다 [미검증]. 오검출하면 비행 중에 FC가 VIO를 버립니다.
 
 ### 9.3 좌표 변환
 
