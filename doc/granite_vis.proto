@@ -1,0 +1,43 @@
+// SPDX-License-Identifier: MIT
+// Visualization message of the Granite VIO (send_vis_msg, src/utils/vis_publisher.cpp).
+//
+// Transport: one UDP datagram for each message, to vis_msg_ip:vis_msg_port. The payload is one serialized
+// GraniteVis (protobuf wire format; granite writes it without libprotobuf). A receiver parses it with any
+// protobuf library or with eval/scripts/vis_receiver.py.
+//
+// Frames: world = the VIO world (gravity aligned, z up, metric). The ODOMETRY message to the FC uses another
+// world (LOCAL_FRD, yaw 0 at the first state). Poses are [px, py, pz, qw, qx, qy, qz]: the IMU pose T_w_i, or the
+// camera pose for the keyframes of a VO map. Pixels are in the image of the camera (image_width x image_height).
+syntax = "proto3";
+
+package granite_vis;
+
+message GraniteVis {
+  uint32 version = 1;            // 1
+  uint64 seq = 2;                // message counter of the process; a gap is a message lost in the network
+  int64 t_ns = 3;                // state time [ns], the image time on the device clock
+  uint32 map_idx = 4;
+
+  repeated float pose = 5;       // current state: [px, py, pz, qw, qx, qy, qz]
+  repeated float velocity = 6;   // [m/s] in the world
+  repeated float bias_gyro = 7;  // [rad/s]
+  repeated float bias_accel = 8; // [m/s^2]
+  bool healthy = 9;              // false: the health check failed (ODOMETRY quality -1)
+  bool keyframe = 10;            // the estimator took this frame as a keyframe
+
+  repeated float window_states = 11;  // 7 floats for each state of the optimization window
+  repeated float window_frames = 12;  // 7 floats for each pose-only keyframe of the window
+
+  // The detail fields: only in the messages of the image (at most vis_msg_image_hz per second). The pixels are
+  // in this image.
+  repeated float points = 13;         // [x, y, z] for each landmark of the window [m]
+  repeated float projections = 14;    // [u, v, inverse distance 1/m] for each landmark seen in this image
+  repeated uint32 projection_ids = 20;  // landmark id of each projection
+  repeated float keypoints = 15;      // [u, v] for each tracked keypoint of this image
+  bytes image_jpeg = 16;              // gray JPEG of the camera image
+
+  uint32 image_width = 17;       // in every message
+  uint32 image_height = 18;
+
+  uint64 skipped = 19;           // states that the publisher did not send because a newer state came first (total)
+}

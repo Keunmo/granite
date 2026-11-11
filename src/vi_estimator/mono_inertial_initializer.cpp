@@ -270,6 +270,7 @@ void MonoInertialInitializer::addImu(const ImuData& sample) {
   const int64_t oldest = sample.t_ns - static_cast<int64_t>((bufferTime() + 0.10) * 1e9);
   while (!imu.empty() && imu.front().t_ns < oldest) imu.pop_front();
   startup_accel.emplace_back(sample.t_ns, sample.accel);
+  while (startup_accel.front().first < sample.t_ns - kStartupKeepNs) startup_accel.pop_front();
 }
 
 void MonoInertialInitializer::addFrame(const OpticalFlowResult& frame) {
@@ -296,6 +297,8 @@ void MonoInertialInitializer::addFrame(const OpticalFlowResult& frame) {
       ++matched;
     }
     if (matched >= 15) startup_motion.emplace_back(frame.t_ns, angle_sum / static_cast<double>(matched));
+    while (!startup_motion.empty() && startup_motion.front().first < frame.t_ns - kStartupKeepNs)
+      startup_motion.pop_front();
   }
   previous_rays.swap(rays);
 }

@@ -488,7 +488,69 @@ FC 설정(ArduPilot 4.7.2)입니다. [미검증]
 | `VISO_DELAY_MS` | 위의 시각 설명을 보십시오 |
 | `EK3_SRC1_POSXY`, `EK3_SRC1_VELXY`, `EK3_SRC1_YAW` 등 | ExternalNav (6) |
 
-## 10. 검증 상태 요약
+## 10. 지상 시각화 메시지 (send_vis_msg)
+
+드론에는 화면이 없으므로 VIO는 GUI 없이 실행합니다. `send_vis_msg`를 켜면 GUI가 그리는 요소를 지상의 PC로 보냅니다. GUI가 켜져 있어도 같이 보냅니다.
+
+### 10.1 설정
+
+| 키 (`--config-path`의 JSON) | 명령줄 | 기본값 (코드) | Pi 5 live 설정 | 뜻 |
+|---|---|---|---|---|
+| `send_vis_msg` | `--send_vis_msg` | false | true | 보낼지 |
+| `vis_msg_ip` | `--vis_msg_ip` | 10.20.10.42 | 10.20.10.42 | 받는 PC의 IPv4 주소 |
+| `vis_msg_port` | `--vis_msg_port` | 5100 | 5100 | 받는 PC의 UDP port |
+| `vis_msg_image_hz` | `--vis_msg_image_hz` | 5 | 5 | 이미지 메시지의 최대 비율 [Hz]. 0이면 이미지 메시지가 없습니다 |
+| `vis_msg_jpeg_quality` | `--vis_msg_jpeg_quality` | 60 | 60 | JPEG 품질 (1-100) |
+
+- 명령줄 옵션이 JSON 키보다 우선합니다. 서비스(`granite-vio.service`)에서는 `/etc/default/granite-vio`의 `GRANITE_VIO_ARGS`에 옵션을 넣습니다. 예: `--vis_msg_ip 10.20.10.77`, 끄려면 `--send_vis_msg 0`.
+- `capture_to_granite.py --target live`는 이 키들을 live 설정에 씁니다. 주소와 port는 `--vis-msg-ip`, `--vis-msg-port`로 바꿉니다.
+
+### 10.2 메시지
+
+- **전송:** UDP datagram 하나가 메시지 하나입니다. 받는 쪽이 없어도 VIO에 영향이 없습니다.
+- **형식:** protobuf 메시지 `GraniteVis`(`doc/granite_vis.proto`)입니다. Pi에 protobuf와 zmq 개발 패키지가 없으므로, granite는 protobuf wire format을 직접 씁니다(`src/utils/vis_publisher.cpp`의 `ProtoWriter`). 받는 쪽은 어떤 protobuf 라이브러리로도 읽을 수 있습니다.
+- **좌표:** VIO world(중력 정렬, z 위쪽, m)입니다. FC로 보내는 ODOMETRY의 world(LOCAL_FRD, yaw 0 정렬)와 다릅니다.
+
+| 메시지 | 비율 | 내용 | 크기 |
+|---|---|---|---|
+| 상태 메시지 | 상태마다 (20 Hz) | 현재 pose, 속도, gyro와 accel bias, health, keyframe 여부, 최적화 창의 pose들 | 수백 byte |
+| 이미지 메시지 | 최대 `vis_msg_image_hz` | 상태 메시지의 내용 + 회색 JPEG 이미지, 그 이미지의 keypoint, landmark 투영(역거리, id), 창의 landmark 3D 점 | 약 20-40 kB |
+
+- keypoint와 투영은 같은 메시지의 이미지 위에 그리는 값입니다. 그래서 이미지 메시지에만 넣습니다.
+- 메시지가 UDP 최대 크기(65507 B)를 넘으면 이미지를 빼고 다시 만듭니다. 그래도 넘으면 보내지 않고 `skipped`에 셉니다.
+
+### 10.3 받는 쪽
+
+```bash
+python3 eval/scripts/vis_receiver.py --port 5100          # 1초마다 수신 통계
+python3 eval/scripts/vis_receiver.py --port 5100 --show   # OpenCV 창: 이미지와 위에서 본 궤적
+```
+
+- 통계: 초당 메시지, kB/s, 이미지 수, 네트워크 손실(`seq`의 빈칸), publisher가 건너뛴 수(`skipped`).
+- `--show`: 왼쪽은 카메라 이미지, keypoint(초록), landmark 투영(가까울수록 빨강)입니다. 오른쪽은 위에서 본 궤적(흰색), 창의 상태(노랑), landmark(하늘색)입니다. q는 끝, c는 궤적 지우기입니다.
+- 스크립트는 protobuf 라이브러리 없이 메시지를 읽습니다. numpy와 OpenCV는 `--show`에만 필요합니다.
+
+### 10.4 장시간 실행의 메모리
+
+publisher와 live 실행은 실행 시간에 비례해 커지는 데이터를 갖지 않습니다.
+
+- **publisher:** 가장 최근의 시각화 데이터 하나만 갖습니다. 보내기 전에 새 데이터가 오면 이전 것을 버리고 `skipped`에 셉니다. 송신은 `MSG_DONTWAIT`이므로 네트워크가 막혀도 기다리지 않습니다. 추정기가 넣는 queue는 publisher 쪽 thread가 바로 비웁니다.
+- **GUI가 없는 live 실행:** 상태 이력(궤적, 속도, bias 등 10개 vector)과 프레임 번호 표를 쌓지 않습니다. 궤적과 상태 CSV는 상태마다 파일에 씁니다. 지연 통계는 크기가 일정한 histogram(0.1 ms 구간, 2 s까지)입니다.
+- **초기화 전:** 초기화기는 정지 bias용 가속도와 영상 이동을 최근 120 s만 남깁니다. 그래서 전원을 켜고 오래 기다려도 커지지 않습니다.
+- GUI 실행과 데이터셋 실행은 그림과 평가에 쓰려고 이력을 계속 쌓습니다(Unreal 15.4 Hz에서 시간당 약 20 MB).
+
+확인한 결과 [검증, 데스크톱, Unreal Cam3 전체 6118 프레임, 397 s 실시간, send_vis_msg 켬, 각 1회]:
+
+| 실행 | 초기화 뒤 RSS | 증가율 |
+|---|---|---|
+| 데이터셋 모드 (이력 쌓음) | 105.5 → 107.8 MB | 시간당 약 20 MB. 상태 이력(상태당 약 280 B)과 지연 측정 표의 계산값과 같습니다 |
+| 이력 없음 (GUI 없는 live와 같은 조건, 시험용 binary) | 104.8 → 105.2 MB | 100 s 구간마다 시간당 4.7, 1.8, 2.3, 1.3 MB로 줄어듭니다. 할당기가 안정되는 모양이고, 일정한 누수는 보이지 않습니다 |
+
+- 두 실행 모두 상태 5992개를 모두 보냈습니다(이미지 메시지 약 1220개, skipped 0, 송신 오류 0). 수신은 평균 15.3 msg/s, 179 kB/s(약 1.4 Mbit/s)였습니다.
+- send_vis_msg를 켜도 궤적은 바뀌지 않습니다(결정론 최대 속도, Cam3 1000 프레임, md5 같음).
+- Pi 5에서의 장시간 실행(수 시간)과 CPU 부하는 측정하지 않았습니다 [미검증].
+
+## 11. 검증 상태 요약
 
 | 내용 | 상태 |
 |---|---|

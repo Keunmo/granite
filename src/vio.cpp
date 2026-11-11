@@ -112,6 +112,15 @@ int main(int argc, char** argv) {
   granite::pi_live::addSensorOptions(app, run.pi, resize_half);
 #endif
 
+  // Visualization messages for a viewer on the ground (keys of the same names in --config-path)
+  app.add_option("--send_vis_msg", run.vis.send_vis_msg,
+                 "Send the GUI elements of each state as one UDP message (doc/granite_vis.proto)");
+  app.add_option("--vis_msg_ip", run.vis.vis_msg_ip, "send_vis_msg: IPv4 address of the viewer");
+  app.add_option("--vis_msg_port", run.vis.vis_msg_port, "send_vis_msg: UDP port of the viewer");
+  app.add_option("--vis_msg_image_hz", run.vis.vis_msg_image_hz,
+                 "send_vis_msg: camera images (JPEG) per second at most (0: no image)");
+  app.add_option("--vis_msg_jpeg_quality", run.vis.vis_msg_jpeg_quality, "send_vis_msg: JPEG quality (1-100)");
+
   try {
     app.parse(argc, argv);
   } catch (const CLI::ParseError& e) {
@@ -148,6 +157,7 @@ int main(int argc, char** argv) {
   std::signal(SIGTERM, granite_vio_interrupt);
 
   try {
+    if (!config_path.empty()) loadVisPublisherConfig(config_path, app, run.vis);
 #ifdef GRANITE_WITH_PI_CAMERA
     if (run.live) {
       if (resize_half && app.count("--downscale") == 0) run.pi.downscale = 2;

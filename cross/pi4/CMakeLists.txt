@@ -33,6 +33,7 @@ include_directories(${G}/thirdparty/granite-headers/thirdparty/Sophus ${G}/third
   ${OpenCV_INCLUDE_DIRS})
 add_library(granite SHARED
   ${G}/src/utils/vio_config.cpp
+  ${G}/src/utils/vis_publisher.cpp
   ${G}/src/optical_flow/optical_flow.cpp
   ${G}/src/vi_estimator/mono_vio.cpp
   ${G}/src/vi_estimator/mono_vio_alignment.cpp

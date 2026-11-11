@@ -50,6 +50,7 @@
 
 #pragma once
 
+#include <deque>
 #include <map>
 #include <string>
 #include <vector>
@@ -171,9 +172,11 @@ class MonoInertialInitializer {
   Eigen::aligned_deque<ImuData> imu;   // Window IMU buffer
   std::map<int, Track> tracks;         // Feature tracks of the window by id
 
-  // Startup data for the accel bias at rest: every accel sample and the mean ray motion per image
-  std::vector<std::pair<int64_t, Eigen::Vector3d>> startup_accel;
-  std::vector<std::pair<int64_t, double>> startup_motion;
+  // Startup data for the accel bias at rest: every accel sample and the mean ray motion per image, of the last
+  // kStartupKeepNs before the start (a long wait at rest does not grow the memory)
+  static constexpr int64_t kStartupKeepNs = 120000000000LL;
+  std::deque<std::pair<int64_t, Eigen::Vector3d>> startup_accel;
+  std::deque<std::pair<int64_t, double>> startup_motion;
   std::map<int, Eigen::Vector3d> previous_rays;
 };
 

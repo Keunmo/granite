@@ -44,6 +44,10 @@ The start rules of the base (excitation 0.3 m/s^2, rest_average_time 0.1 s, max_
 max_still_disparity 4.35 px at 178.9 px/rad, no moving start) hold for a hand-held rig and for a drone with the
 motors on, so the live config takes them unchanged except for the pixel scale. The base also turns off the rotation
 rule of the health check (vio_mono_health_rot_deg 180), so only the bias rule sends ODOMETRY quality -1.
+  send_vis_msg, vis_msg_ip, vis_msg_port, vis_msg_image_hz, vis_msg_jpeg_quality
+                                        --target live: the visualization messages for a viewer on the ground (UDP,
+                                        doc/granite_vis.proto): on, --vis-msg-ip (default 10.20.10.42),
+                                        --vis-msg-port (default 5100), 5 Hz images, JPEG quality 60.
   camera.*, imu.*                       the live sensor options of the live app.
       camera_v4l2_gen2 node of model kurokesu_ar0234_pi or b0429_pi: camera.<key> for each property key of the node
       with the xeye key names (model, port, width, height, frame_rate, pixel_format gray8, exposure_time, gain, h_flip,
@@ -482,6 +486,8 @@ def main():
     ap.add_argument("--downscale", type=int, default=1, help="write the camera at 1/N of the calibrated size (1, 2, 3)")
     ap.add_argument("--calib-out", type=pathlib.Path, required=True, help="Granite calibration JSON to write")
     ap.add_argument("--config-out", type=pathlib.Path, help="Granite VIO config JSON to write")
+    ap.add_argument("--vis-msg-ip", default="10.20.10.42", help="--target live: vis_msg_ip of the config")
+    ap.add_argument("--vis-msg-port", type=int, default=5100, help="--target live: vis_msg_port of the config")
     ap.add_argument("--base", type=pathlib.Path, default=DEFAULT_BASE, help="base VIO config")
     ap.add_argument("--base-calib", type=pathlib.Path, default=DEFAULT_BASE_CALIB,
                     help="calibration of the camera that the base config was evaluated with (its px/rad)")
@@ -580,6 +586,13 @@ def main():
         changes.append(f"{key}: {old} -> {value} ({reason})")
 
     set_key("config.vio_use_deterministic", False, "live: the deterministic sums cost about 7 % and add nothing")
+    if a.target == "live":
+        reason = "live: visualization messages for a viewer on the ground (doc/granite_vis.proto)"
+        set_key("send_vis_msg", True, reason)
+        set_key("vis_msg_ip", a.vis_msg_ip, reason)
+        set_key("vis_msg_port", a.vis_msg_port, reason)
+        set_key("vis_msg_image_hz", 5.0, reason)
+        set_key("vis_msg_jpeg_quality", 60, reason)
     base_scale = base_pixels_per_radian(a.base_calib)
     ratio = px_per_rad / base_scale
     for key, what in SCALED_KEYS:

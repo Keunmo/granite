@@ -221,6 +221,7 @@ add_library(granite SHARED
   src/calibration/calibraiton_helper.cpp
   src/calibration/vignette.cpp
   src/utils/vio_config.cpp
+  src/utils/vis_publisher.cpp
   src/optical_flow/optical_flow.cpp
   src/vi_estimator/mono_vio.cpp
   src/vi_estimator/mono_vio_alignment.cpp

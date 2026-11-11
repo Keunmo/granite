@@ -540,6 +540,8 @@ cross/pi5/deploy.sh 10.20.10.60     # Pi 5의 ~/deploy/granite/
 - **health 검사:** inertial 초기화에도 health 검사를 적용합니다(`HealthMonitor`, `src/vi_estimator/mono_vio.cpp`). 최종 후보는 bias 크기 규칙만 씁니다(`vio_mono_health_rot_deg` 180). 한 번 실패하면 −1이 계속됩니다.
 - FC 쪽 설정(`VISO_TYPE`, `VISO_POS_X/Y/Z`, `VISO_DELAY_MS`, `EK3_SRC1_*`)은 FC 담당자가 합니다. 설정하기 전에는 FC가 메시지를 무시합니다.
 
+**지상 시각화:** live 설정은 `send_vis_msg`를 켭니다. GUI 요소(pose, 창의 상태, 5 Hz JPEG 이미지, keypoint, landmark)를 UDP로 `10.20.10.42:5100`에 보냅니다. 받는 PC에서 `python3 eval/scripts/vis_receiver.py --show`를 실행합니다. 키, 메시지 형식(`doc/granite_vis.proto`), 메모리 동작은 `doc/pi5_kurokesu_live_input.md` 10절에 있습니다.
+
 ### 8.5 부팅 때 자동 실행
 
 `pi5-setup/setup_vio_service.sh`가 systemd 서비스 `granite-vio.service`를 설치합니다(`pi5-setup/README.md` 7장). 2026-11-11에 .60에 등록했습니다(enabled). 서비스는 시작하지 않았습니다 [검증, `--check` RESULT OK].

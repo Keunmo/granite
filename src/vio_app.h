@@ -91,6 +91,7 @@ OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 #include <sstream>
 #include <thread>
 
+#include <granite/utils/vis_publisher.h>
 #include <granite/vi_estimator/mono_vio.h>
 #ifdef GRANITE_WITH_PI_CAMERA
 #include <granite/device/pi_live_support.h>
@@ -125,10 +126,37 @@ struct VioRunOptions {
   bool live = false;
   std::string record_path;
   double duration = 0;
+  // send_vis_msg: the GUI elements as UDP messages (doc/granite_vis.proto), with or without the GUI.
+  granite::VisPublisherOptions vis;
 #ifdef GRANITE_WITH_PI_CAMERA
   granite::PiCameraImuOptions pi;
 #endif
 };
+
+// Reads the optional send_vis_msg, vis_msg_* keys next to the VioConfig keys. A command line option has
+// priority over its key.
+inline void loadVisPublisherConfig(const std::string& path, const CLI::App& app,
+                                   granite::VisPublisherOptions& options) {
+  std::ifstream input(path);
+  if (!input) throw std::runtime_error("Cannot open config " + path);
+  cereal::JSONInputArchive archive(input);
+  archive.setNextName("value0");
+  archive.startNode();
+  const auto load = [&](const char* key, auto& value) {
+    if (app.count(std::string("--") + key) > 0) return;
+    try {
+      archive(cereal::make_nvp(key, value));
+    } catch (const cereal::Exception&) {
+      // The key is not in the file; keep the default.
+    }
+  };
+  load("send_vis_msg", options.send_vis_msg);
+  load("vis_msg_ip", options.vis_msg_ip);
+  load("vis_msg_port", options.vis_msg_port);
+  load("vis_msg_image_hz", options.vis_msg_image_hz);
+  load("vis_msg_jpeg_quality", options.vis_msg_jpeg_quality);
+  archive.finishNode();
+}
 
 // The data source of a live run: no dataset images, no ground truth.
 class LiveVioData : public granite::VioDataset {
@@ -303,7 +331,8 @@ class VioDataset {
     vio->vision_data_queue = &opt_flow_ptr->output_queue;
     vio->imu_data_queue = &imu_data_queue;
 
-    if (show_gui) vio->out_vis_queue = &out_vis_queue;
+    if (run_opt.vis.send_vis_msg) vis_publisher = std::make_unique<granite::VisPublisher>(run_opt.vis);
+    if (show_gui || vis_publisher) vio->out_vis_queue = &out_vis_queue;
     vio->out_state_queue = &out_state_queue;
   }
 
@@ -346,7 +375,11 @@ class VioDataset {
       feedImagesLoop();
       if (use_imu) feedImuLoop();
     }
-    if (show_gui) visDataLoop();
+    if (show_gui) {
+      visDataLoop();
+    } else if (vis_publisher) {
+      visPublishLoop();
+    }
     stateLoop();
     queueSizePrinterLoop();
     if (run_opt.live || run_opt.realtime) statusLoop();
@@ -412,6 +445,8 @@ class VioDataset {
     if (status_printer && status_printer->joinable()) status_printer->join();
     printSummary();
 
+    // A live run without the GUI keeps no state history; writeState() wrote the outputs.
+    if (!keepStateHistory()) return;
     if (vio_t_ns.empty()) {
       std::cout << "No states: no evaluation and no trajectory file" << std::endl;
       return;
@@ -843,6 +878,26 @@ class VioDataset {
 
   // Receive functions
 
+  // Without the GUI: gives each visualization data to vis_publisher and keeps nothing, so that the queue and the
+  // memory stay small in a long run.
+  void visPublishLoop() {
+    vis_data_receiver.reset(new std::thread([&]() {
+      granite::VioVisualizationData::Ptr data;
+      while (!terminate) {
+        try {
+          out_vis_queue.pop(data);
+        } catch (const tbb::user_abort&) {
+          break;
+        }
+        if (!data) {
+          if (vis_end) break;
+          continue;
+        }
+        vis_publisher->publish(data);
+      }
+    }));
+  }
+
   /// @brief Starts thread that listens to out_vis_queue and stores data in
   /// vis_map and other visualization data structures
   void visDataLoop() {
@@ -862,6 +917,9 @@ class VioDataset {
           if (vis_end) break;
           continue;
         }
+
+        // A copy: the lines below change data while the publisher thread reads it.
+        if (vis_publisher) vis_publisher->publish(std::make_shared<granite::VioVisualizationData>(*data));
 
         // The image display reads the images elsewhere. Do not keep a copy
         // of every image in vis_map.
@@ -979,30 +1037,37 @@ class VioDataset {
           sT_gt_est.emplace_back(sT_gt_est.back());
         }
 
-        while (vio_t_ns.size() <= data->map_idx) {
-          vio_t_w_i.emplace_back();
-          vio_t_w_c0.emplace_back();
-          vio_T_w_i.emplace_back();
-          vio_T_w_c0.emplace_back();
-          vio_vel_w_i.emplace_back();
-          vio_bg.emplace_back();
-          vio_ba.emplace_back();
-          vio_t_ns.emplace_back();
-        }
+        if (keepStateHistory()) {
+          while (vio_t_ns.size() <= data->map_idx) {
+            vio_t_w_i.emplace_back();
+            vio_t_w_c0.emplace_back();
+            vio_T_w_i.emplace_back();
+            vio_T_w_c0.emplace_back();
+            vio_vel_w_i.emplace_back();
+            vio_bg.emplace_back();
+            vio_ba.emplace_back();
+            vio_t_ns.emplace_back();
+          }
 
-        vio_t_w_i[data->map_idx].emplace_back(T_w_i.translation());
-        vio_t_w_c0[data->map_idx].emplace_back(
-            (T_w_i * calib.T_i_c.at(0)).translation());
-        vio_T_w_i[data->map_idx].emplace_back(T_w_i);
-        vio_T_w_c0[data->map_idx].emplace_back(T_w_i * calib.T_i_c.at(0));
-        vio_vel_w_i[data->map_idx].emplace_back(vel_w_i);
-        vio_bg[data->map_idx].emplace_back(bg);
-        vio_ba[data->map_idx].emplace_back(ba);
-        vio_t_ns[data->map_idx].emplace_back(data->state.t_ns);
+          vio_t_w_i[data->map_idx].emplace_back(T_w_i.translation());
+          vio_t_w_c0[data->map_idx].emplace_back(
+              (T_w_i * calib.T_i_c.at(0)).translation());
+          vio_T_w_i[data->map_idx].emplace_back(T_w_i);
+          vio_T_w_c0[data->map_idx].emplace_back(T_w_i * calib.T_i_c.at(0));
+          vio_vel_w_i[data->map_idx].emplace_back(vel_w_i);
+          vio_bg[data->map_idx].emplace_back(bg);
+          vio_ba[data->map_idx].emplace_back(ba);
+          vio_t_ns[data->map_idx].emplace_back(data->state.t_ns);
+          scale_variance.emplace_back(data->scale_variance);
+          drift_variance.emplace_back(data->drift_variance);
+        }
+        {
+          std::lock_guard<std::mutex> lock(last_position_mutex);
+          last_position = T_w_i.translation();
+        }
         writeState(*data);
         sendOdometry(*data);
-        scale_variance.emplace_back(data->scale_variance);
-        drift_variance.emplace_back(data->drift_variance);
+        if (vis_publisher) vis_publisher->setState(*data);
 
         if (show_gui) {
           std::vector<float> vals;
@@ -2017,8 +2082,39 @@ class VioDataset {
   std::atomic<double> feeder_late_max_s{0}, first_state_wall{-1};
   std::atomic<int64_t> first_state_t_ns{0}, last_state_t_ns{0};
   tbb::concurrent_unordered_map<int64_t, double> release_wall;
+  // Latency [ms] in 0.1 ms bins up to 2 s, so that a long live run keeps a constant size. A latency above 2 s
+  // goes to the last bin; the maximum is exact.
+  struct LatencyHistogram {
+    static constexpr double kBinMs = 0.1;
+    static constexpr size_t kBins = 20000;
+    std::vector<uint32_t> counts = std::vector<uint32_t>(kBins, 0);
+    uint64_t total = 0;
+    double max_ms = -1;
+    void add(double ms) {
+      ++counts[std::min(kBins - 1, static_cast<size_t>(ms / kBinMs))];
+      ++total;
+      max_ms = std::max(max_ms, ms);
+    }
+    // The bin center of the sample at rank p (0-1) of the sorted samples; -1 without samples.
+    double percentile(double p) const {
+      if (total == 0) return -1;
+      if (p >= 1.0) return max_ms;
+      const uint64_t rank = static_cast<uint64_t>(p * (total - 1) + 0.5);
+      uint64_t below = 0;
+      for (size_t i = 0; i < kBins; ++i) {
+        below += counts[i];
+        if (below > rank) return (static_cast<double>(i) + 0.5) * kBinMs;
+      }
+      return max_ms;
+    }
+  };
   std::mutex latency_mutex;
-  std::vector<double> latencies;
+  LatencyHistogram latencies;
+  // A live run without the GUI keeps no history of the states: the outputs are written per state.
+  bool keepStateHistory() const { return show_gui || !run_opt.live; }
+  std::mutex last_position_mutex;
+  Eigen::Vector3d last_position = Eigen::Vector3d::Zero();
+  std::unique_ptr<granite::VisPublisher> vis_publisher;
   std::ofstream tum_out, states_out, trajectory_out;
   std::atomic<int> support_code{-1};
   std::string supportName() const {
@@ -2082,7 +2178,7 @@ class VioDataset {
     }
     if (latency_ms >= 0) {
       std::lock_guard<std::mutex> lock(latency_mutex);
-      latencies.push_back(latency_ms);
+      latencies.add(latency_ms);
     }
     support_code = static_cast<int>(r.mono_vio_support);
     const std::string support = supportName();
@@ -2110,7 +2206,7 @@ class VioDataset {
 
   bool metricInitialized() const {
     auto mono = std::dynamic_pointer_cast<granite::MonoVioEstimator>(vio);
-    return mono ? mono->metricInitialized() : vio_t_ns.size() > 0;
+    return mono ? mono->metricInitialized() : num_states > 0;
   }
 
   std::string trackingName() const {
@@ -2157,8 +2253,10 @@ class VioDataset {
 #endif
         line << " tracking=" << trackingName() << " support=" << supportName()
              << " metric_initialized=" << metricInitialized();
-        if (!vio_t_w_i.empty() && !vio_t_w_i.back().empty())
-          line << " p=" << vio_t_w_i.back().back().transpose();
+        if (num_states > 0) {
+          std::lock_guard<std::mutex> lock(last_position_mutex);
+          line << " p=" << last_position.transpose();
+        }
         std::cout << line.str() << std::endl;
         previous_fed = fed_frames;
         previous_states = num_states;
@@ -2167,7 +2265,11 @@ class VioDataset {
   }
 
   void printSummary() {
-    std::vector<double> lat;
+    if (vis_publisher)
+      std::cout << "VIS sent=" << vis_publisher->sent.load() << " images=" << vis_publisher->images.load()
+                << " skipped=" << vis_publisher->skipped.load()
+                << " send_errors=" << vis_publisher->send_errors.load() << std::endl;
+    LatencyHistogram lat;
     {
       std::lock_guard<std::mutex> lock(latency_mutex);
       lat = latencies;
@@ -2181,9 +2283,9 @@ class VioDataset {
                 << " fed=" << fed_frames.load() << " dropped_input=" << dropped_frames.load()
                 << " states=" << num_states.load() << " first_state_wall_s=" << first_state_wall.load()
                 << " metric_initialized=" << metricInitialized()
-                << " latency_ms_p50=" << percentileOf(lat, 0.5)
-                << " latency_ms_p95=" << percentileOf(lat, 0.95)
-                << " latency_ms_max=" << percentileOf(lat, 1.0)
+                << " latency_ms_p50=" << lat.percentile(0.5)
+                << " latency_ms_p95=" << lat.percentile(0.95)
+                << " latency_ms_max=" << lat.percentile(1.0)
                 << " feeder_late_max_ms=" << 1e3 * feeder_late_max_s.load()
                 << " user_s=" << ru.ru_utime.tv_sec + ru.ru_utime.tv_usec * 1e-6
                 << " sys_s=" << ru.ru_stime.tv_sec + ru.ru_stime.tv_usec * 1e-6
@@ -2206,9 +2308,9 @@ class VioDataset {
               << " image_delay_ms_mean="
               << (queued ? device->image_delay_sum_ns.load() * 1e-6 / queued : -1.0)
               << " image_delay_ms_max=" << device->image_delay_max_ns.load() * 1e-6
-              << " latency_ms_p50=" << percentileOf(lat, 0.5)
-              << " latency_ms_p95=" << percentileOf(lat, 0.95)
-              << " latency_ms_max=" << percentileOf(lat, 1.0)
+              << " latency_ms_p50=" << lat.percentile(0.5)
+              << " latency_ms_p95=" << lat.percentile(0.95)
+              << " latency_ms_max=" << lat.percentile(1.0)
               << " brightness_mean=" << (brightness_count ? brightness_sum / brightness_count : 0.0)
               << " first_state_wall_s=" << first_state_wall.load() << " first_state_data_s="
               << (first_state_t_ns && first_image ? (first_state_t_ns - first_image) * 1e-9 : -1.0)
@@ -2224,12 +2326,6 @@ class VioDataset {
     std::cout << std::endl;
     if (device->failed) std::cerr << device->errorMessage() << std::endl;
 #endif
-  }
-
-  static double percentileOf(std::vector<double> values, double p) {
-    if (values.empty()) return -1;
-    std::sort(values.begin(), values.end());
-    return values[std::min(values.size() - 1, static_cast<size_t>(p * (values.size() - 1) + 0.5))];
   }
 
 #ifdef GRANITE_WITH_PI_CAMERA
@@ -2339,7 +2435,6 @@ class VioDataset {
         if (!frame) continue;
         last_image = Clock::now();
         if (show_gui) addLiveFrame(*frame);
-        else timestamp_to_id[frame->t_ns] = fed_frames;
         if (last_image - last_brightness >= std::chrono::seconds(1)) {
           brightness_sum += device->mean_brightness.load();
           ++brightness_count;
