@@ -989,8 +989,8 @@ void BundleAdjustmentBase::get_current_points(
     const Sophus::SE3d& T_i_c = calib.T_i_c[tcid_host.cam_id];
     Eigen::Matrix4d T_w_c = (T_w_i * T_i_c).matrix();
 
-    for (const KeypointPosition& kpt_pos :
-         lmdb.getLandmarksForHost(tcid_host)) {
+    for (const int lm_id : lmdb.getLandmarkIdsForHost(tcid_host)) {
+      const KeypointPosition& kpt_pos = lmdb.getLandmark(lm_id);
       Eigen::Vector4d pt_cam =
           StereographicParam<double>::unproject(kpt_pos.dir);
       if (kpt_pos.id > std::numeric_limits<double>::epsilon()) {
@@ -999,7 +999,7 @@ void BundleAdjustmentBase::get_current_points(
         Eigen::Vector4d pt_w = T_w_c * pt_cam;
 
         points.emplace_back(pt_w.head<3>() / pt_w[3]);
-        ids.emplace_back(1);
+        ids.emplace_back(lm_id);
       }
     }
   }

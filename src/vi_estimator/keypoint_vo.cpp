@@ -272,8 +272,10 @@ void KeypointVoEstimator::puplishData(
 
     get_current_points(data->points, data->point_ids);
 
-    data->projections.resize(opt_flow_meas->observations.size());
-    computeProjections(data->projections);
+    if (config.vis_projections) {
+      data->projections.resize(opt_flow_meas->observations.size());
+      computeProjections(data->projections);
+    }
 
     data->opt_flow_res = opt_flow_meas;
 

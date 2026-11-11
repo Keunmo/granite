@@ -154,8 +154,12 @@ inline void loadVisPublisherConfig(const std::string& path, const CLI::App& app,
   load("vis_msg_ip", options.vis_msg_ip);
   load("vis_msg_port", options.vis_msg_port);
   load("vis_msg_image_hz", options.vis_msg_image_hz);
+  load("vis_msg_points_hz", options.vis_msg_points_hz);
+  load("vis_msg_encode", options.vis_msg_encode);
   load("vis_msg_jpeg_quality", options.vis_msg_jpeg_quality);
   load("vis_msg_max_kbps", options.vis_msg_max_kbps);
+  load("vis_msg_h264_rate_control", options.vis_msg_h264_rate_control);
+  load("vis_msg_h264_crf", options.vis_msg_h264_crf);
   archive.finishNode();
 }
 
@@ -326,13 +330,14 @@ class VioDataset {
 
     // initialize vio
 
+    vio_config.vis_projections = show_gui;
     vio = granite::VioEstimatorFactory::getVioEstimator(
         vio_config, calib, granite::constants::g, use_imu);
 
     vio->vision_data_queue = &opt_flow_ptr->output_queue;
     vio->imu_data_queue = &imu_data_queue;
 
-    if (run_opt.vis.send_vis_msg) vis_publisher = std::make_unique<granite::VisPublisher>(run_opt.vis);
+    if (run_opt.vis.send_vis_msg) vis_publisher = std::make_unique<granite::VisPublisher>(run_opt.vis, calib);
     if (show_gui || vis_publisher) vio->out_vis_queue = &out_vis_queue;
     vio->out_state_queue = &out_state_queue;
   }

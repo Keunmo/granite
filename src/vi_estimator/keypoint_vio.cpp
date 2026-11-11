@@ -620,8 +620,10 @@ bool KeypointVioEstimator::measure(const OpticalFlowResult::Ptr& opt_flow_meas,
 
     get_current_points(data->points, data->point_ids);
 
-    data->projections.resize(opt_flow_meas->observations.size());
-    computeProjections(data->projections);
+    if (config.vis_projections) {
+      data->projections.resize(opt_flow_meas->observations.size());
+      computeProjections(data->projections);
+    }
 
     data->opt_flow_res = prev_opt_flow_res[this_state_t_ns];
 

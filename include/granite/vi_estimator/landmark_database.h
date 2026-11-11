@@ -109,6 +109,8 @@ class LandmarkDatabase {
   std::vector<KeypointPosition> getLandmarksForHost(
       const TimeCamId& tcid) const;
 
+  const std::set<int>& getLandmarkIdsForHost(const TimeCamId& tcid) const;
+
   std::map<TimeCamId, KeypointObservation> getObservationsOfLandmark(
       int lm_id) const;
 

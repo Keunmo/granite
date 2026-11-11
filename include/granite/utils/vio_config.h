@@ -122,6 +122,10 @@ struct VioConfig {
   double vio_mono_health_max_accel_bias;
   double vio_mono_health_max_gyro_bias;
 
+  // The estimators compute the landmark projections of each image for the visualization. The run sets it, it is
+  // not a key of the config file: only the GUI draws them (the ground viewer computes them itself).
+  bool vis_projections = true;
+
   // Sum the bundle adjustment linearization in a fixed order
   // (tbb::parallel_deterministic_reduce), so that the result does not depend
   // on the number of TBB threads or on their timing. About 7 % slower.

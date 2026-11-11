@@ -4,10 +4,11 @@
 Usage: vis_receiver.py [--port 5100] [--bind 0.0.0.0] [--show] [--trail 20000]
   Prints the receive statistics once per second: messages, kB/s, images, the landmarks and keypoints of the last
   image message, the seq gaps (messages lost in the network) and the publisher's skipped count.
-  --show  opens an OpenCV window: the last camera image with the keypoints (green) and the landmark projections
-          (red near, blue far), and a top view (x right, y up) of the trajectory (white), the window states
-          (yellow) and the landmarks of the window (cyan). Keys: q quits, c clears the trajectory.
-The parser reads the protobuf wire format of GraniteVis without the protobuf library.
+  --show  opens an OpenCV window: the last JPEG camera image with the keypoints (green), and a top view (x right,
+          y up) of the trajectory (white), the window states (yellow) and the landmarks of the window (cyan).
+          Keys: q quits, c clears the trajectory. H.264 images and the landmark projections: use the UVIFY VIO
+          Viewer (tools/vio_viewer).
+The parser reads the protobuf wire format of GraniteVis version 2 without the protobuf library.
 """
 
 import argparse
@@ -19,10 +20,10 @@ import time
 
 FIELDS = {1: "version", 2: "seq", 3: "t_ns", 4: "map_idx", 5: "pose", 6: "velocity", 7: "bias_gyro",
           8: "bias_accel", 9: "healthy", 10: "keyframe", 11: "window_states", 12: "window_frames", 13: "points",
-          14: "projections", 15: "keypoints", 16: "image_jpeg", 17: "image_width", 18: "image_height",
-          19: "skipped", 20: "projection_ids"}
-FLOAT_FIELDS = {"pose", "velocity", "bias_gyro", "bias_accel", "window_states", "window_frames", "points",
-                "projections", "keypoints"}
+          16: "image", 17: "image_width", 18: "image_height", 19: "skipped", 21: "point_ids", 22: "keypoints",
+          23: "keypoint_ids", 24: "image_codec", 25: "image_keyframe", 29: "image_seq"}
+FLOAT_FIELDS = {"pose", "velocity", "bias_gyro", "bias_accel", "window_states", "window_frames", "points"}
+DELTA_FIELDS = {"point_ids", "keypoint_ids"}
 
 
 def varint(buf, i):
@@ -39,7 +40,7 @@ def varint(buf, i):
 def parse(buf):
     """GraniteVis bytes -> dict (proto3 defaults for the absent fields)."""
     msg = {name: 0 for name in FIELDS.values()}
-    msg.update({name: [] for name in FLOAT_FIELDS}, projection_ids=[], image_jpeg=b"", healthy=False,
+    msg.update({name: [] for name in FLOAT_FIELDS | DELTA_FIELDS}, keypoints=[], image=b"", healthy=False,
                keyframe=False)
     i = 0
     while i < len(buf):
@@ -61,12 +62,15 @@ def parse(buf):
             continue
         if name in FLOAT_FIELDS:
             msg[name] = list(struct.unpack(f"<{len(value) // 4}f", value))
-        elif name == "projection_ids":
-            ids, j = [], 0
+        elif name in DELTA_FIELDS:
+            ids, j, v = [], 0, 0
             while j < len(value):
-                v, j = varint(value, j)
+                d, j = varint(value, j)
+                v += d
                 ids.append(v)
             msg[name] = ids
+        elif name == "keypoints":  # uint16 in 1/8 pixel
+            msg[name] = [x / 8.0 for x in struct.unpack(f"<{len(value) // 2}H", value)]
         elif name in ("healthy", "keyframe"):
             msg[name] = bool(value)
         else:
@@ -82,15 +86,18 @@ class View:
         self.trajectory = collections.deque(maxlen=trail)
         self.image = None
         self.detail = None
+        self.points = []
         self.last = None
 
     def update(self, msg):
         cv2, np = self.cv2, self.np
         if msg["pose"]:
             self.trajectory.append(msg["pose"][:3])
-        if msg["image_jpeg"]:
-            self.image = cv2.imdecode(np.frombuffer(msg["image_jpeg"], np.uint8), cv2.IMREAD_GRAYSCALE)
-            self.detail = msg  # keypoints, projections and landmarks of this image
+        if msg["points"]:
+            self.points = msg["points"]
+        if msg["image"] and msg["image_codec"] == 0:
+            self.image = cv2.imdecode(np.frombuffer(msg["image"], np.uint8), cv2.IMREAD_GRAYSCALE)
+            self.detail = msg  # keypoints of this image
         self.last = msg
 
     def draw(self):
@@ -102,14 +109,10 @@ class View:
         k = detail["keypoints"]
         for x, y in zip(k[0::2], k[1::2]):
             cv2.circle(cam, (int(x), int(y)), 2, (0, 255, 0), -1)
-        p = detail["projections"]
-        for x, y, inv in zip(p[0::3], p[1::3], p[2::3]):
-            c = int(max(0.0, min(1.0, inv * 2.0)) * 255)  # inverse distance 0.5 /m and more: red
-            cv2.circle(cam, (int(x), int(y)), 3, (255 - c, 0, c), 1)
         top = np.zeros((h, h, 3), np.uint8)
         pts = list(self.trajectory)
         win = msg["window_states"]
-        lm = detail["points"]
+        lm = self.points
         xs = [q[0] for q in pts] + win[0::7]
         ys = [q[1] for q in pts] + win[1::7]
         if xs:
@@ -149,6 +152,7 @@ def main():
     window = collections.Counter()
     last_seq, last_print = None, time.monotonic()
     msg = detail = None
+    landmarks = 0
     while True:
         try:
             buf = sock.recv(65535)
@@ -156,11 +160,13 @@ def main():
             buf = None
         if buf:
             msg = parse(buf)
-            if msg["image_jpeg"]:
+            if msg["image"]:
                 detail = msg
+            if msg["points"]:
+                landmarks = len(msg["points"]) // 3
             window["messages"] += 1
             window["bytes"] += len(buf)
-            window["images"] += bool(msg["image_jpeg"])
+            window["images"] += bool(msg["image"])
             if last_seq is not None and msg["seq"] > last_seq + 1:
                 window["lost"] += msg["seq"] - last_seq - 1
             last_seq = msg["seq"]
@@ -172,7 +178,7 @@ def main():
                 print(f"msg/s {window['messages'] / (now - last_print):5.1f}  kB/s "
                       f"{window['bytes'] / 1e3 / (now - last_print):7.1f}  images {window['images']}  "
                       f"lost {window['lost']}  skipped {msg['skipped']}  "
-                      f"landmarks {len(detail['points']) // 3 if detail else 0}  "
+                      f"landmarks {landmarks}  "
                       f"keypoints {len(detail['keypoints']) // 2 if detail else 0}  healthy {msg['healthy']}  "
                       f"p {[round(x, 2) for x in msg['pose'][:3]]}", flush=True)
             window.clear()

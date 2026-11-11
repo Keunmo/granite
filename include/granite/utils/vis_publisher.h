@@ -1,15 +1,18 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 
+#include <granite/calibration/calibration.hpp>
 #include <granite/vi_estimator/vio_estimator.h>
 #include <netinet/in.h>
 
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace granite {
 
@@ -19,22 +22,33 @@ struct VisPublisherOptions {
   bool send_vis_msg = false;
   std::string vis_msg_ip = "10.20.10.42";
   int vis_msg_port = 5100;
-  // The camera image (gray JPEG) with its keypoints, landmark projections and the landmarks of the window goes
-  // with at most this many messages per second (0: none). The other messages have the state only (a few
-  // hundred bytes).
+  // The camera image with its tracked keypoints goes with at most this many messages per second (0: none). The
+  // other messages have the state only (a few hundred bytes).
   double vis_msg_image_hz = 20.0;
+  // The landmarks of the window go with at most this many messages per second (0: none). The viewer projects
+  // them into the images.
+  double vis_msg_points_hz = 2.0;
+  // "mjpeg" (each image a gray JPEG) or "h264" (only in a build with x264)
+  std::string vis_msg_encode = "mjpeg";
   int vis_msg_jpeg_quality = 80;
-  // Upper limit of the mean send rate [kbit/s]. An image message goes only when the rate allows it; the state
-  // messages always go (0: no limit).
+  // Upper limit of the mean send rate [kbit/s] (0: no limit). The state messages always go. mjpeg: an image goes
+  // only when the rate allows it. h264 with bitrate_cap: the video gets this limit less the rate of the other
+  // data.
   double vis_msg_max_kbps = 2000.0;
+  // h264: "crf" (constant quality vis_msg_h264_crf, no rate limit) or "bitrate_cap" (the same quality target,
+  // and the rate at most vis_msg_max_kbps)
+  std::string vis_msg_h264_rate_control = "bitrate_cap";
+  double vis_msg_h264_crf = 23.0;
 };
 
 // Sends on its own thread and keeps only the newest data: publish() and setState() never wait for the network,
 // and the memory does not grow when the receiver is slow or absent. A message that a newer state replaces
-// before the thread sends it is skipped.
+// before the thread sends it is skipped. The thread has the lowest priority (SCHED_IDLE), so it uses only CPU
+// time that the VIO does not use.
 class VisPublisher {
  public:
-  explicit VisPublisher(const VisPublisherOptions& options);
+  // Throws std::invalid_argument for a wrong option.
+  VisPublisher(const VisPublisherOptions& options, const Calibration<double>& calib);
   ~VisPublisher();
   VisPublisher(const VisPublisher&) = delete;
   VisPublisher& operator=(const VisPublisher&) = delete;
@@ -53,12 +67,27 @@ class VisPublisher {
     Eigen::Vector3d bias_accel = Eigen::Vector3d::Zero();
     bool healthy = true;
   };
+  // The parts of one message beyond the state
+  struct Detail {
+    const std::string* image = nullptr;  // encoded image (JPEG or one H.264 access unit), or nothing
+    bool h264 = false;
+    bool image_keyframe = false;
+    uint64_t image_seq = 0;  // counter of the encoded images: a gap is a lost image
+    bool keypoints = false;
+    bool points = false;
+  };
+  class H264Encoder;
 
   void run();
-  std::string encode(const VioVisualizationData& data, const State& state, uint64_t seq, bool detail,
-                     const std::string& jpeg, int width, int height) const;
+  std::string encode(const VioVisualizationData& data, const State& state, uint64_t seq, const Detail& detail,
+                     int width, int height) const;
 
   const VisPublisherOptions options;
+  // Camera 0, for the projection of the landmarks in the viewer
+  std::string camera_model;
+  std::vector<float> camera_params;
+  Sophus::SE3d T_i_c;
+  std::unique_ptr<H264Encoder> h264;
   int fd = -1;
   sockaddr_in peer{};
   std::mutex mutex;

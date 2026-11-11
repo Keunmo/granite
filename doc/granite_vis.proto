@@ -13,7 +13,9 @@ syntax = "proto3";
 package granite_vis;
 
 message GraniteVis {
-  uint32 version = 1;            // 1
+  reserved 14, 15, 20;           // version 1: projections, float keypoints, projection_ids
+
+  uint32 version = 1;            // 2
   uint64 seq = 2;                // message counter of the process; a gap is a message lost in the network
   int64 t_ns = 3;                // state time [ns], the image time on the device clock
   uint32 map_idx = 4;
@@ -28,13 +30,24 @@ message GraniteVis {
   repeated float window_states = 11;  // 7 floats for each state of the optimization window
   repeated float window_frames = 12;  // 7 floats for each pose-only keyframe of the window
 
-  // The detail fields: only in the messages of the image (at most vis_msg_image_hz per second). The pixels are
-  // in this image.
-  repeated float points = 13;         // [x, y, z] for each landmark of the window [m]
-  repeated float projections = 14;    // [u, v, inverse distance 1/m] for each landmark seen in this image
-  repeated uint32 projection_ids = 20;  // landmark id of each projection
-  repeated float keypoints = 15;      // [u, v] for each tracked keypoint of this image
-  bytes image_jpeg = 16;              // gray JPEG of the camera image
+  // The landmarks of the window: at most vis_msg_points_hz messages per second.
+  repeated float points = 13;         // [x, y, z] for each landmark [m]
+  repeated uint64 point_ids = 21;     // landmark id of each point, increasing; each value is the difference to
+                                      // the previous id (the first to 0)
+
+  // The image fields: at most vis_msg_image_hz messages per second. The pixels are in this image.
+  bytes image = 16;                   // mjpeg: a gray JPEG. h264: one access unit (Annex B, the SPS and PPS
+                                      // before each IDR frame, full range gray in the Y plane)
+  uint32 image_codec = 24;            // 0: JPEG, 1: H.264
+  bool image_keyframe = 25;           // H.264: an IDR frame (it does not depend on the frames before it)
+  uint64 image_seq = 29;              // counter of the encoded images; a gap is a lost H.264 frame
+  bytes keypoints = 22;               // [u, v] for each tracked keypoint, uint16 little-endian in 1/8 pixel
+  repeated uint64 keypoint_ids = 23;  // id of each keypoint (= landmark id), increasing, difference coded as
+                                      // point_ids. A keypoint with a landmark is a landmark seen in this image.
+  // Camera 0, for the projection of the landmarks in the viewer: x_c = (T_w_i(pose) * T_i_c)^-1 * point
+  string camera_model = 26;           // kb4, pinhole, ds, eucm, ucm, ... (granite names)
+  repeated float camera_params = 27;  // granite getParam() of the model: fx, fy, cx, cy, then the distortion
+  repeated float T_i_c = 28;          // [px, py, pz, qw, qx, qy, qz]
 
   uint32 image_width = 17;       // in every message
   uint32 image_height = 18;

@@ -4,7 +4,9 @@
 //
 // Usage: uvify-vio-viewer [--ip LISTEN_IP] [--port PORT] [--snapshot FILE.jpg] [--snapshot-delay SECONDS]
 //   --snapshot  writes the window as a JPEG after --snapshot-delay (default 5 s) and continues.
+#include "camera_projection.h"
 #include "granite_vis_message.h"
+#include "h264_decoder.h"
 
 #include <arpa/inet.h>
 #include <jpeglib.h>
@@ -24,9 +26,11 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include <Eigen/Dense>
@@ -56,6 +60,35 @@ const ImU32 kColorLandmark = IM_COL32(60, 220, 230, 255);
 const ImU32 kColorKeypoint = IM_COL32(60, 230, 60, 255);
 
 ImVec4 toVec4(ImU32 c) { return ImGui::ColorConvertU32ToFloat4(c); }
+
+// getcolor of granite (include/granite/utils/vis_utils.h) as the granite GUI calls it, with the red and blue
+// outputs swapped: p = 0 is blue, p = range is red, green and yellow between.
+ImU32 depthColor(float p, float range) {
+  const float x = range > 0.0f ? 4.0f * p / range : 0.0f;
+  float r = 0.0f, g = 0.0f, b = 0.0f;
+  if ((0 <= x && x <= 1) || (5 <= x && x <= 6)) {
+    b = 1.0f;
+  } else if (4 <= x && x <= 5) {
+    b = x - 4;
+  } else if (1 <= x && x <= 2) {
+    b = 1.0f - (x - 1);
+  }
+  if (1 <= x && x <= 3) {
+    g = 1.0f;
+  } else if (0 <= x && x <= 1) {
+    g = x;
+  } else if (3 <= x && x <= 4) {
+    g = 1.0f - (x - 3);
+  }
+  if (3 <= x && x <= 5) {
+    r = 1.0f;
+  } else if (2 <= x && x <= 3) {
+    r = x - 2;
+  } else if (5 <= x && x <= 6) {
+    r = 1.0f - (x - 5);
+  }
+  return IM_COL32(static_cast<int>(255 * r), static_cast<int>(255 * g), static_cast<int>(255 * b), 255);
+}
 
 struct JpegError {
   jpeg_error_mgr manager;
@@ -135,7 +168,11 @@ struct Shared {
   std::mutex mutex;
   bool have_state = false;
   GraniteVisMessage state;   // the newest message
-  GraniteVisMessage detail;  // the newest message with an image
+  GraniteVisMessage detail;  // the newest message with an image, with the projections of the landmarks
+  // The newest landmarks (they come at vis_msg_points_hz)
+  std::vector<float> points;
+  bool new_points = false;
+  std::string image_codec, decoder_status;
   std::vector<uint8_t> image;
   int image_width = 0, image_height = 0;
   bool new_image = false;
@@ -210,7 +247,12 @@ class Receiver {
     shared->error = error;
     shared->have_state = false;
     shared->clearHistory();
+    shared->points.clear();
+    shared->new_points = true;
     last_seq = -1;
+    last_image_seq = 0;
+    landmarks.clear();
+    landmark_points.clear();
   }
 
   void run() {
@@ -245,8 +287,25 @@ class Receiver {
         ++shared->malformed;
         continue;
       }
+      if (!message.points.empty()) {
+        landmark_points = message.points;
+        landmarks.clear();
+        for (size_t k = 0; k < message.point_ids.size() && 3 * k + 2 < landmark_points.size(); ++k)
+          landmarks[message.point_ids[k]] = k;
+      }
       int width = 0, height = 0;
-      const bool image = !message.image_jpeg.empty() && decodeGrayJpeg(message.image_jpeg, &pixels, &width, &height);
+      bool image = false;
+      if (!message.image.empty()) {
+        if (message.image_h264) {
+          const bool gap = message.image_seq != last_image_seq + 1;
+          image = h264.decode(message.image, message.image_keyframe, gap, &pixels, &width, &height);
+        } else {
+          image = decodeGrayJpeg(message.image, &pixels, &width, &height);
+        }
+        last_image_seq = message.image_seq;
+        message.image.clear();
+      }
+      if (image) projectLandmarks(&message);
 
       std::lock_guard<std::mutex> lock(shared->mutex);
       ++shared->received;
@@ -269,6 +328,16 @@ class Receiver {
         pushBounded(shared->plot_y, p.y(), kMaxPlotSamples);
         pushBounded(shared->plot_z, p.z(), kMaxPlotSamples);
       }
+      if (!message.points.empty()) {
+        shared->points = landmark_points;
+        shared->new_points = true;
+      }
+      if (message.image_h264) {
+        shared->image_codec = "h264";
+        shared->decoder_status = h264.available() ? "" : h264.status();
+      } else if (image) {
+        shared->image_codec = "mjpeg";
+      }
       if (image) {
         shared->image.swap(pixels);
         shared->image_width = width;
@@ -282,7 +351,36 @@ class Receiver {
     }
   }
 
+  // The projections of the landmarks seen in this image (the keypoints with a landmark), as granite computes them
+  // for its GUI: the pose of the message, T_i_c and the camera model of the message.
+  void projectLandmarks(GraniteVisMessage* m) const {
+    m->projections.clear();
+    if (m->pose.size() < 7 || m->T_i_c.size() < 7 || landmarks.empty()) return;
+    const auto pose = [](const std::vector<float>& v) {
+      Eigen::Isometry3d T = Eigen::Isometry3d::Identity();
+      T.linear() = Eigen::Quaterniond(v[3], v[4], v[5], v[6]).normalized().toRotationMatrix();
+      T.translation() = Eigen::Vector3d(v[0], v[1], v[2]);
+      return T;
+    };
+    const Eigen::Isometry3d T_c_w = (pose(m->pose) * pose(m->T_i_c)).inverse();
+    for (uint64_t id : m->keypoint_ids) {
+      const auto it = landmarks.find(id);
+      if (it == landmarks.end()) continue;
+      const float* p = &landmark_points[3 * it->second];
+      const Eigen::Vector3d x = T_c_w * Eigen::Vector3d(p[0], p[1], p[2]);
+      Eigen::Vector2d uv;
+      if (!projectPoint(m->camera_model, m->camera_params, x, &uv)) continue;
+      m->projections.push_back(static_cast<float>(uv.x()));
+      m->projections.push_back(static_cast<float>(uv.y()));
+      m->projections.push_back(static_cast<float>(1.0 / x.norm()));
+    }
+  }
+
   Shared* shared;
+  H264Decoder h264;
+  std::unordered_map<uint64_t, size_t> landmarks;  // landmark id to its index in landmark_points
+  std::vector<float> landmark_points;
+  uint64_t last_image_seq = 0;
   std::atomic<bool> stopping{false};
   std::mutex request_mutex;
   std::string request_ip = "0.0.0.0";
@@ -413,6 +511,12 @@ class Viewer {
       detail = shared->detail;
     }
     have_state = shared->have_state;
+    if (shared->new_points) {
+      points = shared->points;
+      shared->new_points = false;
+    }
+    image_codec = shared->image_codec;
+    decoder_status = shared->decoder_status;
     if (have_state) state = shared->state;
     // At most kMaxDrawnSegments + 1 evenly spaced positions, and always the newest one
     const size_t n = shared->trajectory.size();
@@ -466,6 +570,9 @@ class Viewer {
     ImGui::Text("lost      %llu  skipped %llu  bad %llu", static_cast<unsigned long long>(lost),
                 static_cast<unsigned long long>(state.skipped), static_cast<unsigned long long>(malformed));
 
+    if (!image_codec.empty()) ImGui::Text("image     %s", image_codec.c_str());
+    if (!decoder_status.empty()) ImGui::TextColored(ImVec4(1.0f, 0.35f, 0.35f, 1.0f), "h264: %s", decoder_status.c_str());
+
     ImGui::SeparatorText("VIO");
     if (!have_state) {
       ImGui::TextDisabled("no state");
@@ -482,7 +589,7 @@ class Viewer {
         ImGui::Text("bias gyro %.4f %.4f %.4f", state.bias_gyro[0], state.bias_gyro[1], state.bias_gyro[2]);
       if (state.bias_accel.size() >= 3)
         ImGui::Text("bias acc  %.3f %.3f %.3f", state.bias_accel[0], state.bias_accel[1], state.bias_accel[2]);
-      ImGui::Text("window    %zu states, %zu landmarks", state.window_states.size() / 7, detail.points.size() / 3);
+      ImGui::Text("window    %zu states, %zu landmarks", state.window_states.size() / 7, points.size() / 3);
       ImGui::Text("image     %zu keypoints, %zu projections", detail.keypoints.size() / 2,
                   detail.projections.size() / 3);
       ImGui::Text("trajectory %zu points", trajectory_points);
@@ -527,10 +634,17 @@ class Viewer {
       for (size_t i = 0; i + 1 < detail.keypoints.size(); i += 2)
         draw->AddCircle(ImVec2(origin.x + detail.keypoints[i] * scale, origin.y + detail.keypoints[i + 1] * scale),
                         2.5f, kColorKeypoint);
+      // As the granite GUI: the inverse distances of this image from their minimum (blue, far) to their maximum
+      // (red, near)
+      float min_inv = std::numeric_limits<float>::infinity(), max_inv = 0.0f;
+      for (size_t i = 2; i < detail.projections.size(); i += 3) {
+        if (detail.projections[i] <= 0.0f) continue;
+        min_inv = std::min(min_inv, detail.projections[i]);
+        max_inv = std::max(max_inv, detail.projections[i]);
+      }
       for (size_t i = 0; i + 2 < detail.projections.size(); i += 3) {
-        // Red for near landmarks (inverse distance 0.5 /m and more), blue for far ones
-        const float near = std::min(1.0f, std::max(0.0f, detail.projections[i + 2] * 2.0f));
-        const ImU32 color = IM_COL32(static_cast<int>(255 * near), 60, static_cast<int>(255 * (1.0f - near)), 255);
+        const float inv = detail.projections[i + 2];
+        const ImU32 color = inv > 0.0f ? depthColor(inv - min_inv, max_inv - min_inv) : IM_COL32(0, 0, 255, 255);
         draw->AddCircleFilled(
             ImVec2(origin.x + detail.projections[i] * scale, origin.y + detail.projections[i + 1] * scale), 3.0f,
             color);
@@ -545,7 +659,7 @@ class Viewer {
       draw->PopClipRect();
       ImGui::TextColored(toVec4(kColorKeypoint), "keypoints %zu", detail.keypoints.size() / 2);
       ImGui::SameLine();
-      ImGui::TextColored(ImVec4(0.9f, 0.4f, 0.6f, 1.0f), "  landmark projections %zu (red near, blue far)",
+      ImGui::TextColored(ImVec4(0.9f, 0.4f, 0.6f, 1.0f), "  landmark projections %zu (red near, blue far in this image)",
                          detail.projections.size() / 3);
     } else {
       ImGui::TextDisabled("no image yet");
@@ -621,8 +735,8 @@ class Viewer {
     }
     if (show_landmarks) {
       ImVec2 q;
-      for (size_t i = 0; i + 2 < detail.points.size(); i += 3)
-        if (project(Eigen::Vector3d(detail.points[i], detail.points[i + 1], detail.points[i + 2]), q))
+      for (size_t i = 0; i + 2 < points.size(); i += 3)
+        if (project(Eigen::Vector3d(points[i], points[i + 1], points[i + 2]), q))
           draw->AddRectFilled(ImVec2(q.x - 1.0f, q.y - 1.0f), ImVec2(q.x + 1.0f, q.y + 1.0f), kColorLandmark);
     }
     if (show_trajectory)
@@ -696,6 +810,8 @@ class Viewer {
   // Copies of the shared data for one frame
   bool have_state = false;
   GraniteVisMessage state, detail;
+  std::vector<float> points;
+  std::string image_codec, decoder_status;
   std::vector<Eigen::Vector3f> drawn;
   std::string listening;
   bool listen_error = false;

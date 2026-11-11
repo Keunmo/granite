@@ -122,6 +122,12 @@ int main(int argc, char** argv) {
   app.add_option("--vis_msg_jpeg_quality", run.vis.vis_msg_jpeg_quality, "send_vis_msg: JPEG quality (1-100)");
   app.add_option("--vis_msg_max_kbps", run.vis.vis_msg_max_kbps,
                  "send_vis_msg: mean send rate at most [kbit/s]; fewer images above it (0: no limit)");
+  app.add_option("--vis_msg_points_hz", run.vis.vis_msg_points_hz,
+                 "send_vis_msg: landmark messages per second at most (0: no landmarks)");
+  app.add_option("--vis_msg_encode", run.vis.vis_msg_encode, "send_vis_msg: image encoding <mjpeg, h264>");
+  app.add_option("--vis_msg_h264_rate_control", run.vis.vis_msg_h264_rate_control,
+                 "send_vis_msg h264: <crf (constant quality), bitrate_cap (quality, rate at most vis_msg_max_kbps)>");
+  app.add_option("--vis_msg_h264_crf", run.vis.vis_msg_h264_crf, "send_vis_msg h264: quality (CRF, lower is better)");
 
   try {
     app.parse(argc, argv);

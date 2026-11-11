@@ -519,6 +519,7 @@ cross/pi5/build.sh                  # ~/cross/pi5-build/granite/
 cross/pi5/deploy.sh 10.20.10.60     # Pi 5의 ~/deploy/granite/
 ```
 
+- `vis_msg_encode h264`를 쓰려면 sysroot에 x264가 있어야 합니다(`cross/pi5/build.sh` 머리말). Pi에는 `libx264-164`가 있어야 합니다.
 - 배포 폴더: `bin/`(실행 파일), `lib/`(`libgranite.so`), `config/`(`cross/pi5/live/*.json`), `scripts/`(`pi5_live_kurokesu_vio.sh`), `runs/`(실행 결과), `DEPLOYED`(커밋과 시각).
 - 2026-11-11에 `005b2b8`을 배포했습니다 [검증, 배포 파일의 파라미터 확인].
 - 손으로 실행: `~/deploy/granite/scripts/pi5_live_kurokesu_vio.sh [--no-gui] [--no-record]`. 바탕화면 아이콘도 같은 스크립트입니다.
@@ -540,7 +541,7 @@ cross/pi5/deploy.sh 10.20.10.60     # Pi 5의 ~/deploy/granite/
 - **health 검사:** inertial 초기화에도 health 검사를 적용합니다(`HealthMonitor`, `src/vi_estimator/mono_vio.cpp`). 최종 후보는 bias 크기 규칙만 씁니다(`vio_mono_health_rot_deg` 180). 한 번 실패하면 −1이 계속됩니다.
 - FC 쪽 설정(`VISO_TYPE`, `VISO_POS_X/Y/Z`, `VISO_DELAY_MS`, `EK3_SRC1_*`)은 FC 담당자가 합니다. 설정하기 전에는 FC가 메시지를 무시합니다.
 
-**지상 시각화:** live 설정은 `send_vis_msg`를 켭니다. GUI 요소(pose, 창의 상태, q80 JPEG 이미지, keypoint, landmark)를 UDP로 `10.20.10.42:5100`에 보냅니다. 평균 전송률은 2 Mbit/s 이하입니다(`vis_msg_max_kbps`). 받는 PC에서 UVIFY VIO Viewer(`tools/vio_viewer`, AppImage)를 실행합니다. 키, 메시지 형식(`doc/granite_vis.proto`), 메모리 동작은 `doc/pi5_kurokesu_live_input.md` 10절에 있습니다.
+**지상 시각화:** live 설정은 `send_vis_msg`를 켭니다. GUI 요소(pose, 창의 상태, 이미지, keypoint, landmark)를 UDP로 `10.20.10.42:5100`에 보냅니다. 이미지는 mjpeg(q80, 기본) 또는 h264(`vis_msg_encode`)입니다. 평균 전송률은 2 Mbit/s 이하입니다(`vis_msg_max_kbps`). publisher thread는 `SCHED_IDLE`이라서 VIO가 남긴 CPU만 씁니다. 받는 PC에서 UVIFY VIO Viewer(`tools/vio_viewer`, AppImage)를 실행합니다. 키, 메시지 형식(`doc/granite_vis.proto`), 메모리 동작은 `doc/pi5_kurokesu_live_input.md` 10절에 있습니다.
 
 ### 8.5 부팅 때 자동 실행
 

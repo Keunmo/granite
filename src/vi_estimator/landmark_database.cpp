@@ -142,6 +142,11 @@ std::vector<KeypointPosition> LandmarkDatabase::getLandmarksForHost(
   return res;
 }
 
+const std::set<int> &LandmarkDatabase::getLandmarkIdsForHost(
+    const TimeCamId &tcid) const {
+  return host_to_kpts.at(tcid);
+}
+
 void LandmarkDatabase::addObservation(const TimeCamId &tcid_target,
                                       const KeypointObservation &o) {
   auto it = kpts.find(o.kpt_id);
