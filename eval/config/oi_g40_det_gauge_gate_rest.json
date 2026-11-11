@@ -60,6 +60,7 @@
         "config.vio_mono_init_excitation_accel_std": 0.3,
         "config.vio_mono_init_moving_start": false,
         "config.vio_mono_init_max_still_disparity": 4.35,
-        "config.vio_mono_init_rest_average_time": 0.1
+        "config.vio_mono_init_rest_average_time": 0.1,
+        "config.vio_mono_health_rot_deg": 180.0
     }
 }

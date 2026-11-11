@@ -42,7 +42,8 @@ with
                                         or cell sizes in pixels and stay (as in openvio capture_to_config.py).
 The start rules of the base (excitation 0.3 m/s^2, rest_average_time 0.1 s, max_rest_disparity 2.0 px,
 max_still_disparity 4.35 px at 178.9 px/rad, no moving start) hold for a hand-held rig and for a drone with the
-motors on, so the live config takes them unchanged except for the pixel scale.
+motors on, so the live config takes them unchanged except for the pixel scale. The base also turns off the rotation
+rule of the health check (vio_mono_health_rot_deg 180), so only the bias rule sends ODOMETRY quality -1.
   camera.*, imu.*                       the live sensor options of the live app.
       camera_v4l2_gen2 node of model kurokesu_ar0234_pi or b0429_pi: camera.<key> for each property key of the node
       with the xeye key names (model, port, width, height, frame_rate, pixel_format gray8, exposure_time, gain, h_flip,

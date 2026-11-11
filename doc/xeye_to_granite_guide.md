@@ -159,6 +159,7 @@ Unreal의 카메라는 계수가 한 개인 등거리 uwfisheye입니다. 이 �
 
 - 픽셀 노이즈와 셀 크기(`optical_flow_detection_grid_size` 40 px, `vio_obs_std_dev` 등)는 그대로 둡니다. openvio 변환과 같은 규칙입니다.
 - 최종 후보의 시작 규칙(가속 0.3, `rest_average_time` 0.1 s, 정지 이동 2.0, 움직임 4.35, 이동 시작 끔)은 손으로 드는 리그와 모터를 켠 드론에 모두 맞습니다(2.6절). 그래서 live 변환은 이 값을 해상도 비례만 바꿔 씁니다.
+- 최종 후보는 health 검사의 회전 보정 규칙을 끕니다(`vio_mono_health_rot_deg` 180°). bias 크기 규칙만 `quality` −1을 냅니다. 이유는 `pi5_kurokesu_live_input.md` 9.2절에 있습니다.
 - 이전의 `--handheld` 옵션은 2026-11-11에 없앴습니다. 그 값(가속 0.3, 정지 이동 2.0)은 최종 후보에 들어 있습니다.
 
 ### 2.5 정지 시작 요구
