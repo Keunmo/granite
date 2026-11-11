@@ -1,6 +1,6 @@
 # xeye 보정으로 Granite 단안 VIO 실행하기
 
-이 문서는 Raspberry Pi 4에서 Granite 단안 VIO(mono VIO)를 실행하는 절차입니다. 실행 방법은 두 가지입니다.
+이 문서는 Raspberry Pi에서 Granite 단안 VIO(mono VIO)를 실행하는 절차입니다. 1-7절은 Raspberry Pi 4 리그를 다루고, 8절은 Raspberry Pi 5 드론을 다룹니다. Pi 4의 실행 방법은 두 가지입니다.
 
 - **데이터셋 실행:** 녹화된 EuRoC 데이터셋을 Pi 4에서 재생합니다. 기준 데이터셋은 Unreal `unreal_data_city_sky`의 Cam1입니다(4절).
 - **live 실행:** Pi 4에 연결된 카메라와 IMU로 실행합니다. 기준 리그는 Arducam B0429(AR0234)와 MPU-9250(CP2112)입니다(5절).
@@ -11,13 +11,15 @@
 
 capture.yaml은 데이터셋마다 다릅니다. 각 데이터셋에는 그 데이터셋의 capture.yaml만 씁니다.
 
-live 앱의 기본 입력은 이제 Pi 5의 Kurokesu AR0234와 PX4 IMU(`--model kurokesu_ar0234_pi --imu_type imu_mavlink`)입니다. 이 입력의 처리 방식, 설정 키, 변환 방식은 `doc/pi5_kurokesu_live_input.md`에 있습니다. 이 문서의 Pi 4 live 명령은 이전 입력을 쓰므로 `--model b0429 --imu_type mpu_i2c`를 붙입니다.
+live 앱의 기본 입력은 이제 Pi 5의 Kurokesu AR0234와 FC IMU(`--model kurokesu_ar0234_pi --imu_type imu_mavlink`)입니다. FC는 ArduPilot 4.7.2이고, IMU는 UART와 mavlink-router로 받습니다. 이 입력의 처리 방식, 설정 키, ODOMETRY 출력은 `doc/pi5_kurokesu_live_input.md`에 있습니다. 드론에서 쓰는 절차(변환, 배포, 자동 실행, 운용)는 8절에 있습니다. 이 문서의 Pi 4 live 명령은 이전 입력을 쓰므로 `--model b0429 --imu_type mpu_i2c`를 붙입니다.
 
 | 데이터셋 또는 리그 | capture.yaml | 이 문서의 Granite 파일 |
 |---|---|---|
 | Pi 4 live 리그 (B0429 + MPU-9250) | Pi 4 `/home/uvify/workspace/openvio/config/capture.yaml` (데스크톱 사본 `~/workspace/openvio/config/capture.yaml`, md5 `d2d36cf7`) | `eval/config/live/b0429_pi_640x400_*.json` |
 | unreal_data_city_sky | Pi 4 `/media/uvify/uvify_ssd/Data/unreal_data_city_sky/capture.yaml` (데스크톱 사본 `~/multipleye_docker/data/unreal_data_city_sky/capture.yaml`, md5 `38643b4e`) | `eval/config/raw_cam0..3_kb4_calib.json` |
 | 260625_163357_smrig_ar0234 (다른 리그, 손으로 듦) | 그 데이터셋 폴더의 `capture.yaml` | `eval/config/live/smrig_cam1_672x600_*.json` |
+| Pi 5 드론 (Kurokesu AR0234 + FC IMU, .60) | xeye 보정 결과의 `capture.yaml` (8.2절) | `cross/pi5/live/kurokesu_448x400_*.json` |
+| EuRoC MH_01-05 (평가용) | 없음. EuRoC 보정을 씁니다 | `data/euroc_ds_calib_mono.json` |
 
 상태 표기는 세 가지입니다.
 
@@ -170,7 +172,7 @@ Unreal의 카메라는 계수가 한 개인 등거리 uwfisheye입니다. 이 �
 2. 뒤쪽 반(1 s)은 움직입니다. 평균 이동이 `max_still_disparity`보다 크고, 가속도 표준편차가 `excitation_accel_std` 이상입니다.
 3. `max_rest_disparity`가 0보다 크면 앞쪽 반의 평균 이동이 이 값 이하여야 합니다. 이 조건은 등속 운동을 정지로 판단하지 않게 합니다(Unreal에서 4 m/s 등속은 2.8 px, 정지는 0.004 px).
 
-smrig_ar0234 cam1(손으로 든 리그, 0~8.3 s 정지 후 천천히 움직임) 재생 결과입니다 [검증, 데스크톱].
+smrig_ar0234 cam1(손으로 든 리그, 0-8.3 s 정지 후 천천히 움직임) 재생 결과입니다 [검증, 데스크톱].
 
 | 설정 | 초기화 | 결과 (rovins2 대비) |
 |---|---|---|
@@ -200,7 +202,7 @@ smrig_ar0234 cam1(손으로 든 리그, 0~8.3 s 정지 후 천천히 움직임) 
 - 시작 전에 리그를 2초 이상 완전히 정지합니다. 손으로 들고 있지 말고 바닥이나 책상에 둡니다.
 - 그 다음 1초 안에 분명하게 움직입니다. 들어 올리거나 옮기는 움직임(가속)이 필요합니다. 제자리 회전만으로는 가속도 조건을 못 넘을 수 있습니다.
 - 초기화가 되지 않으면 리그를 다시 2초 이상 정지한 다음 다시 움직입니다. 초기화 전에는 상태 출력이 없습니다.
-- Pi 4 live 리그의 정지 상태 가속도 표준편차는 0.017~0.032 m/s²입니다 [검증]. 0.3보다 충분히 작습니다.
+- Pi 4 live 리그의 정지 상태 가속도 표준편차는 0.017-0.032 m/s²입니다 [검증]. 0.3보다 충분히 작습니다.
 - Pi 4 live 리그를 책상에 두었을 때 Granite 트랙의 앞쪽 반 이동은 중앙값 0.38 px, 최대 1.23 px입니다 [검증, 60 s]. 정지 이동 1.0을 비율로 줄인 기준(0.70 px)보다 클 때가 있습니다. 정지 이동 2.0의 기준(1.392 px)보다는 작지만 여유가 작습니다. 정지해 있어도 초기화가 늦어질 수 있습니다 [미검증]. 그래서 정지 이동 기준을 2.0보다 낮추지 않습니다.
 - 가속도 기준은 앞쪽 반에도 쓰입니다. 앞쪽 반은 0.1 s 평균의 표준편차를 씁니다(`rest_average_time`, 2.6절). 그래서 모터 진동은 정지를 막지 않습니다. 우리 FC의 진동은 측정하지 않았습니다 [미검증].
 
@@ -395,7 +397,7 @@ $B/granite_pi_cam_imu_vio --config-path $C/b0429_pi_640x400_handheld.json --mode
 | `fps` | 받은 이미지/초 | 14.90 (센서 15.00) |
 | `sensor_drops` | 센서가 버린 프레임(sequence 빈칸) | 0 |
 | `queue_drops` | flow 입력 큐와 장치 큐가 버린 이미지 | 0 |
-| `imu_hz` | 받은 IMU 샘플/초 | 191~192 |
+| `imu_hz` | 받은 IMU 샘플/초 | 191-192 |
 | `imu_i2c_errors` | CP2112 전송 실패 수 | 30 s에 12, 60 s에 28 (`doc/mpu6500-cp2112-issue.md`) |
 | `image_delay_ms_mean/max` | 버퍼 시각부터 큐까지 | 37 / 53 ms |
 | `latency_ms_p50/p95` | 노출 중심부터 상태 출력까지 | 정지 상태에서는 초기화가 없어서 값이 없습니다 |
@@ -404,7 +406,7 @@ $B/granite_pi_cam_imu_vio --config-path $C/b0429_pi_640x400_handheld.json --mode
 
 - 매초 줄의 `tracking`과 `support`를 봅니다. 초기화 전에는 `initializing`입니다. 초기화 뒤에는 `support=metric`이 정상입니다.
 - 정지 상태로만 두면 초기화하지 않습니다. 이것은 설계대로의 동작입니다 [검증, 60 s].
-- 속도(`vx, vy, vz`, 상태 CSV)가 손으로 드는 속도(0.1~1.5 m/s)보다 계속 커지면 발산입니다.
+- 속도(`vx, vy, vz`, 상태 CSV)가 손으로 드는 속도(0.1-1.5 m/s)보다 계속 커지면 발산입니다.
 - 같은 자리로 돌아오는 경로로 시험하면 끝점과 시작점의 거리로 drift를 볼 수 있습니다.
 - 움직이는 live 시험은 아직 하지 않았습니다 [미검증].
 
@@ -479,13 +481,134 @@ Pi 4 모니터에 GUI 띄우기 [미검증]:
 - Unreal EuRoC 폴더에는 GT가 없습니다. 그래서 화면에 GT 궤적이 없습니다. 평가는 4.4절로 합니다.
 - Pi 4에서 GUI가 실시간 처리(15 fps)에 주는 부하는 측정하지 않았습니다 [미검증]. 판정용 실행은 `--show-gui 0`으로 합니다. GUI가 있을 때 `dropped`(데이터셋) 또는 `queue_drops`(live)가 0보다 크면 GUI 부하를 의심합니다.
 
-## 8. 문제 해결
+## 8. Pi 5 드론 운용 (2026-11-11)
+
+### 8.1 구성
+
+| 항목 | 내용 |
+|---|---|
+| 컴패니언 | Raspberry Pi 5, Ubuntu 24.04 (`uvify@10.20.10.60`) |
+| 카메라 | Kurokesu AR0234. 1920x1200 센서 모드의 가운데 1344x1200을 1/3로 줄인 448x400, 20 fps |
+| IMU | FC(UVify V6X, ArduPilot 4.7.2)의 `HIGHRES_IMU` 200 Hz. FC UART2 ↔ Pi UART0, mavlink-router의 UDP 127.0.0.1:14601 |
+| 출력 | VIO 상태를 같은 링크로 FC에 MAVLink `ODOMETRY`로 보냅니다 |
+| 브랜치 | `mavlink` (`005b2b8`): ODOMETRY, yaw 0 정렬, 드론용 초기화 파라미터, health 검사 |
+| Pi 설치 | `~/workspace/ddp-drone/pi5-setup/README.md` (카메라 드라이버, FC UART, mavlink-router, VIO 서비스) |
+
+### 8.2 보정 변환
+
+xeye로 보정한 `capture.yaml`을 변환합니다. 데스크톱의 Granite 저장소에서 실행합니다.
+
+```bash
+cd ~/workspace/granite_reliability
+python3 eval/scripts/capture_to_granite.py <보정한 capture.yaml> --downscale 3 \
+    --calib-out cross/pi5/live/kurokesu_448x400_calib.json \
+    --config-out cross/pi5/live/kurokesu_448x400_handheld.json
+```
+
+- 변환은 `T_imu_cam = (imu2rig_pose)⁻¹ · cam2rig_pose`를 계산합니다. 그래서 rig frame은 보정 JSON에 남지 않습니다.
+- xeye 보정은 보통 `cam2rig_pose`가 0입니다. 이때 rig frame은 카메라 frame이고, `T_imu_cam = (imu2rig_pose)⁻¹`입니다.
+- **Granite의 출력 pose는 항상 IMU 기준(`T_w_i`)입니다.** rig나 카메라 기준이 아닙니다. 위치는 FC IMU의 위치이고, 축은 FC body FRD입니다. FC IMU를 VIO 입력으로 쓰기 때문입니다.
+- 설정 JSON은 최종 후보를 base로 씁니다(2.4절). 픽셀 기준만 이 카메라(125.6 px/rad)로 환산합니다: 움직임 3.054 px, 정지 이동 1.404 px.
+- 새로 보정하면 이 두 파일을 다시 만들어 배포합니다(8.3절). 2026-11-11에 배포한 보정 JSON은 이전 보정의 값입니다.
+
+### 8.3 크로스 빌드와 배포
+
+```bash
+cd ~/workspace/granite_reliability
+cross/pi5/build.sh                  # ~/cross/pi5-build/granite/
+cross/pi5/deploy.sh 10.20.10.60     # Pi 5의 ~/deploy/granite/
+```
+
+- 배포 폴더: `bin/`(실행 파일), `lib/`(`libgranite.so`), `config/`(`cross/pi5/live/*.json`), `scripts/`(`pi5_live_kurokesu_vio.sh`), `runs/`(실행 결과), `DEPLOYED`(커밋과 시각).
+- 2026-11-11에 `005b2b8`을 배포했습니다 [검증, 배포 파일의 파라미터 확인].
+- 손으로 실행: `~/deploy/granite/scripts/pi5_live_kurokesu_vio.sh [--no-gui] [--no-record]`. 바탕화면 아이콘도 같은 스크립트입니다.
+
+### 8.4 ODOMETRY 출력
+
+`--imu_send_odometry 1`이면 VIO가 낸 각 상태를 FC에 보냅니다. 자세한 필드와 FC 설정은 `doc/pi5_kurokesu_live_input.md` 9절에 있습니다.
+
+| 항목 | 값 |
+|---|---|
+| frame | `frame_id` `MAV_FRAME_LOCAL_FRD`(20), `child_frame_id` `MAV_FRAME_BODY_FRD`(12). ArduPilot 4.7.2는 이 두 값만 받습니다 |
+| 위치와 자세 | IMU 기준. 첫 상태의 위치가 원점이고, 첫 상태의 기체 앞쪽이 x(yaw 0)입니다. y는 오른쪽, z는 아래쪽입니다 |
+| 속도 | body FRD 기준 |
+| covariance | 모든 원소가 NaN. FC는 `VISO_*_M_NSE`를 씁니다 |
+| `quality` | 정상이면 0. health 검사가 실패하면 −1 |
+| component id | `MAV_COMP_ID_VISUAL_INERTIAL_ODOMETRY`(197) |
+
+- **yaw 0 정렬:** VIO world의 x축은 초기화가 정하고, 기체 앞쪽과 맞지 않습니다. FC IMU는 z가 아래쪽이라 그 차이가 실행마다 다릅니다. `src/vio_app.h`의 `sendOdometry()`가 첫 상태에서 world를 z축으로 돌려 이 차이를 없앱니다.
+- **health 검사:** inertial 초기화에도 health 검사를 적용합니다(`HealthMonitor`, `src/vi_estimator/mono_vio.cpp`). 최종 후보는 bias 크기 규칙만 씁니다(`vio_mono_health_rot_deg` 180). 한 번 실패하면 −1이 계속됩니다.
+- FC 쪽 설정(`VISO_TYPE`, `VISO_POS_X/Y/Z`, `VISO_DELAY_MS`, `EK3_SRC1_*`)은 FC 담당자가 합니다. 설정하기 전에는 FC가 메시지를 무시합니다.
+
+### 8.5 부팅 때 자동 실행
+
+`pi5-setup/setup_vio_service.sh`가 systemd 서비스 `granite-vio.service`를 설치합니다(`pi5-setup/README.md` 7장). 2026-11-11에 .60에 등록했습니다(enabled). 서비스는 시작하지 않았습니다 [검증, `--check` RESULT OK].
+
+| 항목 | 내용 |
+|---|---|
+| 실행 | `pi5_live_kurokesu_vio.sh --no-gui` + `/etc/default/granite-vio`의 `GRANITE_VIO_ARGS` (기본 `--no-record --imu_send_odometry 1`) |
+| 순서 | `mavlink-router.service` 다음. `/dev/video0`을 최대 30 s 기다립니다 |
+| 재시작 | 없음(`Restart=no`). 부팅 한 번에 VIO 한 번입니다 |
+| 정지 | `sudo systemctl stop granite-vio`. SIGINT로 멈추므로 결과 파일을 씁니다 |
+| 결과 | `~/deploy/granite/runs/<날짜_시각>/`, `journalctl -u granite-vio` |
+
+> **주의:** 서비스는 카메라와 UDP 14601을 씁니다. xeye capture나 보정 캡처를 하기 전에 서비스를 멈춥니다. 비행 중에는 서비스를 멈추거나 다시 시작하지 않습니다.
+
+별도의 watchdog 겸 publisher 프로세스는 만들지 않았습니다. "VIO를 다시 시작하지 않는다"는 가정에서는 그 프로세스의 이득(재시작, `reset_counter` 관리)이 없기 때문입니다.
+
+### 8.6 운용 시나리오와 초기화
+
+시나리오는 다음 순서입니다.
+
+1. 드론을 바닥에 둡니다.
+2. 전원을 켭니다. 서비스가 VIO를 시작합니다.
+3. 드론을 들어 시험 위치에 놓습니다. 1의 위치가 시작 위치이면 이 단계는 없습니다.
+4. 모터를 arm합니다.
+5. 이륙합니다.
+
+- VIO는 "정지 다음의 움직임"에서 정지 시작으로 초기화합니다(2.5절, 2.6절). 보통 3단계에서 들어 올릴 때 1-3 s 안에 초기화합니다(EuRoC MH_03-05 형태). 3단계가 없으면 이륙할 때 초기화합니다. 모터 진동은 `rest_average_time`이 처리합니다.
+- 그래서 원점과 yaw 0은 보통 처음 놓인 위치와 그때의 기체 방향입니다. 시험 위치나 이륙 위치가 아닙니다.
+- 이동 시작은 끕니다. 등속 운동을 정지로 보는 것은 정지 이동 기준이 막습니다.
+- VIO가 실패해도 다시 초기화하지 않습니다. 손으로 옮기는 동안 tracking을 잃으면 이륙 전에 이미 실패 상태일 수 있습니다 [미검증].
+
+### 8.7 알고리즘 선택 근거 (granite와 openvio)
+
+각 알고리즘의 최종 파라미터로 데스크톱에서 한 번씩 실행했습니다. 값은 ATE RMSE [m]이고, SE(3) 정렬 / Sim(3) 정렬 순서입니다 [검증].
+
+| 데이터 | granite | openvio |
+|---|---|---|
+| Unreal Cam0, 640x640 | 6.93 / 6.79 | 5.90 / 5.50 |
+| Unreal Cam3, 640x640 | 4.15 / 4.10 | 4.40 / 4.40 |
+| Unreal Cam0, 426x426 | 12.33 / 9.82 | 5.74 / 5.73 |
+| Unreal Cam3, 426x426 | 10.45 / 10.45 | 13.92 / 13.49 |
+| MH_01 | 0.063 / 0.058 | 0.186 / 0.159 |
+| MH_02 | 0.066 / 0.066 | 0.086 / 0.086 |
+| MH_03 | 0.080 / 0.079 | 0.116 / 0.115 |
+| MH_04 | 0.127 / 0.127 | 0.128 / 0.125 |
+| MH_05 | 0.122 / 0.113 | 0.349 / 0.337 |
+
+- openvio의 최종 파라미터는 가속 0.3, 움직임 2.8°이고, 이동 시작을 끄는 설정이 없습니다.
+- 426x426은 1280x1280을 1278로 자른 뒤 3x3 평균으로 만들었습니다. 두 알고리즘은 같은 이미지를 읽었습니다.
+- MH_01, 02에서 granite는 이륙 때, openvio는 손으로 들고 있을 때 초기화했습니다. 그래서 granite의 평가 구간이 7-9 m 짧습니다.
+- Unreal 결과는 입력의 작은 차이에도 흔들립니다. 같은 장면을 다른 코드로 변환한 사본(픽셀 0.1 %가 밝기 1단계 차이)에서 granite Cam3은 위치 튐으로 FAIL했고, openvio Cam3은 6.64 m였습니다. 그래서 1 m 정도의 차이는 의미 있는 차이로 보지 않습니다.
+- 드론에는 granite를 씁니다. 근거는 세 가지입니다: EuRoC(실제 카메라, 실내 비행)의 정확도, Pi의 처리 시간(Pi 4에서 granite 24 ms/frame, openvio 77 ms/frame), 시나리오에 맞는 초기화.
+- 해상도는 1/2가 1/3보다 대체로 낫습니다. 지금 live는 1/3(448x400)입니다. Pi 5에서 1/2(672x600)의 처리 시간은 측정하지 않았습니다 [미검증].
+
+### 8.8 확인하지 않은 것
+
+- 서비스를 실제로 시작하거나 부팅해서 시작하는 시험 [미검증].
+- 움직이는 live 시험과 비행 시험.
+- 모터를 켠 우리 기체의 IMU 진동과 영상 noise. health 회전 규칙을 다시 켤지는 이 기록(`run_states.csv`의 `prev_corr_rot`)으로 정합니다.
+- UART로 바꾼 뒤의 카메라-IMU 시간 offset과 `VISO_DELAY_MS`.
+- Pi 5에서 해상도 1/2의 실시간 처리.
+
+## 9. 문제 해결
 
 | 증상 | 확인할 것 |
 |---|---|
 | `No rp1-cfe or unicam media graph contains sensor` | 카메라 케이블, `dtoverlay=arducam-pivariety` |
 | `Unexpected MPU WHO_AM_I value`, `Cannot open /dev/i2c-N` | `--i2c` 번호(5.1절), 사용자의 `i2c` 그룹 |
-| `imu_i2c_errors`가 0보다 큼 | Pi 4 리그의 CP2112는 약 150~200회에 1회 전송 시간 초과(`errno 110`, 약 54 ms 뒤)가 납니다. CP2112가 상태 질문에 응답하지 않는 것이 원인입니다. 앱은 FIFO를 유지하고 샘플 경계만 다시 맞춥니다. 그래서 손실은 약 0.3%입니다. 자세한 내용은 `doc/mpu6500-cp2112-issue.md`에 있습니다. |
+| `imu_i2c_errors`가 0보다 큼 | Pi 4 리그의 CP2112는 약 150-200회에 1회 전송 시간 초과(`errno 110`, 약 54 ms 뒤)가 납니다. CP2112가 상태 질문에 응답하지 않는 것이 원인입니다. 앱은 FIFO를 유지하고 샘플 경계만 다시 맞춥니다. 그래서 손실은 약 0.3%입니다. 자세한 내용은 `doc/mpu6500-cp2112-issue.md`에 있습니다. |
 | 초기화되지 않음 | 2.5절의 조건을 확인합니다. 매초 상태 줄이 `tracking=initializing`을 계속 보이면, 리그를 2초 이상 정지한 다음 1초 안에 분명하게 들어 올리거나 옮깁니다. |
 | `queue_drops` 또는 `dropped_input` 증가 | 추정기가 카메라보다 느립니다. 다른 프로세스가 CPU를 쓰는지 확인합니다. GUI가 켜져 있으면 `--show-gui 0`으로 다시 확인합니다. live는 `--fps`를 낮추거나 `--num-threads`를 확인합니다. |
 | 밝기가 목표와 다름 | `camera.metering_circle`이 렌즈 원 안에 있는지 확인합니다. 노출은 `--max-exposure`(5 ms) 다음에 gain을 씁니다. |
@@ -494,12 +617,20 @@ Pi 4 모니터에 GUI 띄우기 [미검증]:
 | `No DISPLAY: running without the GUI` | 화면이 없는 실행입니다(SSH). 결과 파일은 정상으로 씁니다. GUI가 필요하면 7.3절을 따릅니다. |
 | `Give --live, or --dataset-path and --dataset-type` | `granite_vio`에는 `--live` 또는 데이터셋 두 옵션 중 하나가 필요합니다. |
 | `Dataset type bag is not supported` (Pi 4) | Pi 4 빌드에는 rosbag이 없습니다. EuRoC 폴더를 씁니다. |
+| `Another program uses the camera` (Pi 5) | `granite-vio` 서비스가 실행 중일 수 있습니다. `systemctl status granite-vio`로 확인하고, 필요하면 `sudo systemctl stop granite-vio`로 멈춥니다. |
+| `mavlink-router is not active` (Pi 5) | `sudo systemctl start mavlink-router`. 설치는 `pi5-setup/setup_fc_uart_router.sh`입니다. |
+| `IMU: no HIGHRES_IMU for 3 s; requesting it again` (Pi 5) | FC 전원, UART 배선, FC의 `SERIAL3_*` 값을 확인합니다(`pi5-setup/README.md` 6장). |
+| 모터를 켠 뒤 초기화되지 않음 (Pi 5) | 설정에 `vio_mono_init_rest_average_time` 0.1이 있는지 확인합니다(2.6절). 이 값이 없으면 모터 진동이 정지를 막습니다. |
+| FC가 `ODOMETRY`를 쓰지 않음 | `/etc/default/granite-vio`의 `--imu_send_odometry 1`, FC의 `VISO_TYPE` 1, `quality`(−1이면 health 검사 실패)를 확인합니다. |
 
-## 9. 에이전트용 요약
+## 10. 에이전트용 요약
 
 - 실행 프로그램: `granite_vio`. 데이터셋은 `--dataset-path --dataset-type euroc --use-imu 1 [--realtime] --out`. live는 `--live --use-imu 1 --cam-calib --config-path --i2c --out [--record]`.
 - 코드: `src/vio_app.h`(GUI, 실시간 공급, live 모드, `--out`, SUMMARY와 LIVE 줄), `src/vio.cpp`(`granite_vio` 옵션), `src/pi_camera_imu_vio.cpp`(live 앱 옵션, VIO 없는 확인 모드), `include/granite/device/pi_live_support.h`(녹화, `camera.*` 키, 센서 옵션), `src/device/pi_camera_imu.cpp`(카메라와 IMU, IMU 오류 복구), `eval/src/mono_vio_dataset.cpp`(평가 러너), `eval/scripts/capture_to_granite.py`, `eval/scripts/capture_to_euroc.py`, `eval/src/imu_fifo_test.cc`(CP2112 시험).
 - 설정: 데이터셋 실행은 `eval/config/oi_g40_det_gauge_gate_rest.json` + `eval/config/raw_cam1_kb4_calib.json`. Pi 4 live는 `eval/config/live/b0429_pi_640x400_calib.json` + `b0429_pi_640x400_handheld.json`.
 - 빌드: 데스크톱 `build_gui/`. Pi 4 크로스 빌드와 배포 `cross/pi4/`(`build.sh`, `deploy.sh`, 빌드 폴더 `~/cross/pi4-build/`).
 - Pi 4: 바이너리 `~/granite_eval/bin/granite/`, 데이터 `~/granite_eval/data/city_sky_cam1/`, 결과 `~/granite_eval/results/`, live 출력 `~/granite_eval/live/`.
-- 아직 없는 것: Pi 4의 `granite_vio` 실행 확인(데이터셋, live, GUI 부하), 움직이는 live 시험, 30 fps 실시간 시험, live 시간 오프셋 측정, IMU Allan 보정, CP2112 응답 손실의 위치(`doc/mpu6500-cp2112-issue.md` 5절).
+- Pi 5 드론: 브랜치 `mavlink`. 설정 `cross/pi5/live/kurokesu_448x400_calib.json` + `kurokesu_448x400_handheld.json`. 빌드와 배포 `cross/pi5/`(`build.sh`, `deploy.sh`, `~/deploy/granite/`). 자동 실행 `granite-vio.service`(`~/workspace/ddp-drone/pi5-setup/setup_vio_service.sh`, 옵션 `/etc/default/granite-vio`). ODOMETRY와 health 검사 `doc/pi5_kurokesu_live_input.md` 9절.
+- 최종 후보의 초기화와 health 키: `vio_mono_init_method` inertial, `vio_mono_init_moving_start` false, `vio_mono_init_excitation_accel_std` 0.3, `vio_mono_init_rest_average_time` 0.1, `vio_mono_init_max_rest_disparity` 2.0, `vio_mono_init_max_still_disparity` 4.35 (두 픽셀 값은 178.9 px/rad 기준), `vio_mono_health_rot_deg` 180.
+- 평가 데이터: Unreal `eval/data/cam0..3`(`capture_to_euroc.py`로 다시 만들 수 있음), EuRoC `~/data/euroc/MH_01..05`(보정 `data/euroc_ds_calib_mono.json`, 픽셀 기준은 460.8 px/rad로 환산).
+- 아직 없는 것: Pi 4의 `granite_vio` 실행 확인(데이터셋, live, GUI 부하), 움직이는 live 시험, 30 fps 실시간 시험, live 시간 오프셋 측정, IMU Allan 보정, CP2112 응답 손실의 위치(`doc/mpu6500-cp2112-issue.md` 5절), Pi 5 서비스 시작 시험과 비행 시험(8.8절).
