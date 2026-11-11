@@ -47,10 +47,10 @@ using Clock = std::chrono::steady_clock;
 
 // Received positions kept for the trajectory; the oldest 10 % go when it is full. The 3D view draws at most
 // kMaxDrawnSegments of them (evenly spaced).
-constexpr size_t kMaxTrajectory = 200000;
+constexpr size_t kMaxTrajectory = 400000;
 constexpr size_t kMaxDrawnSegments = 20000;
-// Samples kept for the plots (10 minutes at 20 Hz)
-constexpr size_t kMaxPlotSamples = 12000;
+// Samples kept for the plots (20 minutes at 20 Hz)
+constexpr size_t kMaxPlotSamples = 24000;
 // Without a message for this time the viewer marks the data as old [s]
 constexpr double kStaleSeconds = 1.0;
 
@@ -280,13 +280,22 @@ class Receiver {
       if (poll(&p, 1, 100) <= 0) continue;
       const ssize_t n = recv(fd, buffer.data(), buffer.size(), 0);
       if (n <= 0) continue;
-      ++window_messages;
-      window_bytes += static_cast<uint64_t>(n);
+      // The rate counts the datagrams with their IP and UDP headers, as the publisher limits it.
+      window_bytes += static_cast<uint64_t>(n) + 28;
       if (!parseGraniteVis(buffer.data(), static_cast<size_t>(n), &message)) {
         std::lock_guard<std::mutex> lock(shared->mutex);
         ++shared->malformed;
         continue;
       }
+      if (message.fragment_seq != 0) {
+        if (!fragments.add(message, &joined)) continue;
+        if (!parseGraniteVis(reinterpret_cast<const uint8_t*>(joined.data()), joined.size(), &message)) {
+          std::lock_guard<std::mutex> lock(shared->mutex);
+          ++shared->malformed;
+          continue;
+        }
+      }
+      ++window_messages;
       if (!message.points.empty()) {
         landmark_points = message.points;
         landmarks.clear();
@@ -377,6 +386,8 @@ class Receiver {
   }
 
   Shared* shared;
+  FragmentJoiner fragments;
+  std::string joined;
   H264Decoder h264;
   std::unordered_map<uint64_t, size_t> landmarks;  // landmark id to its index in landmark_points
   std::vector<float> landmark_points;

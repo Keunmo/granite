@@ -9,9 +9,9 @@
 #
 # Needs: aarch64-linux-gnu-gcc-13 / g++-13 and cmake. The Pi 5 has libglew-dev, so the GLEW header comes from
 # the sysroot.
-# send_vis_msg h264 needs x264 in the sysroot (usr/include/x264.h, libx264.so). Without it, the build has mjpeg
-# only. To add it without the Pi: extract the arm64 packages libx264-dev and libx264-164 of Ubuntu 24.04 (the
-# version of the Pi, 2:0.164.3108+git31e19f9-1) into the sysroot with dpkg-deb -x. The Pi needs libx264-164.
+# send_vis_msg h264 needs OpenH264 in the sysroot (usr/include/wels, libopenh264.so). Without it, the build has
+# mjpeg only. To add it without the Pi: extract the arm64 packages libopenh264-dev and libopenh264-7 of Ubuntu
+# 24.04 (2.4.1+dfsg-1) into the sysroot with dpkg-deb -x. The Pi needs libopenh264-7.
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 SRC=$(cd "$HERE/../.." && pwd)

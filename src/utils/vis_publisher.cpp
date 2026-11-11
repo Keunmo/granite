@@ -19,8 +19,8 @@
 
 #include <opencv2/imgcodecs.hpp>
 
-#ifdef GRANITE_WITH_X264
-#include <x264.h>
+#ifdef GRANITE_WITH_OPENH264
+#include <wels/codec_api.h>
 #endif
 
 namespace granite {
@@ -56,14 +56,24 @@ enum VisField : int {
   kCameraParams = 27,
   kTic = 28,
   kImageSeq = 29,
+  // A fragment of a message above kMaxPacketPayload: only these fields
+  kFragmentSeq = 40,
+  kFragmentIndex = 41,
+  kFragmentCount = 42,
+  kFragmentData = 43,
 };
 constexpr int kVisVersion = 2;
 constexpr uint64_t kCodecH264 = 1;
 // Keypoint pixels as uint16 in 1/8 pixel
 constexpr float kKeypointScale = 8.0f;
 
-// The largest UDP payload over IPv4.
-constexpr size_t kMaxDatagram = 65507;
+// A message above kMaxPacketPayload goes in fragments of kFragmentBytes bytes: with the fragment fields
+// (kFragmentHeader bytes at most) and the IP and UDP headers, a datagram stays below the Ethernet MTU of 1500
+// bytes, so IP does not fragment it. A message above kMaxMessage does not go.
+constexpr size_t kMaxPacketPayload = 1400;
+constexpr size_t kFragmentBytes = 1400;
+constexpr size_t kFragmentHeader = 24;
+constexpr size_t kMaxMessage = 1 << 20;
 constexpr size_t kIpUdpHeader = 28;
 
 // Writes the protobuf wire format (https://protobuf.dev/programming-guides/encoding/). Each field is a key
@@ -160,15 +170,14 @@ class RateGate {
 
 }  // namespace
 
-#ifdef GRANITE_WITH_X264
-// x264 for the gray camera image: one Annex B access unit for each image, the SPS and PPS before each IDR frame.
-// One thread, no B frames and no lookahead (preset ultrafast, tune zerolatency), so each output belongs to the
-// input image.
+#ifdef GRANITE_WITH_OPENH264
+// OpenH264 for the gray camera image: one Annex B access unit for each image, the SPS and PPS before each IDR
+// frame. One thread, constrained baseline profile, no B frames, so each output belongs to the input image.
 class VisPublisher::H264Encoder {
  public:
   explicit H264Encoder(const VisPublisherOptions& options)
       : hz(std::max(1.0, options.vis_msg_image_hz)),
-        crf(options.vis_msg_h264_crf),
+        qp(std::clamp(options.vis_msg_h264_qp, 0, 51)),
         capped(options.vis_msg_h264_rate_control == "bitrate_cap") {}
   ~H264Encoder() { close(); }
 
@@ -178,19 +187,33 @@ class VisPublisher::H264Encoder {
     if (encoder && (w != width || h != height)) close();
     if (!encoder && !open(w, h)) return {};
     for (int y = 0; y < h; ++y)
-      std::memcpy(picture.img.plane[0] + static_cast<size_t>(y) * picture.img.i_stride[0],
+      std::memcpy(planes.data() + static_cast<size_t>(y) * w,
                   reinterpret_cast<const uint8_t*>(image.ptr) + static_cast<size_t>(y) * image.pitch, w);
-    picture.i_pts = t_ns;
-    picture.i_type = force_idr ? X264_TYPE_IDR : X264_TYPE_AUTO;
+    SSourcePicture picture{};
+    picture.iColorFormat = videoFormatI420;
+    picture.iPicWidth = w;
+    picture.iPicHeight = h;
+    picture.iStride[0] = w;
+    picture.iStride[1] = picture.iStride[2] = w / 2;
+    picture.pData[0] = planes.data();
+    picture.pData[1] = planes.data() + static_cast<size_t>(w) * h;
+    picture.pData[2] = picture.pData[1] + static_cast<size_t>(w / 2) * (h / 2);
+    picture.uiTimeStamp = t_ns / 1000000;  // [ms]
+    if (force_idr) encoder->ForceIntraFrame(true);
     force_idr = false;
-    x264_nal_t* nals = nullptr;
-    int count = 0;
-    x264_picture_t out;
-    const int size = x264_encoder_encode(encoder, &nals, &count, &picture, &out);
-    if (size <= 0 || count <= 0) return {};
-    *keyframe = out.b_keyframe;
-    // The payloads of one encode call are contiguous.
-    return std::string(reinterpret_cast<const char*>(nals[0].p_payload), static_cast<size_t>(size));
+    SFrameBSInfo info{};
+    if (encoder->EncodeFrame(&picture, &info) != cmResultSuccess || info.eFrameType == videoFrameTypeSkip ||
+        info.eFrameType == videoFrameTypeInvalid)
+      return {};
+    std::string unit;
+    for (int i = 0; i < info.iLayerNum; ++i) {
+      const SLayerBSInfo& layer = info.sLayerInfo[i];
+      size_t size = 0;
+      for (int n = 0; n < layer.iNalCount; ++n) size += static_cast<size_t>(layer.pNalLengthInByte[n]);
+      unit.append(reinterpret_cast<const char*>(layer.pBsBuf), size);
+    }
+    *keyframe = info.eFrameType == videoFrameTypeIDR;
+    return unit;
   }
 
   // After a lost frame: the next frame does not depend on the frames before it.
@@ -200,47 +223,67 @@ class VisPublisher::H264Encoder {
   void setMaxKbps(double kbps) {
     max_kbps = std::max(100.0, kbps);
     if (!encoder || !capped) return;
-    x264_param_t param;
-    x264_encoder_parameters(encoder, &param);
-    setRateControl(param);
-    x264_encoder_reconfig(encoder, &param);
+    SBitrateInfo rate{};
+    rate.iLayer = SPATIAL_LAYER_ALL;
+    rate.iBitrate = static_cast<int>(max_kbps * 1000.0);
+    encoder->SetOption(ENCODER_OPTION_BITRATE, &rate);
+    encoder->SetOption(ENCODER_OPTION_MAX_BITRATE, &rate);
   }
 
  private:
   bool open(int w, int h) {
-    x264_param_t param;
-    if (x264_param_default_preset(&param, "ultrafast", "zerolatency") < 0) return false;
-    param.i_threads = 1;
-    param.b_sliced_threads = 0;
-    param.i_width = w;
-    param.i_height = h;
-    param.i_csp = X264_CSP_I420;
-    param.i_log_level = X264_LOG_ERROR;
-    param.b_vfr_input = 1;
-    param.i_timebase_num = 1;
-    param.i_timebase_den = 1000000000;
-    param.i_fps_num = static_cast<uint32_t>(std::lround(hz));
-    param.i_fps_den = 1;
-    // An IDR frame each second: a lost datagram spoils the images until the next one.
-    param.i_keyint_max = static_cast<int>(std::lround(hz));
-    param.b_repeat_headers = 1;
-    param.b_annexb = 1;
-    // The gray values 0-255 pass unchanged (no 16-235 video range).
-    param.vui.b_fullrange = 1;
-    param.rc.i_rc_method = X264_RC_CRF;
-    param.rc.f_rf_constant = static_cast<float>(crf);
-    setRateControl(param);
-    if (x264_param_apply_profile(&param, "baseline") < 0) return false;
-    encoder = x264_encoder_open(&param);
-    if (!encoder) return false;
-    if (x264_picture_alloc(&picture, X264_CSP_I420, w, h) < 0) {
-      x264_encoder_close(encoder);
+    if (WelsCreateSVCEncoder(&encoder) != 0 || !encoder) {
       encoder = nullptr;
       return false;
     }
+    SEncParamExt param;
+    encoder->GetDefaultParams(&param);
+    const int bps = static_cast<int>((capped ? max_kbps : 20000.0) * 1000.0);
+    param.iUsageType = CAMERA_VIDEO_REAL_TIME;
+    param.iPicWidth = w;
+    param.iPicHeight = h;
+    param.fMaxFrameRate = static_cast<float>(hz);
+    param.iSpatialLayerNum = 1;
+    param.iTemporalLayerNum = 1;
+    param.iMultipleThreadIdc = 1;
+    param.iEntropyCodingModeFlag = 0;  // CAVLC: constrained baseline
+    param.iComplexityMode = LOW_COMPLEXITY;
+    // An IDR frame each second: a lost datagram spoils the images until the next one.
+    param.uiIntraPeriod = static_cast<unsigned int>(std::lround(hz));
+    param.eSpsPpsIdStrategy = CONSTANT_ID;
+    param.bEnableLongTermReference = false;
+    param.bEnableSceneChangeDetect = false;
+    param.bEnableBackgroundDetection = false;
+    // quality: a constant QP. bitrate_cap: the rate control keeps the mean rate near the limit and the QP at
+    // vis_msg_h264_qp or higher, so an easy image uses less than the limit. No frame skip: every image goes, and a
+    // hard scene can go above the limit for a short time.
+    param.iRCMode = capped ? RC_BITRATE_MODE : RC_OFF_MODE;
+    param.bEnableFrameSkip = false;
+    param.iTargetBitrate = param.iMaxBitrate = bps;
+    param.iMinQp = qp;
+    param.iMaxQp = capped ? 51 : qp;
+    SSpatialLayerConfig& layer = param.sSpatialLayers[0];
+    layer.iVideoWidth = w;
+    layer.iVideoHeight = h;
+    layer.fFrameRate = static_cast<float>(hz);
+    layer.iSpatialBitrate = layer.iMaxSpatialBitrate = bps;
+    layer.uiProfileIdc = PRO_BASELINE;
+    layer.iDLayerQp = qp;
+    layer.sSliceArgument.uiSliceMode = SM_SINGLE_SLICE;
+    // The gray values 0-255 pass unchanged (no 16-235 video range).
+    layer.bVideoSignalTypePresent = true;
+    layer.bFullRange = true;
+    int log_level = WELS_LOG_ERROR;
+    encoder->SetOption(ENCODER_OPTION_TRACE_LEVEL, &log_level);
+    if (encoder->InitializeExt(&param) != cmResultSuccess) {
+      WelsDestroySVCEncoder(encoder);
+      encoder = nullptr;
+      return false;
+    }
+    int format = videoFormatI420;
+    encoder->SetOption(ENCODER_OPTION_DATAFORMAT, &format);
     // Gray: no color in the chroma planes
-    std::memset(picture.img.plane[1], 128, static_cast<size_t>(picture.img.i_stride[1]) * (h / 2));
-    std::memset(picture.img.plane[2], 128, static_cast<size_t>(picture.img.i_stride[2]) * (h / 2));
+    planes.assign(static_cast<size_t>(w) * h + 2 * static_cast<size_t>(w / 2) * (h / 2), 128);
     width = w;
     height = h;
     force_idr = true;
@@ -249,25 +292,17 @@ class VisPublisher::H264Encoder {
 
   void close() {
     if (!encoder) return;
-    x264_picture_clean(&picture);
-    x264_encoder_close(encoder);
+    encoder->Uninitialize();
+    WelsDestroySVCEncoder(encoder);
     encoder = nullptr;
   }
 
-  // The VBV buffer limits the size of one frame: at most 400 kbit (50 kB), below the UDP limit. crf: a high
-  // rate limit, so the buffer is the only limit.
-  void setRateControl(x264_param_t& param) const {
-    const double kbps = capped ? max_kbps : 400.0 * hz;
-    param.rc.i_vbv_max_bitrate = static_cast<int>(kbps);
-    param.rc.i_vbv_buffer_size = static_cast<int>(std::min(400.0, kbps / 4.0));
-  }
-
   const double hz;
-  const double crf;
+  const int qp;
   const bool capped;
   double max_kbps = 1000.0;
-  x264_t* encoder = nullptr;
-  x264_picture_t picture{};
+  ISVCEncoder* encoder = nullptr;
+  std::vector<uint8_t> planes;  // I420: Y, then U and V
   int width = 0, height = 0;
   bool force_idr = true;
 };
@@ -284,13 +319,15 @@ VisPublisher::VisPublisher(const VisPublisherOptions& options, const Calibration
   if (inet_pton(AF_INET, options.vis_msg_ip.c_str(), &peer.sin_addr) != 1)
     throw std::invalid_argument("vis_msg_ip is not an IPv4 address: " + options.vis_msg_ip);
   if (options.vis_msg_encode == "h264") {
-#ifdef GRANITE_WITH_X264
-    if (options.vis_msg_h264_rate_control != "crf" && options.vis_msg_h264_rate_control != "bitrate_cap")
-      throw std::invalid_argument("vis_msg_h264_rate_control must be crf or bitrate_cap, not " +
+#ifdef GRANITE_WITH_OPENH264
+    if (options.vis_msg_h264_rate_control != "quality" && options.vis_msg_h264_rate_control != "bitrate_cap")
+      throw std::invalid_argument("vis_msg_h264_rate_control must be quality or bitrate_cap, not " +
                                   options.vis_msg_h264_rate_control);
     h264 = std::make_unique<H264Encoder>(options);
 #else
-    throw std::invalid_argument("vis_msg_encode h264: this build has no x264 (use mjpeg)");
+    // The visualization must not stop the VIO.
+    std::cerr << "send_vis_msg: vis_msg_encode h264, but this build has no OpenH264; the images go as mjpeg"
+              << std::endl;
 #endif
   } else if (options.vis_msg_encode != "mjpeg") {
     throw std::invalid_argument("vis_msg_encode must be mjpeg or h264, not " + options.vis_msg_encode);
@@ -305,9 +342,9 @@ VisPublisher::VisPublisher(const VisPublisherOptions& options, const Calibration
   if (fd < 0) throw std::runtime_error(std::string("send_vis_msg: socket failed: ") + std::strerror(errno));
   thread = std::thread([this] { run(); });
   std::cout << "send_vis_msg: UDP to " << options.vis_msg_ip << ':' << options.vis_msg_port << " (image "
-            << options.vis_msg_image_hz << " Hz " << options.vis_msg_encode;
+            << options.vis_msg_image_hz << " Hz " << (h264 ? "h264" : "mjpeg");
   if (h264) {
-    std::cout << " " << options.vis_msg_h264_rate_control << " crf " << options.vis_msg_h264_crf;
+    std::cout << " " << options.vis_msg_h264_rate_control << " qp " << options.vis_msg_h264_qp;
   } else {
     std::cout << " quality " << options.vis_msg_jpeg_quality;
   }
@@ -360,7 +397,7 @@ void VisPublisher::run() {
   // h264 bitrate_cap: the bytes of everything but the video in the last second
   double other_bytes = 0;
   Clock::time_point other_start = Clock::now();
-#ifdef GRANITE_WITH_X264
+#ifdef GRANITE_WITH_OPENH264
   if (h264) h264->setMaxKbps(options.vis_msg_max_kbps * 0.7);
 #endif
   uint64_t seq = 0, image_seq = 0;
@@ -379,10 +416,10 @@ void VisPublisher::run() {
     if (limit_rate)
       debt = std::min(0.0, debt + bytes_per_second * std::chrono::duration<double>(now - last_debt).count());
     last_debt = now;
-#ifdef GRANITE_WITH_X264
+#ifdef GRANITE_WITH_OPENH264
     if (h264 && now - other_start >= std::chrono::seconds(1)) {
       const double other_kbps = other_bytes * 8.0 / 1000.0 / std::chrono::duration<double>(now - other_start).count();
-      // 5 % below the rest of the limit: the VBV of x264 keeps the mean rate only near its limit.
+      // 5 % below the rest of the limit: the rate control keeps the mean rate only near its target.
       if (limit_rate) h264->setMaxKbps(0.95 * (options.vis_msg_max_kbps - other_kbps));
       other_bytes = 0;
       other_start = now;
@@ -399,17 +436,15 @@ void VisPublisher::run() {
     detail.h264 = static_cast<bool>(h264);
     detail.points = points_gate.due(t_ns) && !data->points.empty();
     std::string encoded;
-    int quality = options.vis_msg_jpeg_quality;
     const auto encodeJpeg = [&] {
-      encoded.clear();
       const cv::Mat gray(height, width, CV_8UC1, image->ptr, image->pitch);
       std::vector<uchar> buffer;
-      if (cv::imencode(".jpg", gray, buffer, {cv::IMWRITE_JPEG_QUALITY, quality}))
+      if (cv::imencode(".jpg", gray, buffer, {cv::IMWRITE_JPEG_QUALITY, options.vis_msg_jpeg_quality}))
         encoded.assign(buffer.begin(), buffer.end());
     };
     if (image_due) {
       image_gate.take(t_ns);
-#ifdef GRANITE_WITH_X264
+#ifdef GRANITE_WITH_OPENH264
       if (h264) encoded = h264->encode(*image, t_ns, &detail.image_keyframe);
 #endif
       if (!h264) encodeJpeg();
@@ -420,43 +455,26 @@ void VisPublisher::run() {
       }
     }
 
-    // Above the UDP limit: mjpeg tries a lower JPEG quality (at least 20); then the message goes without the
-    // image, and then without the landmarks.
     std::string message = encode(*data, current, seq, detail, width, height);
-    while (message.size() > kMaxDatagram && detail.image && !h264 && quality > 20) {
-      quality = std::max(20, quality * 2 / 3);
-      encodeJpeg();
-      message = encode(*data, current, seq, detail, width, height);
-    }
-    if (message.size() > kMaxDatagram && detail.image) {
-      detail.image = nullptr;
-      detail.keypoints = false;
-#ifdef GRANITE_WITH_X264
-      if (h264) h264->forceKeyframe();
-#endif
-      message = encode(*data, current, seq, detail, width, height);
-    }
-    if (message.size() > kMaxDatagram && detail.points) {
-      detail.points = false;
-      message = encode(*data, current, seq, detail, width, height);
-    }
     data.reset();
     ++seq;
-    if (message.size() > kMaxDatagram) {
+    if (message.size() > kMaxMessage) {
       ++skipped;
+#ifdef GRANITE_WITH_OPENH264
+      if (h264 && detail.image) h264->forceKeyframe();
+#endif
       continue;
     }
-    // MSG_DONTWAIT: a full socket buffer drops this message, it does not stop the thread.
-    const ssize_t written = sendto(fd, message.data(), message.size(), MSG_DONTWAIT,
-                                   reinterpret_cast<const sockaddr*>(&peer), sizeof(peer));
-    if (written == static_cast<ssize_t>(message.size())) {
-      debt -= static_cast<double>(message.size() + kIpUdpHeader);
-      other_bytes += static_cast<double>(message.size() + kIpUdpHeader - (detail.image ? encoded.size() : 0));
+    const size_t packets = sendMessage(message, seq - 1);
+    const size_t wire = message.size() + packets * (kIpUdpHeader + (packets > 1 ? kFragmentHeader : 0));
+    if (packets > 0) {
+      debt -= static_cast<double>(wire);
+      other_bytes += static_cast<double>(wire - (detail.image ? encoded.size() : 0));
       if (detail.points) points_gate.take(t_ns);
       ++sent;
       if (detail.image) ++images;
     } else {
-#ifdef GRANITE_WITH_X264
+#ifdef GRANITE_WITH_OPENH264
       if (h264 && detail.image) h264->forceKeyframe();
 #endif
       if (send_errors++ == 0)
@@ -465,6 +483,28 @@ void VisPublisher::run() {
                   << std::endl;
     }
   }
+}
+
+size_t VisPublisher::sendMessage(const std::string& message, uint64_t seq) {
+  // MSG_DONTWAIT: a full socket buffer drops the message, it does not stop the thread.
+  const auto send = [&](const std::string& packet) {
+    return sendto(fd, packet.data(), packet.size(), MSG_DONTWAIT, reinterpret_cast<const sockaddr*>(&peer),
+                  sizeof(peer)) == static_cast<ssize_t>(packet.size());
+  };
+  if (message.size() <= kMaxPacketPayload) return send(message) ? 1 : 0;
+  // Fragments of at most kFragmentBytes bytes, each a GraniteVis with the fragment fields only. One UDP datagram
+  // stays below the Ethernet MTU, so IP does not fragment it.
+  const size_t count = (message.size() + kFragmentBytes - 1) / kFragmentBytes;
+  for (size_t i = 0; i < count; ++i) {
+    ProtoWriter w;
+    w.uint(kVersion, kVisVersion);
+    w.uint(kFragmentSeq, seq + 1);
+    w.uint(kFragmentIndex, i);
+    w.uint(kFragmentCount, count);
+    w.bytes(kFragmentData, message.substr(i * kFragmentBytes, kFragmentBytes));
+    if (!send(w.take())) return 0;
+  }
+  return count;
 }
 
 std::string VisPublisher::encode(const VioVisualizationData& data, const State& state, uint64_t seq,

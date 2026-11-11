@@ -35,6 +35,12 @@ struct GraniteVisMessage {
   uint32_t image_width = 0;
   uint32_t image_height = 0;
   uint64_t skipped = 0;
+  // A fragment of a large message: only these fields. The data of fragments 0 to fragment_count - 1 together is
+  // the message.
+  uint64_t fragment_seq = 0;  // 0: not a fragment
+  uint32_t fragment_index = 0;
+  uint32_t fragment_count = 0;
+  std::string fragment_data;
   // Not in the message: the viewer computes them for the image, [u, v, inverse distance 1/m] for each keypoint
   // with a landmark.
   std::vector<float> projections;
@@ -132,8 +138,57 @@ inline bool parseGraniteVis(const uint8_t* data, size_t size, GraniteVisMessage*
       case 27: floats(bytes, length, &out->camera_params); break;
       case 28: floats(bytes, length, &out->T_i_c); break;
       case 29: out->image_seq = value; break;
+      case 40: out->fragment_seq = value; break;
+      case 41: out->fragment_index = static_cast<uint32_t>(value); break;
+      case 42: out->fragment_count = static_cast<uint32_t>(value); break;
+      case 43: out->fragment_data.assign(reinterpret_cast<const char*>(bytes), length); break;
       default: break;
     }
   }
   return true;
 }
+
+// Joins the fragments of the large messages. It keeps at most kMaxPending messages; a newer message replaces
+// the oldest, so a lost fragment does not keep memory.
+class FragmentJoiner {
+ public:
+  // Gives true and the joined message when the fragment completes one.
+  bool add(const GraniteVisMessage& fragment, std::string* message) {
+    if (fragment.fragment_count == 0 || fragment.fragment_count > kMaxFragments ||
+        fragment.fragment_index >= fragment.fragment_count)
+      return false;
+    Pending* pending = nullptr;
+    for (auto& p : slots)
+      if (p.seq == fragment.fragment_seq && p.parts.size() == fragment.fragment_count) pending = &p;
+    if (!pending) {
+      pending = &slots[0];
+      for (auto& p : slots)
+        if (p.seq < pending->seq) pending = &p;
+      pending->seq = fragment.fragment_seq;
+      pending->parts.assign(fragment.fragment_count, std::string());
+      pending->have.assign(fragment.fragment_count, false);
+      pending->missing = fragment.fragment_count;
+    }
+    if (pending->have[fragment.fragment_index]) return false;
+    pending->have[fragment.fragment_index] = true;
+    pending->parts[fragment.fragment_index] = fragment.fragment_data;
+    if (--pending->missing > 0) return false;
+    message->clear();
+    for (const auto& part : pending->parts) message->append(part);
+    pending->seq = 0;
+    pending->parts.clear();
+    pending->have.clear();
+    return true;
+  }
+
+ private:
+  static constexpr size_t kMaxPending = 4;
+  static constexpr uint32_t kMaxFragments = 1024;
+  struct Pending {
+    uint64_t seq = 0;
+    std::vector<std::string> parts;
+    std::vector<bool> have;
+    size_t missing = 0;
+  };
+  Pending slots[kMaxPending];
+};

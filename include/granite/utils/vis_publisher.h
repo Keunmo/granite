@@ -28,17 +28,17 @@ struct VisPublisherOptions {
   // The landmarks of the window go with at most this many messages per second (0: none). The viewer projects
   // them into the images.
   double vis_msg_points_hz = 2.0;
-  // "mjpeg" (each image a gray JPEG) or "h264" (only in a build with x264)
-  std::string vis_msg_encode = "mjpeg";
+  // "h264" or "mjpeg" (each image a gray JPEG). A build without OpenH264 sends mjpeg for h264.
+  std::string vis_msg_encode = "h264";
   int vis_msg_jpeg_quality = 80;
   // Upper limit of the mean send rate [kbit/s] (0: no limit). The state messages always go. mjpeg: an image goes
   // only when the rate allows it. h264 with bitrate_cap: the video gets this limit less the rate of the other
   // data.
   double vis_msg_max_kbps = 2000.0;
-  // h264: "crf" (constant quality vis_msg_h264_crf, no rate limit) or "bitrate_cap" (the same quality target,
+  // h264: "quality" (constant QP vis_msg_h264_qp, no rate limit) or "bitrate_cap" (QP vis_msg_h264_qp or higher,
   // and the rate at most vis_msg_max_kbps)
   std::string vis_msg_h264_rate_control = "bitrate_cap";
-  double vis_msg_h264_crf = 23.0;
+  int vis_msg_h264_qp = 24;
 };
 
 // Sends on its own thread and keeps only the newest data: publish() and setState() never wait for the network,
@@ -79,6 +79,9 @@ class VisPublisher {
   class H264Encoder;
 
   void run();
+  // Sends the message in one datagram, or in fragments when it is large. Returns the number of datagrams, 0 when a
+  // send failed.
+  size_t sendMessage(const std::string& message, uint64_t seq);
   std::string encode(const VioVisualizationData& data, const State& state, uint64_t seq, const Detail& detail,
                      int width, int height) const;
 

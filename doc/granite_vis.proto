@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Visualization message of the Granite VIO (send_vis_msg, src/utils/vis_publisher.cpp).
 //
-// Transport: one UDP datagram for each message, to vis_msg_ip:vis_msg_port. The payload is one serialized
-// GraniteVis (protobuf wire format; granite writes it without libprotobuf). A receiver parses it with any
+// Transport: UDP to vis_msg_ip:vis_msg_port. A message of at most 1400 bytes is one datagram. A larger message goes
+// in fragments of 1400 bytes: each datagram is then a GraniteVis with the fragment fields only, and the data of
+// the fragments 0 to fragment_count - 1 of one fragment_seq together is the message. Each payload is one
+// serialized GraniteVis (protobuf wire format; granite writes it without libprotobuf). A receiver parses it with any
 // protobuf library or with eval/scripts/vis_receiver.py.
 //
 // Frames: world = the VIO world (gravity aligned, z up, metric). The ODOMETRY message to the FC uses another
@@ -36,8 +38,8 @@ message GraniteVis {
                                       // the previous id (the first to 0)
 
   // The image fields: at most vis_msg_image_hz messages per second. The pixels are in this image.
-  bytes image = 16;                   // mjpeg: a gray JPEG. h264: one access unit (Annex B, the SPS and PPS
-                                      // before each IDR frame, full range gray in the Y plane)
+  bytes image = 16;                   // mjpeg: a gray JPEG. h264: one access unit (Annex B, constrained baseline,
+                                      // the SPS and PPS before each IDR frame, gray in the Y plane)
   uint32 image_codec = 24;            // 0: JPEG, 1: H.264
   bool image_keyframe = 25;           // H.264: an IDR frame (it does not depend on the frames before it)
   uint64 image_seq = 29;              // counter of the encoded images; a gap is a lost H.264 frame
@@ -53,4 +55,10 @@ message GraniteVis {
   uint32 image_height = 18;
 
   uint64 skipped = 19;           // states that the publisher did not send because a newer state came first (total)
+
+  // A fragment of a large message: only these fields (and version)
+  uint64 fragment_seq = 40;      // the seq of the message + 1
+  uint32 fragment_index = 41;
+  uint32 fragment_count = 42;
+  bytes fragment_data = 43;
 }

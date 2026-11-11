@@ -45,11 +45,11 @@ max_still_disparity 4.35 px at 178.9 px/rad, no moving start) hold for a hand-he
 motors on, so the live config takes them unchanged except for the pixel scale. The base also turns off the rotation
 rule of the health check (vio_mono_health_rot_deg 180), so only the bias rule sends ODOMETRY quality -1.
   send_vis_msg, vis_msg_ip, vis_msg_port, vis_msg_image_hz, vis_msg_points_hz, vis_msg_encode,
-  vis_msg_jpeg_quality, vis_msg_max_kbps, vis_msg_h264_rate_control, vis_msg_h264_crf
+  vis_msg_jpeg_quality, vis_msg_max_kbps, vis_msg_h264_rate_control, vis_msg_h264_qp
                                         --target live: the visualization messages for a viewer on the ground (UDP,
                                         doc/granite_vis.proto): on, --vis-msg-ip (default 10.20.10.42),
-                                        --vis-msg-port (default 5100), mjpeg images (quality 80) at most 20 Hz,
-                                        landmarks 2 Hz, at most 2000 kbit/s (h264 keys for vis_msg_encode h264).
+                                        --vis-msg-port (default 5100), h264 images (bitrate_cap, QP 24 or higher) at most 20 Hz,
+                                        landmarks 2 Hz, at most 2000 kbit/s.
   camera.*, imu.*                       the live sensor options of the live app.
       camera_v4l2_gen2 node of model kurokesu_ar0234_pi or b0429_pi: camera.<key> for each property key of the node
       with the xeye key names (model, port, width, height, frame_rate, pixel_format gray8, exposure_time, gain, h_flip,
@@ -595,11 +595,11 @@ def main():
         set_key("vis_msg_port", a.vis_msg_port, reason)
         set_key("vis_msg_image_hz", 20.0, reason)
         set_key("vis_msg_points_hz", 2.0, reason)
-        set_key("vis_msg_encode", "mjpeg", reason)
+        set_key("vis_msg_encode", "h264", reason)
         set_key("vis_msg_jpeg_quality", 80, reason)
         set_key("vis_msg_max_kbps", 2000.0, reason)
         set_key("vis_msg_h264_rate_control", "bitrate_cap", reason)
-        set_key("vis_msg_h264_crf", 23.0, reason)
+        set_key("vis_msg_h264_qp", 24, reason)
     base_scale = base_pixels_per_radian(a.base_calib)
     ratio = px_per_rad / base_scale
     for key, what in SCALED_KEYS:

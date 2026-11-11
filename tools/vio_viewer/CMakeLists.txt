@@ -18,6 +18,11 @@ set(THIRDPARTY ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty)
 find_package(glfw3 3.3 REQUIRED)
 find_package(OpenGL REQUIRED)
 find_package(JPEG REQUIRED)
+# OpenH264 (BSD) for the H.264 images: the Ubuntu 24.04 packages libopenh264-dev and libopenh264-7 (2.4.1). They
+# can be extracted with dpkg-deb -x into OPENH264_ROOT; the AppImage has libopenh264.so.7.
+set(OPENH264_ROOT "" CACHE PATH "Folder with usr/include/wels and usr/lib/x86_64-linux-gnu/libopenh264.so")
+find_path(OPENH264_INCLUDE_DIR wels/codec_api.h HINTS ${OPENH264_ROOT}/usr/include REQUIRED)
+find_library(OPENH264_LIBRARY NAMES openh264 HINTS ${OPENH264_ROOT}/usr/lib/x86_64-linux-gnu REQUIRED)
 
 add_library(imgui STATIC
   ${THIRDPARTY}/imgui/imgui.cpp
@@ -34,11 +39,11 @@ target_link_libraries(imgui PUBLIC glfw OpenGL::GL ${CMAKE_DL_LIBS})
 target_compile_definitions(imgui PUBLIC "ImDrawIdx=unsigned int")
 
 add_executable(uvify-vio-viewer vio_viewer.cpp)
-target_include_directories(uvify-vio-viewer PRIVATE ${JPEG_INCLUDE_DIRS}
+target_include_directories(uvify-vio-viewer PRIVATE ${JPEG_INCLUDE_DIRS} ${OPENH264_INCLUDE_DIR}
                                                       ${GRANITE_ROOT}/thirdparty/granite-headers/thirdparty/eigen)
-target_link_libraries(uvify-vio-viewer PRIVATE imgui ${JPEG_LIBRARIES} pthread)
+target_link_libraries(uvify-vio-viewer PRIVATE imgui ${JPEG_LIBRARIES} ${OPENH264_LIBRARY} pthread)
 # libstdc++ and libgcc in the binary: the AppImage then runs on systems with an older libstdc++.
 target_link_options(uvify-vio-viewer PRIVATE -static-libstdc++ -static-libgcc)
-# The AppImage keeps GLFW and libjpeg in usr/lib next to usr/bin.
+# The AppImage keeps GLFW, libjpeg and OpenH264 in usr/lib next to usr/bin.
 set_target_properties(uvify-vio-viewer PROPERTIES BUILD_RPATH "$ORIGIN/../lib")
 install(TARGETS uvify-vio-viewer RUNTIME DESTINATION bin)

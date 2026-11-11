@@ -501,53 +501,55 @@ FC 설정(ArduPilot 4.7.2)입니다. [미검증]
 | `vis_msg_port` | `--vis_msg_port` | 5100 | 5100 | 받는 PC의 UDP port |
 | `vis_msg_image_hz` | `--vis_msg_image_hz` | 20 | 20 | 이미지 메시지의 최대 비율 [Hz]. 카메라 20 fps에서는 모든 frame입니다. 0이면 이미지 메시지가 없습니다 |
 | `vis_msg_points_hz` | `--vis_msg_points_hz` | 2 | 2 | landmark 3D 점의 최대 비율 [Hz]. 0이면 보내지 않습니다 |
-| `vis_msg_encode` | `--vis_msg_encode` | mjpeg | mjpeg | 이미지 압축. `mjpeg`(이미지마다 회색 JPEG) 또는 `h264`(x264가 있는 빌드만) |
+| `vis_msg_encode` | `--vis_msg_encode` | h264 | h264 | 이미지 압축. `h264`(OpenH264가 있는 빌드만) 또는 `mjpeg`(이미지마다 회색 JPEG) |
 | `vis_msg_jpeg_quality` | `--vis_msg_jpeg_quality` | 80 | 80 | mjpeg의 JPEG 품질 (1-100) |
 | `vis_msg_max_kbps` | `--vis_msg_max_kbps` | 2000 | 2000 | 평균 전송률의 상한 [kbit/s]. 상태 메시지는 항상 갑니다. 0이면 상한이 없습니다 |
-| `vis_msg_h264_rate_control` | `--vis_msg_h264_rate_control` | bitrate_cap | bitrate_cap | h264 rate control. `crf`는 화질 고정이고 전송률 상한이 없습니다. `bitrate_cap`은 같은 화질 목표에 `vis_msg_max_kbps` 상한을 둡니다 |
-| `vis_msg_h264_crf` | `--vis_msg_h264_crf` | 23 | 23 | h264 화질 목표 (CRF, 작을수록 좋음) |
+| `vis_msg_h264_rate_control` | `--vis_msg_h264_rate_control` | bitrate_cap | bitrate_cap | h264 rate control. `quality`는 QP 고정이고 전송률 상한이 없습니다. `bitrate_cap`은 QP를 `vis_msg_h264_qp` 이상으로 두고 `vis_msg_max_kbps` 상한을 지킵니다 |
+| `vis_msg_h264_qp` | `--vis_msg_h264_qp` | 24 | 24 | h264 QP (0-51, 작을수록 좋음). `bitrate_cap`에서는 QP의 하한입니다 |
 
-- 명령줄 옵션이 JSON 키보다 우선합니다. 서비스(`granite-vio.service`)에서는 `/etc/default/granite-vio`의 `GRANITE_VIO_ARGS`에 옵션을 넣습니다. 예: `--vis_msg_ip 10.20.10.77`, h264로 바꾸려면 `--vis_msg_encode h264`, 끄려면 `--send_vis_msg 0`.
+- 명령줄 옵션이 JSON 키보다 우선합니다. 서비스(`granite-vio.service`)에서는 `/etc/default/granite-vio`의 `GRANITE_VIO_ARGS`에 옵션을 넣습니다. 예: `--vis_msg_ip 10.20.10.77`, JPEG로 바꾸려면 `--vis_msg_encode mjpeg`, 끄려면 `--send_vis_msg 0`.
 - `capture_to_granite.py --target live`는 이 키들을 live 설정에 씁니다. 주소와 port는 `--vis-msg-ip`, `--vis-msg-port`로 바꿉니다.
-- `vis_msg_encode h264`는 x264(GPL)와 링크한 빌드에서만 됩니다. CMake가 `x264.h`와 `libx264`를 찾으면 링크합니다. 없으면 시작할 때 오류를 냅니다. Pi에는 `libx264-164`가 있어야 합니다(`cross/pi5/build.sh` 머리말).
+- `vis_msg_encode h264`는 OpenH264(BSD)와 링크한 빌드에서만 됩니다. CMake가 `wels/codec_api.h`와 `libopenh264`를 찾으면 링크합니다. 없는 빌드는 경고를 출력하고 mjpeg로 보냅니다. 시각화 때문에 VIO가 멈추지 않게 하려는 것입니다. Pi에는 `libopenh264-7`이 있어야 합니다(`cross/pi5/build.sh` 머리말).
 
 ### 10.2 메시지
 
-- **전송:** UDP datagram 하나가 메시지 하나입니다. 받는 쪽이 없어도 VIO에 영향이 없습니다.
+- **전송:** 메시지 하나가 1400 B 이하이면 UDP datagram 하나로 갑니다. 더 크면 1400 B씩 나눈 조각(fragment)으로 갑니다. 조각 하나는 Ethernet MTU(1500 B)보다 작으므로 IP가 다시 나누지 않습니다. 받는 쪽이 없어도 VIO에 영향이 없습니다.
+- **조각:** 각 조각은 `fragment_seq`(메시지 번호), `fragment_index`, `fragment_count`, `fragment_data`만 가진 `GraniteVis`입니다. 받는 쪽은 같은 `fragment_seq`의 조각을 번호 순서로 이어 붙여 메시지 하나로 읽습니다. 조각 하나를 잃으면 그 메시지 전체를 잃습니다. 1 MB를 넘는 메시지는 보내지 않고 `skipped`에 셉니다.
 - **형식:** protobuf 메시지 `GraniteVis` version 2(`doc/granite_vis.proto`)입니다. Pi에 protobuf와 zmq 개발 패키지가 없으므로, granite는 protobuf wire format을 직접 씁니다(`src/utils/vis_publisher.cpp`의 `ProtoWriter`). 받는 쪽은 어떤 protobuf 라이브러리로도 읽을 수 있습니다. id 필드는 앞 값과의 차이로 씁니다.
 - **좌표:** VIO world(중력 정렬, z 위쪽, m)입니다. FC로 보내는 ODOMETRY의 world(LOCAL_FRD, yaw 0 정렬)와 다릅니다.
 
 | 메시지에 들어가는 것 | 비율 | 내용 | 크기 (Unreal 640x640) |
 |---|---|---|---|
 | 상태 | 상태마다 (20 Hz) | 현재 pose, 속도, gyro와 accel bias, health, keyframe 여부, 최적화 창의 pose들 | 수백 byte |
-| 이미지 | 최대 `vis_msg_image_hz` | 이미지(JPEG 또는 H.264 frame 하나), keypoint(1/8 px 단위 uint16)와 id, 카메라 모델과 parameter, `T_i_c` | JPEG q80 약 43 kB, H.264 2 Mbit/s에서 평균 약 15 kB, keypoint 약 2 kB |
+| 이미지 | 최대 `vis_msg_image_hz` | 이미지(JPEG 또는 H.264 frame 하나), keypoint(1/8 px 단위 uint16)와 id, 카메라 모델과 parameter, `T_i_c` | JPEG q80 약 77 kB, H.264 bitrate_cap 평균 약 10 kB, keypoint 약 2 kB |
 | landmark | 최대 `vis_msg_points_hz` | 창의 landmark 3D 점(float)과 id | 약 9 kB |
 
 - **투영:** 메시지에 landmark 투영이 없습니다. 뷰어가 계산합니다. keypoint id와 같은 id의 landmark가 이 이미지에서 관측된 landmark입니다. 뷰어는 그 점을 `(T_w_i * T_i_c)^-1`로 카메라 좌표로 옮기고 카메라 모델로 투영합니다. landmark는 최대 0.5 s 전의 값이므로 granite GUI의 투영과 조금 다를 수 있습니다.
 - **GUI가 없는 실행:** 추정기는 landmark 투영을 계산하지 않습니다(`vis_projections`). VIO thread의 일이 그만큼 줄어듭니다.
 - **이미지 비율:** 이미지 시간으로 제한합니다. 시간 간격이 주기의 0.75 이상이면 이미지를 넣습니다. 그래서 카메라가 `vis_msg_image_hz`로 돌면 frame마다 이미지가 갑니다.
 - **mjpeg 전송률 상한:** 보낸 byte(IP와 UDP header 포함)를 빚으로 셉니다. 빚은 `vis_msg_max_kbps`의 속도로 0까지 줄어듭니다. 이미지는 빚이 0일 때만 갑니다. 그래서 평균 전송률은 상한을 넘지 않고, 이미지 수가 줄어듭니다.
-- **h264:** x264를 thread 1개, preset ultrafast, tune zerolatency, baseline profile로 씁니다. B frame과 lookahead가 없으므로 frame마다 바로 나옵니다. IDR frame은 1초마다이고, 그 앞에 SPS와 PPS가 있습니다. frame을 버리면 다음 frame을 디코드할 수 없으므로, h264는 전송률 상한 때문에 frame을 버리지 않습니다.
-- **h264 bitrate_cap:** x264의 VBV 상한을 1초마다 `0.95 × (vis_msg_max_kbps − 다른 데이터의 전송률)`로 맞춥니다. 움직임이 크면 x264가 화질을 낮춥니다. VBV buffer는 최대 400 kbit이므로 frame 하나는 UDP 한계보다 작습니다.
-- **UDP 한계(65507 B):** 메시지가 넘으면 mjpeg는 JPEG 품질을 2/3씩 낮춰(최저 20) 다시 압축합니다. 그래도 넘거나 h264이면 이미지를 빼고, 그래도 넘으면 landmark를 뺍니다. 그래도 넘으면 보내지 않고 `skipped`에 셉니다. h264는 frame을 빼거나 송신에 실패하면 다음 frame을 IDR로 만듭니다.
-- **CPU 우선순위:** publisher thread는 `SCHED_IDLE`입니다(x264도 이 thread에서 돕니다). 그래서 VIO thread가 CPU를 쓰는 동안 publisher는 기다립니다. 그 사이에 새 데이터가 오면 이전 데이터를 버리고 `skipped`에 셉니다.
+- **h264:** OpenH264를 thread 1개, constrained baseline profile(CAVLC), 낮은 복잡도로 씁니다. B frame이 없으므로 frame마다 바로 나옵니다. IDR frame은 1초마다이고, 그 앞에 SPS와 PPS가 있습니다. frame을 버리면 다음 frame을 디코드할 수 없으므로, h264는 전송률 상한 때문에 frame을 버리지 않습니다. 인코더의 frame skip도 끕니다.
+- **h264 bitrate_cap:** OpenH264의 목표 bitrate를 1초마다 `0.95 × (vis_msg_max_kbps − 다른 데이터의 전송률)`로 맞춥니다. QP 하한은 `vis_msg_h264_qp`이므로 쉬운 장면은 상한보다 적게 씁니다. 움직임이 크면 QP를 올려 화질을 낮춥니다. 짧은 시간 동안은 상한을 넘을 수 있습니다.
+- **송신 실패:** 조각 하나라도 보내지 못하면(소켓 buffer가 찬 경우 등) 그 메시지를 잃은 것으로 세고, h264는 다음 frame을 IDR로 만듭니다.
+- **CPU 우선순위:** publisher thread는 `SCHED_IDLE`입니다(H.264 인코딩도 이 thread에서 합니다). 그래서 VIO thread가 CPU를 쓰는 동안 publisher는 기다립니다. 그 사이에 새 데이터가 오면 이전 데이터를 버리고 `skipped`에 셉니다.
 
-전송률 측정 [검증, 데스크톱, Unreal Cam3 640x640 앞 800 프레임, 실시간 15.4 fps, 상한 2000 kbit/s, 각 1회]:
+전송률과 화질 측정 [검증, 데스크톱, Unreal Cam3 640x640 앞 200 프레임, 실시간 15.4 fps, 상한 2000 kbit/s, 각 1회]:
 
-| 설정 | 받은 전송률 | 이미지 |
-|---|---|---|
-| mjpeg q80 | 1776 kbit/s | 161개 (약 3.7 /s) |
-| h264 bitrate_cap, CRF 23 | 1947 kbit/s | 673개 (frame마다) |
-| h264 crf 23 (상한 없음) | 5398 kbit/s | 673개 (frame마다) |
+| 설정 | 받은 전송률 (조각과 header 포함) | 이미지 | PSNR 평균 (최소) |
+|---|---|---|---|
+| h264 bitrate_cap, QP 24 이상 (기본) | 1400 kbit/s | 74/74 | 30.6 dB (26.9) |
+| h264 quality, QP 24 | 4748 kbit/s | 74/74 | 38.4 dB (37.8) |
+| mjpeg q80 | 1608 kbit/s | 13/74 | 35.8 dB (34.5) |
 
-- 상태 메시지 674개는 모든 경우에 다 갔습니다(skipped 0).
-- Unreal Cam3는 빠르게 움직이는 장면입니다. 정지에 가까운 장면(.60 녹화)에서 x264는 JPEG q80과 비슷한 화질에 약 0.34 Mbit/s였습니다(데스크톱, 별도 측정).
-- 이전 측정(mjpeg, 상한 1000 kbit/s): 941 kbit/s, 이미지 1.9 /s.
-- Pi 5에서 x264의 CPU 사용량과 VIO 지연에 주는 영향은 측정하지 않았습니다 [미검증].
+- PSNR은 받은 이미지를 디코드해서 데이터셋의 원본 이미지와 비교한 값입니다.
+- 상태 메시지 74개는 모든 경우에 다 갔습니다(skipped 0, `image_seq` 빈칸 0).
+- 조각 전송 전에는 QP 24의 IDR frame(640x640에서 70-93 kB)이 UDP 한계(65507 B)를 넘어 이미지가 하나도 가지 않았습니다.
+- Unreal Cam3는 빠르게 움직이는 장면입니다. Pi의 448x400 이미지는 화소 수가 44%이므로 frame이 더 작습니다.
+- Pi 5에서 OpenH264의 CPU 사용량과 VIO 지연에 주는 영향은 측정하지 않았습니다 [미검증].
 
 ### 10.3 받는 쪽
 
-**UVIFY VIO Viewer (`tools/vio_viewer`):** 받는 PC의 GUI입니다. mjpeg와 h264를 모두 보여 주고, landmark 투영을 계산합니다. `tools/vio_viewer/README.md`에 사용법이 있습니다.
+**UVIFY VIO Viewer (`tools/vio_viewer`):** 받는 PC의 GUI입니다. mjpeg와 h264를 모두 보여 주고(AppImage에 OpenH264 포함), landmark 투영을 계산합니다. `tools/vio_viewer/README.md`에 사용법이 있습니다.
 
 ```bash
 tools/vio_viewer/build_appimage.sh                        # tools/vio_viewer/dist/UVIFY_VIO_Viewer-x86_64.AppImage

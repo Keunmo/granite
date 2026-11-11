@@ -9,7 +9,7 @@ UVIFY VIO Viewer is a standalone ground viewer for the Granite VIO. It receives 
 | `vio_viewer.cpp` | The receiver thread (UDP, JPEG decode) and the GUI (ImGui and ImPlot on GLFW and OpenGL 3) |
 | `granite_vis_message.h` | The `GraniteVis` version 2 decoder (protobuf wire format, no protobuf library) |
 | `camera_projection.h` | The projection of the granite camera models `pinhole`, `kb4`, `ds`, `eucm` and `ucm` |
-| `h264_decoder.h` | The H.264 decoder: the libavcodec of the host, loaded at run time |
+| `h264_decoder.h` | The H.264 decoder (OpenH264) |
 | `CMakeLists.txt` | The build of the viewer and of the ImGui and ImPlot static library |
 | `build_appimage.sh` | The build and the AppImage package |
 | `uvify-vio-viewer.desktop` | The desktop entry of the AppImage |
@@ -18,15 +18,15 @@ UVIFY VIO Viewer is a standalone ground viewer for the Granite VIO. It receives 
 ## Build
 
 ```bash
-sudo apt install -y libglfw3-dev libjpeg-dev libavcodec-dev
+sudo apt install -y libglfw3-dev libjpeg-dev
 tools/vio_viewer/build_appimage.sh        # tools/vio_viewer/dist/UVIFY_VIO_Viewer-x86_64.AppImage
 ```
 
 - The build directory is `build_viewer` in the repository (`BUILD_DIR` changes it). The build uses 6 jobs (`JOBS` changes it).
 - `appimagetool` must be in `PATH`, or `APPIMAGETOOL` must give its path.
-- The build needs the headers of libavcodec (`libavcodec-dev`). The viewer does not link libavcodec.
-- The AppImage contains libglfw and libjpeg. libstdc++ is in the binary. OpenGL, X11 and glibc come from the host. The host must have glibc 2.38 or later (Ubuntu 24.04).
-- H.264 images need `libavcodec60` (FFmpeg 6) on the host. The viewer loads `libavcodec.so.60` and `libavutil.so.58` with `dlopen`. Without them, the viewer shows the JPEG images only, and the status shows the missing package.
+- The build needs OpenH264 (BSD): the Ubuntu 24.04 packages `libopenh264-dev` and `libopenh264-7` (2.4.1). Without root, extract them with `dpkg-deb -x` into `~/cross/openh264-amd64` (`OPENH264_ROOT` changes the folder). With the packages installed, use `OPENH264_ROOT=/`.
+- The AppImage contains libglfw, libjpeg and libopenh264, so it decodes JPEG and H.264 images on another PC without more packages. OpenGL, X11, glibc and libstdc++ come from the host. The host must have glibc 2.38 or later (Ubuntu 24.04).
+- OpenH264 decodes the constrained baseline profile. granite encodes with this profile.
 
 ## Use
 
@@ -52,13 +52,14 @@ tools/vio_viewer/build_appimage.sh        # tools/vio_viewer/dist/UVIFY_VIO_View
 - A smaller `seq` than the last message means a new VIO process. The viewer then clears the trajectory and the plots.
 - The messages have no landmark projections. The viewer computes them: for each keypoint with a landmark of the same id, it moves the landmark into the camera frame with `(T_w_i * T_i_c)^-1` of the message and projects it with the camera model of the message. The landmarks come at `vis_msg_points_hz` (2 Hz), so a projection uses landmarks that are at most about 0.5 s old.
 - H.264: after a lost image (a gap in `image_seq`), the viewer waits for the next IDR frame (at most 1 s).
+- A large message comes in fragments of 1400 bytes. The viewer joins them. It keeps at most 4 incomplete messages; a lost fragment loses its message.
 
 ## Memory
 
 The memory of the viewer does not grow with the run time.
 
 - The viewer keeps only the newest image message (image, keypoints, projections) and the newest landmarks. The landmarks do not accumulate.
-- The trajectory keeps at most 200000 positions. The plots keep at most 12000 samples (10 minutes at 20 Hz). When a buffer is full, the viewer removes the oldest 10 %.
+- The trajectory keeps at most 400000 positions (about 5.5 hours at 20 Hz). The plots keep at most 24000 samples (20 minutes at 20 Hz). When a buffer is full, the viewer removes the oldest 10 %.
 - The 3D view draws at most 20000 trajectory segments.
 
-Measured result [desktop, 1 run]: a synthetic sender sent 5000 state messages per second for 120 s, with an image message at every 100th message. The trajectory buffer was full after about 40 s. From 45 s to 120 s, the RSS of the viewer stayed at 104.1 MB. After the sender stopped, the RSS stayed at 110.2 MB.
+Measured result [desktop, 1 run, the earlier limits of 200000 positions and 12000 samples]: a synthetic sender sent 5000 state messages per second for 120 s, with an image message at every 100th message. The trajectory buffer was full after about 40 s. From 45 s to 120 s, the RSS of the viewer stayed at 104.1 MB. After the sender stopped, the RSS stayed at 110.2 MB.

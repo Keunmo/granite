@@ -159,7 +159,7 @@ inline void loadVisPublisherConfig(const std::string& path, const CLI::App& app,
   load("vis_msg_jpeg_quality", options.vis_msg_jpeg_quality);
   load("vis_msg_max_kbps", options.vis_msg_max_kbps);
   load("vis_msg_h264_rate_control", options.vis_msg_h264_rate_control);
-  load("vis_msg_h264_crf", options.vis_msg_h264_crf);
+  load("vis_msg_h264_qp", options.vis_msg_h264_qp);
   archive.finishNode();
 }
 

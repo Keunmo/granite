@@ -238,16 +238,17 @@ add_library(granite SHARED
 
 
 target_link_libraries(granite PUBLIC ${TBB_LIBRARIES} ${STD_CXX_FS} ${OpenCV_LIBS} PRIVATE rosbag apriltag opengv)
-# send_vis_msg with vis_msg_encode h264 uses x264 (GPL). Without it, the build sends JPEG images only.
-find_path(X264_INCLUDE_DIR x264.h)
-find_library(X264_LIBRARY NAMES x264 libx264.so.164)
-if(X264_INCLUDE_DIR AND X264_LIBRARY)
-  target_include_directories(granite PRIVATE ${X264_INCLUDE_DIR})
-  target_link_libraries(granite PRIVATE ${X264_LIBRARY})
-  target_compile_definitions(granite PRIVATE GRANITE_WITH_X264)
-  message(STATUS "send_vis_msg h264: ${X264_LIBRARY}")
+# send_vis_msg with vis_msg_encode h264 uses OpenH264 (BSD; Ubuntu libopenh264-dev). Without it, the build sends
+# JPEG images only.
+find_path(OPENH264_INCLUDE_DIR wels/codec_api.h)
+find_library(OPENH264_LIBRARY NAMES openh264)
+if(OPENH264_INCLUDE_DIR AND OPENH264_LIBRARY)
+  target_include_directories(granite PRIVATE ${OPENH264_INCLUDE_DIR})
+  target_link_libraries(granite PRIVATE ${OPENH264_LIBRARY})
+  target_compile_definitions(granite PRIVATE GRANITE_WITH_OPENH264)
+  message(STATUS "send_vis_msg h264: ${OPENH264_LIBRARY}")
 else()
-  message(STATUS "send_vis_msg h264: no x264 (X264_INCLUDE_DIR, X264_LIBRARY)")
+  message(STATUS "send_vis_msg h264: no OpenH264 (OPENH264_INCLUDE_DIR, OPENH264_LIBRARY)")
 endif()
 
 
