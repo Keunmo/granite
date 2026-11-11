@@ -375,7 +375,7 @@ granite_vio --live --use-imu 1 --cam-calib calib.json --config-path config.json
 - IMU 입력과 같은 MAVLink 연결을 씁니다. 새 socket을 열지 않습니다.
   - UDP: router가 보낸 마지막 datagram의 송신 주소로 보냅니다. router가 이 메시지를 FC의 UART로 전달합니다. router의 datagram을 받기 전에는 보내지 않습니다.
   - serial: IMU를 읽는 같은 port에 씁니다.
-- system id와 component id는 `HIGHRES_IMU` rate 요청과 같습니다: 1, `MAV_COMP_ID_ONBOARD_COMPUTER`(191).
+- system id와 component id는 `HIGHRES_IMU` rate 요청과 같습니다: 1, `MAV_COMP_ID_VISUAL_INERTIAL_ODOMETRY`(197).
 - IMU thread와 state thread는 mutex 하나(`mavlink_mutex`)를 같이 씁니다. 이 mutex는 fd 쓰기와 close, 송신 주소, `MAVLINK_COMM_0`의 sequence 번호를 보호합니다.
 - 송신이 실패하면 경고를 냅니다. 실패가 이어지는 동안에는 경고를 한 번만 냅니다. VIO는 멈추지 않습니다.
 - 종료할 때 `LIVE` 줄에 `odometry_sent`(보낸 메시지 수)와 `odometry_errors`(실패 수)를 씁니다.

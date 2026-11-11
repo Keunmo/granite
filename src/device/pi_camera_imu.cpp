@@ -80,7 +80,7 @@ constexpr double B0429_PI_GAIN_PER_X = 408.5;
 // imu_mavlink: the values of the xeye imu_mavlink node. Requests come from an
 // onboard computer of the vehicle system.
 constexpr uint8_t MAVLINK_SYSTEM_ID = 1;
-constexpr uint8_t MAVLINK_COMPONENT_ID = MAV_COMP_ID_ONBOARD_COMPUTER;
+constexpr uint8_t MAVLINK_COMPONENT_ID = MAV_COMP_ID_VISUAL_INERTIAL_ODOMETRY;
 constexpr int MAVLINK_READ_TIMEOUT_MS = 100;
 constexpr int64_t MAVLINK_REQUEST_RETRY_NS = 2'000'000'000;
 // No HIGHRES_IMU for this long while the rate is settled requests it again.
