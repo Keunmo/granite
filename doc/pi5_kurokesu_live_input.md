@@ -420,14 +420,23 @@ ArduPilot은 다음과 같이 처리합니다.
 
 - w: VIO world. 중력 정렬이고 z축이 위쪽입니다. 중력 벡터는 (0, 0, −9.81) m/s²입니다(`constants::g`, `include/granite/utils/imu_types.h`). 초기화가 정렬한 중력을 이 벡터로 회전합니다(`src/vi_estimator/keypoint_vio.cpp`).
 - i: VIO의 IMU frame. `mavlinkLoop()`이 `HIGHRES_IMU`의 x, y, z 값을 축을 바꾸지 않고 넘깁니다. 그래서 i는 FC body frame(FRD)입니다.
+- a: ODOMETRY world. w를 z축으로 회전한 좌표계입니다. x축은 첫 상태에서 기체 앞쪽(i의 x축)을 수평면에 투영한 방향입니다. 원점은 첫 상태의 위치입니다.
 - frd: LOCAL_FRD. z축이 아래쪽입니다.
 - T_w_i: VIO 상태의 자세 R_w_i와 위치 p_w [m]. v_w [m/s]: VIO 상태의 world 속도.
 
-R_frd_w = diag(1, −1, −1)입니다. 이것은 x축에 대한 180° 회전입니다. world의 x축 방향은 그대로이고, yaw 원점은 VIO 초기화가 정합니다. body = i이므로 R_i_body = I입니다.
+w의 x축은 VIO 초기화가 정합니다. FC IMU는 z축이 아래쪽이므로 초기화의 `FromTwoVectors()`는 약 180° 회전을 고릅니다. 이 회전의 축은 기체의 작은 기울기가 정합니다. 그래서 w의 x축과 기체 앞쪽 사이의 각은 실행마다 다릅니다. `sendOdometry()`(`src/vio_app.h`)는 첫 상태에서 이 각을 없앱니다.
 
-- 위치 [m]: p = R_frd_w · p_w
-- 자세: R_frd_body = R_frd_w · R_w_i
-- 속도 [m/s]: v_body = R_frd_bodyᵀ · (R_frd_w · v_w). 이 값은 body frame의 속도 R_w_iᵀ · v_w와 같습니다.
+- 첫 상태의 기체 앞쪽 [w]: f = R_w_i₀ · (1, 0, 0)
+- yaw [rad]: ψ = atan2(f_y, f_x)
+- T_a_w = (R_z(−ψ), −R_z(−ψ) · p_w₀). 첫 상태의 기체 앞쪽은 a의 xz 평면에 있습니다. 그래서 첫 상태의 yaw는 0입니다.
+
+`map_idx`가 바뀌면 `sendOdometry()`는 T_a_w를 다시 계산합니다. 새 metric estimator(`metric_run`)는 이전 estimator의 위치와 yaw에서 시작하므로 T_a_w를 그대로 씁니다.
+
+R_frd_a = diag(1, −1, −1)입니다. 이것은 x축에 대한 180° 회전입니다. a의 y축은 기체 왼쪽이고, LOCAL_FRD의 y축은 기체 오른쪽입니다. body = i이므로 R_i_body = I입니다.
+
+- 위치 [m]: p = R_frd_a · T_a_w · p_w
+- 자세: R_frd_body = R_frd_a · R_a_w · R_w_i
+- 속도 [m/s]: v_body = R_frd_bodyᵀ · (R_frd_a · R_a_w · v_w). 이 값은 body frame의 속도 R_w_iᵀ · v_w와 같습니다.
 
 ### 9.4 reset_counter
 

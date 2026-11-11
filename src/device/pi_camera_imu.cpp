@@ -1620,8 +1620,8 @@ void PiCameraImuDevice::sendOdometry(const PoseVelBiasState& state,
                                      uint8_t reset_counter, int8_t quality) {
   if (!options.imu_send_odometry) return;
   if (!state.T_w_i.matrix().allFinite() || !state.vel_w_i.allFinite()) return;
-  // The VIO world is gravity aligned with z up (constants::g); LOCAL_FRD has
-  // z down: a rotation of 180 deg about x. The IMU frame i is the FC body
+  // The world of state is gravity aligned with z up (constants::g); LOCAL_FRD
+  // has z down: a rotation of 180 deg about x. The IMU frame i is the FC body
   // frame (FRD), because mavlinkLoop() keeps the HIGHRES_IMU axes.
   const Eigen::Matrix3d R_frd_w = Eigen::Vector3d(1, -1, -1).asDiagonal();
   const Eigen::Matrix3d R_frd_body = R_frd_w * state.T_w_i.so3().matrix();

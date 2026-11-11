@@ -2246,6 +2246,9 @@ class VioDataset {
   bool send_odometry = false, odometry_started = false;
   size_t odometry_map_idx = 0, odometry_metric_run = 0;
   uint8_t odometry_reset_counter = 0;
+  // The VIO world to the ODOMETRY world (x: the forward at the first state of
+  // the map, origin: the position of that state).
+  Sophus::SE3d odometry_T_a_w;
 
  public:
   // Exit status of a live run: 1 when the device failed or delivered no data.
@@ -2360,13 +2363,26 @@ class VioDataset {
   // states only after its initialization.
   void sendOdometry(const granite::VioStateData& r) {
     if (!send_odometry) return;
-    if (odometry_started && (r.map_idx != odometry_map_idx ||
-                             r.metric_run != odometry_metric_run))
+    if (!r.state.T_w_i.matrix().allFinite()) return;
+    const bool new_map = odometry_started && r.map_idx != odometry_map_idx;
+    if (new_map || (odometry_started && r.metric_run != odometry_metric_run))
       ++odometry_reset_counter;
+    // A new metric estimator starts at the position and yaw of the last one,
+    // so only a new map gets a new alignment.
+    if (!odometry_started || new_map) {
+      const Sophus::SE3d& T_w_i = r.state.T_w_i;
+      const Eigen::Vector3d forward_w = T_w_i.so3() * Eigen::Vector3d::UnitX();
+      const double yaw = std::atan2(forward_w.y(), forward_w.x());
+      const Sophus::SO3d R_a_w = Sophus::SO3d::rotZ(-yaw);
+      odometry_T_a_w = Sophus::SE3d(R_a_w, -(R_a_w * T_w_i.translation()));
+    }
     odometry_started = true;
     odometry_map_idx = r.map_idx;
     odometry_metric_run = r.metric_run;
-    device->sendOdometry(r.state, odometry_reset_counter, r.healthy ? 0 : -1);
+    auto state = r.state;
+    state.T_w_i = odometry_T_a_w * state.T_w_i;
+    state.vel_w_i = odometry_T_a_w.so3() * state.vel_w_i;
+    device->sendOdometry(state, odometry_reset_counter, r.healthy ? 0 : -1);
   }
 
   void stopLive() {
