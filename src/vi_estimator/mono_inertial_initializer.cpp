@@ -73,6 +73,26 @@ double sampleStd(const std::vector<Eigen::Vector3d>& samples, const Eigen::Vecto
   return std::sqrt(sum / static_cast<double>(samples.size() - 1));
 }
 
+// Means of the samples in equal time blocks of (begin_ns, end_ns], about block_time [s] long. An empty block (an IMU
+// gap) gives no mean.
+std::vector<Eigen::Vector3d> blockMeans(const std::vector<int64_t>& t_ns, const std::vector<Eigen::Vector3d>& samples,
+                                        int64_t begin_ns, int64_t end_ns, double block_time) {
+  const int64_t span = end_ns - begin_ns;
+  const int64_t num_blocks = std::max<int64_t>(1, std::llround(span * 1e-9 / block_time));
+  std::vector<Eigen::Vector3d> sums(num_blocks, Eigen::Vector3d::Zero());
+  std::vector<int> counts(num_blocks, 0);
+  for (size_t i = 0; i < samples.size(); ++i) {
+    if (t_ns[i] <= begin_ns || t_ns[i] > end_ns) continue;
+    const int64_t block = (t_ns[i] - begin_ns - 1) * num_blocks / span;
+    sums[block] += samples[i];
+    ++counts[block];
+  }
+  std::vector<Eigen::Vector3d> means;
+  for (int64_t k = 0; k < num_blocks; ++k)
+    if (counts[k] > 0) means.push_back(sums[k] / static_cast<double>(counts[k]));
+  return means;
+}
+
 /**
  * Polynomial whose roots are the Lagrange multipliers of |g| = G ([2]): for min |A1 x + A2 g - b|^2 s.t. |g| = G
  * with the reduced normal equations D g = d, the stationary points satisfy (D - l I) g = d and |g| = G, i.e.
@@ -214,6 +234,7 @@ MonoInertialInitOptions MonoInertialInitOptions::fromConfig(const VioConfig& con
   o.parallax_tracks = config.vio_mono_init_parallax_tracks;
   o.min_refined_fraction = config.vio_mono_init_min_refined_fraction;
   o.moving_start = config.vio_mono_init_moving_start;
+  o.rest_average_time = config.vio_mono_init_rest_average_time;
   return o;
 }
 
@@ -406,12 +427,14 @@ bool MonoInertialInitializer::startAtRest(MonoInertialInitResult& result) const 
   }
   // [4]: the older half (t_end - W, t_end - W/2] must be still and the newer half excited
   std::vector<Eigen::Vector3d> accel_newer, accel_older, gyro_older;
+  std::vector<int64_t> t_older;
   int64_t older_end = -1;
   for (const ImuData& s : imu) {
     if (s.t_ns > t_end - W / 2 && s.t_ns <= t_end) accel_newer.push_back(s.accel);
     if (s.t_ns > t_end - W && s.t_ns <= t_end - W / 2) {
       accel_older.push_back(s.accel);
       gyro_older.push_back(s.gyro);
+      t_older.push_back(s.t_ns);
       older_end = s.t_ns;
     }
   }
@@ -429,6 +452,15 @@ bool MonoInertialInitializer::startAtRest(MonoInertialInitResult& result) const 
   const Eigen::Vector3d w_older = mean_of(gyro_older);
   result.accel_std_new = sampleStd(accel_newer, a_newer);
   result.accel_std_old = sampleStd(accel_older, a_older);
+  if (options.rest_average_time > 0.0) {
+    const std::vector<Eigen::Vector3d> means =
+        blockMeans(t_older, accel_older, t_end - W, t_end - W / 2, options.rest_average_time);
+    if (means.size() < 2) {
+      result.reason = "fewer than two accel blocks in the older half";
+      return false;
+    }
+    result.accel_std_old = sampleStd(means, mean_of(means));
+  }
   if (result.accel_std_new < options.excitation_accel_std) {
     result.reason = "no IMU excitation in the newer half";
     return false;

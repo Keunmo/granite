@@ -96,6 +96,9 @@ struct MonoInertialInitOptions {
   // Not in openvio: moving start, minimum fraction of the tracks with a point in front of every ray (0: off)
   double min_refined_fraction = 0.0;
   bool moving_start = true;  // false: never use the moving start, wait for a start at rest
+  // Not in openvio: start at rest, the still check of the older half uses the accel means of blocks of this time [s]
+  // (0: the samples). A block mean removes the motor vibration.
+  double rest_average_time = 0.0;
   Eigen::Vector3d gyro_bias_prior = Eigen::Vector3d::Zero();   // Bias linearization point and prior mean
   Eigen::Vector3d accel_bias_prior = Eigen::Vector3d::Zero();
 

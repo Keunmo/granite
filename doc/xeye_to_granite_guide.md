@@ -108,7 +108,7 @@ $B/granite_vio --live --use-imu 1 --cam-calib $C/b0429_pi_640x400_calib.json \
 
 ```bash
 cd ~/workspace/granite_reliability
-python3 eval/scripts/capture_to_granite.py ~/workspace/openvio/config/capture.yaml --downscale 3 --handheld \
+python3 eval/scripts/capture_to_granite.py ~/workspace/openvio/config/capture.yaml --downscale 3 \
     --i2c-device /dev/i2c-23 \
     --calib-out eval/config/live/b0429_pi_640x400_calib.json \
     --config-out eval/config/live/b0429_pi_640x400_handheld.json
@@ -153,15 +153,15 @@ Unreal의 카메라는 계수가 한 개인 등거리 uwfisheye입니다. 이 �
 | 키 | 값 (Pi 4 640x400) | 이유 |
 |---|---|---|
 | `vio_use_deterministic` | false | live에서는 결정론 합산이 필요 없습니다(약 7% 느림). |
-| `vio_mono_init_max_still_disparity` | 8.7 → 6.05 px | 움직임 기준입니다. 평가 카메라 178.9 px/rad 대 이 카메라 124.5 px/rad의 비율로 줄입니다. |
-| `vio_mono_init_max_rest_disparity` | 1.0 → 2.0 (`--handheld`), 다음에 해상도 비례 (640x400: 1.392 px) | 2.5절 |
-| `vio_mono_init_excitation_accel_std` | 0.3 (최종 후보와 같음) | 2.5절 |
+| `vio_mono_init_max_still_disparity` | 4.35 → 3.03 px | 움직임 기준입니다. 평가 카메라 178.9 px/rad 대 이 카메라 124.5 px/rad의 비율로 줄입니다. |
+| `vio_mono_init_max_rest_disparity` | 2.0 → 1.392 px | 정지 기준입니다. 같은 비율로 줄입니다. 2.5절 |
 | `camera.*` | 1920x1200, downscale 3, 15 fps, 자동 노출 5 ms 한도, 측광 원 `[310.2, 202.5, 203.7]`, `/dev/i2c-23` | live 센서 옵션 |
 
 - 픽셀 노이즈와 셀 크기(`optical_flow_detection_grid_size` 40 px, `vio_obs_std_dev` 등)는 그대로 둡니다. openvio 변환과 같은 규칙입니다.
-- `--handheld` 없이 만든 설정(`b0429_pi_640x400_config.json`)은 최종 후보의 시작 규칙(정지 이동 1.0을 해상도 비례로 줄인 값, 가속 0.3)을 씁니다. 손으로 드는 리그에는 권장하지 않습니다.
+- 최종 후보의 시작 규칙(가속 0.3, `rest_average_time` 0.1 s, 정지 이동 2.0, 움직임 4.35, 이동 시작 끔)은 손으로 드는 리그와 모터를 켠 드론에 모두 맞습니다(2.6절). 그래서 live 변환은 이 값을 해상도 비례만 바꿔 씁니다.
+- 이전의 `--handheld` 옵션은 2026-11-11에 없앴습니다. 그 값(가속 0.3, 정지 이동 2.0)은 최종 후보에 들어 있습니다.
 
-### 2.5 정지 시작 요구와 `--handheld`
+### 2.5 정지 시작 요구
 
 최종 후보는 정지 상태에서만 초기화합니다. 이동 중에는 초기화하지 않고 정지를 기다립니다. 초기화 조건은 다음과 같습니다 [코드 확인, `mono_inertial_initializer.cpp`].
 
@@ -177,7 +177,7 @@ smrig_ar0234 cam1(손으로 든 리그, 0~8.3 s 정지 후 천천히 움직임) 
 | 정지 이동 끔, 가속 1.0 | 8.65 s | 앞쪽 반에 움직임이 들어감(이동 3.99 px, bg 0.03 rad/s) |
 | 정지 이동 끔, 가속 0.3 | 7.93 s (openvio도 7.93 s) | SE3 ATE 0.66 m, Sim3 스케일 1.019, 길이 204.7 m 대 202.7 m, 발산 없음 |
 | 정지 이동 1.5 (Unreal 기준), 가속 0.3 | 8.2 s | 길이 207.3 m, 발산 없음 |
-| `--handheld` (정지 이동 2.0, Unreal 기준), 가속 0.3 | 7.93 s | 정지 이동을 끈 경우와 같은 시각, 길이 204.7 m, 발산 없음 |
+| 정지 이동 2.0 (Unreal 기준), 가속 0.3 | 7.93 s | 정지 이동을 끈 경우와 같은 시각, 길이 204.7 m, 발산 없음 |
 
 정지 이동 기준을 끄면 안 됩니다. Unreal(capture.yaml: `/media/uvify/uvify_ssd/Data/unreal_data_city_sky/capture.yaml`, Pi 4)에서 확인한 결과입니다 [검증, 데스크톱 결정론 실행].
 
@@ -187,12 +187,12 @@ smrig_ar0234 cam1(손으로 든 리그, 0~8.3 s 정지 후 천천히 움직임) 
 | 가속 0.3만 바꿈 | 4/4 PASS | 4/4 PASS, ATE 같음 | 모두 초기화 안 함 |
 | 정지 이동 끔, 가속 0.3 | 4/4 PASS | — | 17/17 발산 (등속을 정지로 판단) |
 | 정지 이동 1.5, 가속 0.3 | 4/4 PASS | — | 모두 초기화 안 함 |
-| `--handheld` (정지 이동 2.0, 가속 0.3) | 4/4 PASS | 4/4 PASS, ATE 같음 | 모두 초기화 안 함 |
+| 정지 이동 2.0, 가속 0.3 | 4/4 PASS | 4/4 PASS, ATE 같음 | 모두 초기화 안 함 |
 
 - 이동 중 시작 17개는 Cam0–3의 시작 프레임 1000, 1150, 2550, 3200과 Cam1의 5800입니다.
 - 기준 2.0은 Unreal 4 m/s 등속(2.8 px)보다 작습니다. 더 느린 등속(약 2.9 m/s 이하)은 정지로 판단할 수 있습니다 [미검증].
 - 2026-11-06부터 최종 후보 설정은 가속 0.3을 명시합니다. 코드 기본값은 1.0 그대로입니다. 그래서 이 키가 없는 이전 설정의 결과는 바뀌지 않습니다. 가속 0.3은 Cam1과 Cam2의 1000 프레임 결정론 궤적이 1.0과 바이트 단위로 같습니다 [검증, 데스크톱].
-- 최종 후보의 정지 이동 기준은 1.0 그대로입니다. live 변환의 `--handheld`만 2.0을 씁니다.
+- 위 두 표의 움직임 기준은 모두 8.7 px입니다. 2026-11-11부터 최종 후보는 정지 이동 2.0과 움직임 4.35를 씁니다(2.6절).
 
 리그를 움직일 때 다음을 지킵니다.
 
@@ -200,8 +200,30 @@ smrig_ar0234 cam1(손으로 든 리그, 0~8.3 s 정지 후 천천히 움직임) 
 - 그 다음 1초 안에 분명하게 움직입니다. 들어 올리거나 옮기는 움직임(가속)이 필요합니다. 제자리 회전만으로는 가속도 조건을 못 넘을 수 있습니다.
 - 초기화가 되지 않으면 리그를 다시 2초 이상 정지한 다음 다시 움직입니다. 초기화 전에는 상태 출력이 없습니다.
 - Pi 4 live 리그의 정지 상태 가속도 표준편차는 0.017~0.032 m/s²입니다 [검증]. 0.3보다 충분히 작습니다.
-- Pi 4 live 리그를 책상에 두었을 때 Granite 트랙의 앞쪽 반 이동은 중앙값 0.38 px, 최대 1.23 px입니다 [검증, 60 s]. 최종 후보 값을 비율로 줄인 기준(0.70 px)보다 클 때가 있습니다. `--handheld` 기준(1.392 px)보다는 작지만 여유가 작습니다. 정지해 있어도 초기화가 늦어질 수 있습니다 [미검증].
-- 가속도 기준은 앞쪽 반에도 쓰입니다. 앞쪽 반의 가속도 표준편차가 기준 이하여야 정지입니다. 기준 0.3에서는 모터 진동처럼 작은 흔들림도 정지를 막을 수 있습니다. 드론은 모터를 켜기 전에 초기화합니다 [미검증, 드론 진동 미측정].
+- Pi 4 live 리그를 책상에 두었을 때 Granite 트랙의 앞쪽 반 이동은 중앙값 0.38 px, 최대 1.23 px입니다 [검증, 60 s]. 정지 이동 1.0을 비율로 줄인 기준(0.70 px)보다 클 때가 있습니다. 정지 이동 2.0의 기준(1.392 px)보다는 작지만 여유가 작습니다. 정지해 있어도 초기화가 늦어질 수 있습니다 [미검증]. 그래서 정지 이동 기준을 2.0보다 낮추지 않습니다.
+- 가속도 기준은 앞쪽 반에도 쓰입니다. 앞쪽 반은 0.1 s 평균의 표준편차를 씁니다(`rest_average_time`, 2.6절). 그래서 모터 진동은 정지를 막지 않습니다. 우리 FC의 진동은 측정하지 않았습니다 [미검증].
+
+### 2.6 모터 진동과 움직임 기준 (2026-11-11)
+
+EuRoC MH_01-05의 시작 장면은 손으로 들기, 바닥 정지, 모터 켬, 이륙의 순서입니다. 드론 시나리오와 비슷합니다.
+
+**모터 진동:** 모터를 켠 바닥 정지 구간의 가속도 표준편차는 0.9-1.6 m/s²입니다. 가속 기준 0.3을 넘으므로 이전 규칙은 MH_01, 02, 04에서 초기화하지 않았습니다. `vio_mono_init_rest_average_time` 0.1 s는 앞쪽 반을 0.1 s 구간으로 나누어 평균한 다음 표준편차를 씁니다. 이 값은 0.09-0.16 m/s²이고, 기준 0.3 안에 들어옵니다 [검증, python과 granite 실행]. 뒤쪽 반, 중력 방향, bias는 원래 샘플을 씁니다. 코드 기본값 0은 이전 동작과 같습니다(궤적 md5 같음).
+
+**움직임 기준:** 천천히 들어 올리면 앞쪽 반에 움직임이 들어간 뒤에야 뒤쪽 반이 움직임 기준을 넘습니다. MH_04에서 8.7 px 기준(Unreal 카메라 환산)은 0.015 px 차이로 들어 올림을 놓치고 이륙(19.85 s)까지 기다렸습니다. 정지 이동 기준이 앞쪽 반을 따로 검사하므로 움직임 기준을 낮추어도 등속 운동을 정지로 보지 않습니다.
+
+| 움직임 / 정지 이동 (Unreal 카메라 px) | Unreal 이동 중 시작 4개 (Cam3) | Unreal Cam3 전체, EuRoC MH_01-05 | MH_04 초기화 |
+|---|---|---|---|
+| 8.7 / 2.0 | 모두 초기화 안 함 | 6/6 PASS | 19.85 s (이륙) |
+| 6.0 / 2.0 | 모두 초기화 안 함 | 6/6 PASS | 1.60 s |
+| **4.35 / 2.0 (최종 후보)** | **모두 초기화 안 함** | **6/6 PASS** | **1.15 s (들어 올림)** |
+| 3.0 / 2.0 | 모두 초기화 안 함 | 6/6 PASS | 1.15 s |
+| 각 움직임 / 3.0 | 2개를 4.6-9.2 m/s에서 정지 시작 | 6/6 PASS | 같음 |
+
+[검증, 데스크톱, 각 1회]
+
+- 정지 이동 3.0은 먼 장면에서 광축 방향으로 움직이는 등속 운동(Cam3, 광축과 진행 방향 158°, 반쪽 창 약 3 px)을 정지로 봅니다.
+- EuRoC 설정은 같은 각도 기준을 EuRoC 카메라(460.8 px/rad)로 환산합니다. 데이터마다 다른 값은 쓰지 않습니다.
+- 이동 시작을 켜면 손으로 들고 시작한 MH_01, 02가 2 s에 초기화합니다. 그러나 개선판 이동 시작은 Unreal 이동 중 시작 4개 중 1개가 발산했습니다. 드론 시나리오(바닥에서 전원을 켬)에서는 들어 올릴 때 정지 시작을 하므로 이동 시작을 끕니다.
 
 ## 3. 크로스 빌드와 배포
 
@@ -410,7 +432,7 @@ $B/granite_vio --dataset-path live/run1_euroc --dataset-type euroc --use-imu 1 -
 cd ~/workspace/granite_reliability
 D=~/multipleye_docker/data/260625_163357_smrig_ar0234
 python3 eval/scripts/capture_to_euroc.py $D eval/data/smrig_cam1 --camera cam1 --node multicam_lux --imu imu_lux --downscale 2
-python3 eval/scripts/capture_to_granite.py $D/capture.yaml --camera cam1 --downscale 2 --target capture --handheld \
+python3 eval/scripts/capture_to_granite.py $D/capture.yaml --camera cam1 --downscale 2 --target capture \
     --calib-out eval/config/live/smrig_cam1_672x600_calib.json --config-out eval/config/live/smrig_cam1_672x600_handheld.json
 sh eval/src/build.sh live      # 처음 한 번
 eval/bin/live/granite_mono_vio_dataset --dataset-path eval/data/smrig_cam1 \

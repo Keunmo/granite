@@ -179,6 +179,12 @@ struct VioConfig {
   // false: never use the moving start, wait for a start at rest (true: the
   // moving start of openvio when the platform moves).
   bool vio_mono_init_moving_start;
+  // Start at rest: the still check of the older half uses the accel means of
+  // blocks of this time [s], not the samples (0: the samples). A block mean
+  // removes the motor vibration: EuRoC MH on the ground with the motors on
+  // has a sample std of 0.9-1.6 m/s^2 and a 0.1 s block std of 0.09-0.16
+  // m/s^2. Not in openvio.
+  double vio_mono_init_rest_average_time;
 
   double mapper_obs_std_dev;
   double mapper_obs_huber_thresh;

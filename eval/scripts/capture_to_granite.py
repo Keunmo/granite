@@ -40,9 +40,9 @@ with
                                         scales at the image center (px/rad) of this camera and of --base-calib (the
                                         camera that the base was evaluated with). The other pixel values are noise
                                         or cell sizes in pixels and stay (as in openvio capture_to_config.py).
-  --handheld                            config.vio_mono_init_excitation_accel_std 0.3 and
-                                        config.vio_mono_init_max_rest_disparity 2.0 at the base camera (then scaled)
-                                        for the slow start of a hand-held rig
+The start rules of the base (excitation 0.3 m/s^2, rest_average_time 0.1 s, max_rest_disparity 2.0 px,
+max_still_disparity 4.35 px at 178.9 px/rad, no moving start) hold for a hand-held rig and for a drone with the
+motors on, so the live config takes them unchanged except for the pixel scale.
   camera.*, imu.*                       the live sensor options of the live app.
       camera_v4l2_gen2 node of model kurokesu_ar0234_pi or b0429_pi: camera.<key> for each property key of the node
       with the xeye key names (model, port, width, height, frame_rate, pixel_format gray8, exposure_time, gain, h_flip,
@@ -493,11 +493,6 @@ def main():
     ap.add_argument("--model", choices=("kb4", "ds", "eucm"), help="force the camera model of a uwfisheye fit")
     ap.add_argument("--max-error-px", type=float, default=0.5,
                     help="largest fit error [px, written size] that keeps kb4 and that passes without a warning")
-    ap.add_argument("--handheld", action="store_true",
-                    help="start at rest of a hand-held rig: vio_mono_init_excitation_accel_std 0.3 and "
-                         "vio_mono_init_max_rest_disparity 2.0 px at the base camera (then scaled). The base values "
-                         "(1.0 m/s^2, 1.0 px) did not initialize on the slow start of smrig_ar0234 cam1. The value "
-                         "0 (off) started at a constant velocity in all 17 Unreal moving-start subsets and diverged")
     ap.add_argument("--fps", type=float,
                     help="camera.fps of the live config (default: frame_rate of a kurokesu_ar0234_pi or b0429_pi "
                          "node, else 15: Granite ran at 15 fps)")
@@ -586,15 +581,6 @@ def main():
     set_key("config.vio_use_deterministic", False, "live: the deterministic sums cost about 7 % and add nothing")
     base_scale = base_pixels_per_radian(a.base_calib)
     ratio = px_per_rad / base_scale
-    if a.handheld:
-        set_key("config.vio_mono_init_excitation_accel_std", 0.3,
-                "hand-held start: the motion starts slowly; 0.3 m/s^2 is above the rest noise (0.02-0.04) and "
-                "detects the start before motion enters the still half (openvio 6.5)")
-        set_key("config.vio_mono_init_max_rest_disparity", 2.0,
-                "hand-held start: the older half of a slow start moves above 1.0 px before the newer half passes "
-                "max_still_disparity. 2.0 px (Unreal camera) starts smrig_ar0234 cam1 at the same time as 0 (off), "
-                "and starts none of the 17 Unreal moving-start subsets (4 m/s gives 2.8 px). The value 0 starts "
-                "all 17 at a constant velocity and diverges")
     for key, what in SCALED_KEYS:
         value = float(cfg.get(key, GRANITE_DEFAULTS[key]))
         if value > 0:
