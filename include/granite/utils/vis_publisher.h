@@ -22,8 +22,11 @@ struct VisPublisherOptions {
   // The camera image (gray JPEG) with its keypoints, landmark projections and the landmarks of the window goes
   // with at most this many messages per second (0: none). The other messages have the state only (a few
   // hundred bytes).
-  double vis_msg_image_hz = 5.0;
-  int vis_msg_jpeg_quality = 60;
+  double vis_msg_image_hz = 20.0;
+  int vis_msg_jpeg_quality = 80;
+  // Upper limit of the mean send rate [kbit/s]. An image message goes only when the rate allows it; the state
+  // messages always go (0: no limit).
+  double vis_msg_max_kbps = 2000.0;
 };
 
 // Sends on its own thread and keeps only the newest data: publish() and setState() never wait for the network,

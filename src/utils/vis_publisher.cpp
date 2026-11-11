@@ -5,6 +5,7 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cstring>
@@ -44,6 +45,7 @@ enum VisField : int {
 
 // The largest UDP payload over IPv4.
 constexpr size_t kMaxDatagram = 65507;
+constexpr size_t kIpUdpHeader = 28;
 
 // Writes the protobuf wire format (https://protobuf.dev/programming-guides/encoding/). Each field is a key
 // varint (field number << 3 | wire type) and a value. A varint has 7 bits in each byte, the low bits first, and
@@ -121,7 +123,7 @@ VisPublisher::VisPublisher(const VisPublisherOptions& options) : options(options
   thread = std::thread([this] { run(); });
   std::cout << "send_vis_msg: UDP to " << options.vis_msg_ip << ':' << options.vis_msg_port
             << " (image " << options.vis_msg_image_hz << " Hz, JPEG quality " << options.vis_msg_jpeg_quality
-            << ")" << std::endl;
+            << ", at most " << options.vis_msg_max_kbps << " kbit/s)" << std::endl;
 }
 
 VisPublisher::~VisPublisher() {
@@ -153,13 +155,20 @@ void VisPublisher::setState(const VioStateData& data) {
 }
 
 void VisPublisher::run() {
-  using Clock = std::chrono::steady_clock;
   const bool send_images = options.vis_msg_image_hz > 0;
-  const auto image_period = std::chrono::duration_cast<Clock::duration>(
-      std::chrono::duration<double>(send_images ? 1.0 / options.vis_msg_image_hz : 0.0));
-  Clock::time_point last_image;
+  // The limit uses the image times, which have jitter: with 0.75 of the period, a camera at the
+  // vis_msg_image_hz rate sends every frame.
+  const int64_t image_period_ns = send_images ? static_cast<int64_t>(0.75e9 / options.vis_msg_image_hz) : 0;
+  int64_t last_image_ns = 0;
   bool any_image = false;
   uint64_t seq = 0;
+  // Send debt [byte]: each sent message (with the IP and UDP headers) adds to it, and it goes down at
+  // vis_msg_max_kbps to 0. An image message goes only at 0, so the mean rate stays below the limit.
+  using Clock = std::chrono::steady_clock;
+  const bool limit_rate = options.vis_msg_max_kbps > 0;
+  const double bytes_per_second = options.vis_msg_max_kbps * 1000.0 / 8.0;
+  double budget = 0;
+  Clock::time_point last_budget = Clock::now();
   while (true) {
     VioVisualizationData::Ptr data;
     State current;
@@ -173,28 +182,44 @@ void VisPublisher::run() {
 
     // The image and its keypoints, projections and landmarks go with at most vis_msg_image_hz messages; the
     // other messages have the state only.
-    const auto now = Clock::now();
-    const bool detail = send_images && (!any_image || now - last_image >= image_period);
+    const int64_t t_ns = static_cast<int64_t>(data->t_ns);
+    const Clock::time_point now = Clock::now();
+    if (limit_rate) {
+      budget = std::min(0.0, budget + bytes_per_second * std::chrono::duration<double>(now - last_budget).count());
+    }
+    last_budget = now;
+    const bool detail = send_images && (!limit_rate || budget >= 0) &&
+                        (!any_image || t_ns - last_image_ns >= image_period_ns || t_ns < last_image_ns);
     std::string jpeg;
     int width = 0, height = 0;
-    if (const ManagedImage<PixelType>* image = imageOf(*data)) {
+    const ManagedImage<PixelType>* image = imageOf(*data);
+    if (image) {
       width = static_cast<int>(image->w);
       height = static_cast<int>(image->h);
-      if (detail) {
-        const cv::Mat gray(height, width, CV_8UC1, image->ptr, image->pitch);
-        std::vector<uchar> buffer;
-        if (cv::imencode(".jpg", gray, buffer, {cv::IMWRITE_JPEG_QUALITY, options.vis_msg_jpeg_quality}))
-          jpeg.assign(buffer.begin(), buffer.end());
-      }
     }
+    const auto encodeJpeg = [&](int quality) {
+      jpeg.clear();
+      const cv::Mat gray(height, width, CV_8UC1, image->ptr, image->pitch);
+      std::vector<uchar> buffer;
+      if (cv::imencode(".jpg", gray, buffer, {cv::IMWRITE_JPEG_QUALITY, quality}))
+        jpeg.assign(buffer.begin(), buffer.end());
+    };
+    int quality = options.vis_msg_jpeg_quality;
     if (detail) {
-      last_image = now;
+      if (image) encodeJpeg(quality);
+      last_image_ns = t_ns;
       any_image = true;
     }
 
+    // Above the UDP limit, a lower JPEG quality (at least 20) and then no image
     std::string message = encode(*data, current, seq, detail, jpeg, width, height);
-    if (message.size() > kMaxDatagram && !jpeg.empty()) {
-      jpeg.clear();
+    while (message.size() > kMaxDatagram && !jpeg.empty()) {
+      if (quality > 20) {
+        quality = std::max(20, quality * 2 / 3);
+        encodeJpeg(quality);
+      } else {
+        jpeg.clear();
+      }
       message = encode(*data, current, seq, detail, jpeg, width, height);
     }
     data.reset();
@@ -207,6 +232,7 @@ void VisPublisher::run() {
     const ssize_t written = sendto(fd, message.data(), message.size(), MSG_DONTWAIT,
                                    reinterpret_cast<const sockaddr*>(&peer), sizeof(peer));
     if (written == static_cast<ssize_t>(message.size())) {
+      budget -= static_cast<double>(message.size() + kIpUdpHeader);
       ++sent;
       if (!jpeg.empty()) ++images;
     } else if (send_errors++ == 0) {

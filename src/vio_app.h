@@ -155,6 +155,7 @@ inline void loadVisPublisherConfig(const std::string& path, const CLI::App& app,
   load("vis_msg_port", options.vis_msg_port);
   load("vis_msg_image_hz", options.vis_msg_image_hz);
   load("vis_msg_jpeg_quality", options.vis_msg_jpeg_quality);
+  load("vis_msg_max_kbps", options.vis_msg_max_kbps);
   archive.finishNode();
 }
 

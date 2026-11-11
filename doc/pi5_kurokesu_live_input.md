@@ -499,8 +499,9 @@ FC 설정(ArduPilot 4.7.2)입니다. [미검증]
 | `send_vis_msg` | `--send_vis_msg` | false | true | 보낼지 |
 | `vis_msg_ip` | `--vis_msg_ip` | 10.20.10.42 | 10.20.10.42 | 받는 PC의 IPv4 주소 |
 | `vis_msg_port` | `--vis_msg_port` | 5100 | 5100 | 받는 PC의 UDP port |
-| `vis_msg_image_hz` | `--vis_msg_image_hz` | 5 | 5 | 이미지 메시지의 최대 비율 [Hz]. 0이면 이미지 메시지가 없습니다 |
-| `vis_msg_jpeg_quality` | `--vis_msg_jpeg_quality` | 60 | 60 | JPEG 품질 (1-100) |
+| `vis_msg_image_hz` | `--vis_msg_image_hz` | 20 | 20 | 이미지 메시지의 최대 비율 [Hz]. 카메라 20 fps에서는 모든 frame입니다. 0이면 이미지 메시지가 없습니다 |
+| `vis_msg_jpeg_quality` | `--vis_msg_jpeg_quality` | 80 | 80 | JPEG 품질 (1-100) |
+| `vis_msg_max_kbps` | `--vis_msg_max_kbps` | 2000 | 2000 | 평균 전송률의 상한 [kbit/s]. 넘으면 이미지 메시지를 줄입니다. 상태 메시지는 항상 갑니다. 0이면 상한이 없습니다 |
 
 - 명령줄 옵션이 JSON 키보다 우선합니다. 서비스(`granite-vio.service`)에서는 `/etc/default/granite-vio`의 `GRANITE_VIO_ARGS`에 옵션을 넣습니다. 예: `--vis_msg_ip 10.20.10.77`, 끄려면 `--send_vis_msg 0`.
 - `capture_to_granite.py --target live`는 이 키들을 live 설정에 씁니다. 주소와 port는 `--vis-msg-ip`, `--vis-msg-port`로 바꿉니다.
@@ -514,12 +515,33 @@ FC 설정(ArduPilot 4.7.2)입니다. [미검증]
 | 메시지 | 비율 | 내용 | 크기 |
 |---|---|---|---|
 | 상태 메시지 | 상태마다 (20 Hz) | 현재 pose, 속도, gyro와 accel bias, health, keyframe 여부, 최적화 창의 pose들 | 수백 byte |
-| 이미지 메시지 | 최대 `vis_msg_image_hz` | 상태 메시지의 내용 + 회색 JPEG 이미지, 그 이미지의 keypoint, landmark 투영(역거리, id), 창의 landmark 3D 점 | 약 20-40 kB |
+| 이미지 메시지 | 최대 `vis_msg_image_hz`, `vis_msg_max_kbps` 안에서 | 상태 메시지의 내용 + 회색 JPEG 이미지, 그 이미지의 keypoint, landmark 투영(역거리, id), 창의 landmark 3D 점 | 448x400 q80에서 약 40-50 kB (JPEG 약 37 kB), 640x640 q80에서 약 60 kB |
 
 - keypoint와 투영은 같은 메시지의 이미지 위에 그리는 값입니다. 그래서 이미지 메시지에만 넣습니다.
-- 메시지가 UDP 최대 크기(65507 B)를 넘으면 이미지를 빼고 다시 만듭니다. 그래도 넘으면 보내지 않고 `skipped`에 셉니다.
+- 메시지가 UDP 최대 크기(65507 B)를 넘으면 JPEG 품질을 2/3씩 낮춰(최저 20) 다시 압축합니다. 품질 20에서도 넘으면 이미지를 빼고 다시 만듭니다. 그래도 넘으면 보내지 않고 `skipped`에 셉니다.
+- 이미지 비율은 이미지 시간으로 제한합니다. 시간 간격이 주기의 0.75 이상이면 이미지를 넣습니다. 그래서 카메라가 `vis_msg_image_hz`로 돌면 frame마다 이미지가 갑니다.
+- 전송률 상한은 보낸 byte(IP와 UDP header 포함)를 빚으로 셉니다. 빚은 `vis_msg_max_kbps`의 속도로 0까지 줄어듭니다. 이미지 메시지는 빚이 0일 때만 갑니다. 그래서 평균 전송률은 상한을 넘지 않습니다.
+
+전송률 측정 [검증, 데스크톱, Unreal Cam3 640x640 앞 800 프레임, 실시간, q80, 각 1회]:
+
+| `vis_msg_max_kbps` | 받은 전송률 | 이미지 메시지 |
+|---|---|---|
+| 2000 | 1815 kbit/s | 3.8 /s (164개) |
+| 1000 | 941 kbit/s | 1.9 /s (83개) |
+
+- 상태 메시지 674개는 두 경우 모두 다 갔습니다(skipped 0).
+- Pi의 448x400 이미지는 메시지가 더 작으므로 같은 상한에서 이미지가 더 자주 갑니다. 계산으로는 2000에서 약 5 /s, 1000에서 약 2.5 /s입니다 [미검증].
 
 ### 10.3 받는 쪽
+
+**UVIFY VIO Viewer (`tools/vio_viewer`):** 받는 PC의 GUI입니다. `tools/vio_viewer/README.md`에 사용법이 있습니다.
+
+```bash
+tools/vio_viewer/build_appimage.sh                        # tools/vio_viewer/dist/UVIFY_VIO_Viewer-x86_64.AppImage
+./UVIFY_VIO_Viewer-x86_64.AppImage                        # 0.0.0.0:5100에서 받습니다
+```
+
+**`eval/scripts/vis_receiver.py`:** 의존성이 없는 확인용 스크립트입니다.
 
 ```bash
 python3 eval/scripts/vis_receiver.py --port 5100          # 1초마다 수신 통계
@@ -546,7 +568,7 @@ publisher와 live 실행은 실행 시간에 비례해 커지는 데이터를 �
 | 데이터셋 모드 (이력 쌓음) | 105.5 → 107.8 MB | 시간당 약 20 MB. 상태 이력(상태당 약 280 B)과 지연 측정 표의 계산값과 같습니다 |
 | 이력 없음 (GUI 없는 live와 같은 조건, 시험용 binary) | 104.8 → 105.2 MB | 100 s 구간마다 시간당 4.7, 1.8, 2.3, 1.3 MB로 줄어듭니다. 할당기가 안정되는 모양이고, 일정한 누수는 보이지 않습니다 |
 
-- 두 실행 모두 상태 5992개를 모두 보냈습니다(이미지 메시지 약 1220개, skipped 0, 송신 오류 0). 수신은 평균 15.3 msg/s, 179 kB/s(약 1.4 Mbit/s)였습니다.
+- 두 실행 모두 상태 5992개를 모두 보냈습니다(이미지 메시지 약 1220개, skipped 0, 송신 오류 0). 수신은 평균 15.3 msg/s, 179 kB/s(약 1.4 Mbit/s)였습니다(그때의 설정: `vis_msg_image_hz` 5, q60, 전송률 상한 없음).
 - send_vis_msg를 켜도 궤적은 바뀌지 않습니다(결정론 최대 속도, Cam3 1000 프레임, md5 같음).
 - Pi 5에서의 장시간 실행(수 시간)과 CPU 부하는 측정하지 않았습니다 [미검증].
 

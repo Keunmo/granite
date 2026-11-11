@@ -120,6 +120,8 @@ int main(int argc, char** argv) {
   app.add_option("--vis_msg_image_hz", run.vis.vis_msg_image_hz,
                  "send_vis_msg: camera images (JPEG) per second at most (0: no image)");
   app.add_option("--vis_msg_jpeg_quality", run.vis.vis_msg_jpeg_quality, "send_vis_msg: JPEG quality (1-100)");
+  app.add_option("--vis_msg_max_kbps", run.vis.vis_msg_max_kbps,
+                 "send_vis_msg: mean send rate at most [kbit/s]; fewer images above it (0: no limit)");
 
   try {
     app.parse(argc, argv);

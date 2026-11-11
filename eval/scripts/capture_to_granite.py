@@ -44,7 +44,7 @@ The start rules of the base (excitation 0.3 m/s^2, rest_average_time 0.1 s, max_
 max_still_disparity 4.35 px at 178.9 px/rad, no moving start) hold for a hand-held rig and for a drone with the
 motors on, so the live config takes them unchanged except for the pixel scale. The base also turns off the rotation
 rule of the health check (vio_mono_health_rot_deg 180), so only the bias rule sends ODOMETRY quality -1.
-  send_vis_msg, vis_msg_ip, vis_msg_port, vis_msg_image_hz, vis_msg_jpeg_quality
+  send_vis_msg, vis_msg_ip, vis_msg_port, vis_msg_image_hz, vis_msg_jpeg_quality, vis_msg_max_kbps
                                         --target live: the visualization messages for a viewer on the ground (UDP,
                                         doc/granite_vis.proto): on, --vis-msg-ip (default 10.20.10.42),
                                         --vis-msg-port (default 5100), 5 Hz images, JPEG quality 60.
@@ -591,8 +591,9 @@ def main():
         set_key("send_vis_msg", True, reason)
         set_key("vis_msg_ip", a.vis_msg_ip, reason)
         set_key("vis_msg_port", a.vis_msg_port, reason)
-        set_key("vis_msg_image_hz", 5.0, reason)
-        set_key("vis_msg_jpeg_quality", 60, reason)
+        set_key("vis_msg_image_hz", 20.0, reason)
+        set_key("vis_msg_jpeg_quality", 80, reason)
+        set_key("vis_msg_max_kbps", 2000.0, reason)
     base_scale = base_pixels_per_radian(a.base_calib)
     ratio = px_per_rad / base_scale
     for key, what in SCALED_KEYS:
