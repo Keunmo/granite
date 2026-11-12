@@ -59,7 +59,7 @@
         "config.vio_mono_health_rot_deg": 180.0,
         "config.vio_mono_init_max_still_disparity": 4.581,
         "send_vis_msg": true,
-        "vis_msg_ip": "10.20.10.42",
+        "vis_msg_ip": "192.168.168.102",
         "vis_msg_port": 5100,
         "vis_msg_image_hz": 20.0,
         "vis_msg_points_hz": 2.0,

@@ -9,12 +9,12 @@
 #   ~/Desktop/granite-live-kurokesu.desktop
 # Each binary goes to a temporary name and then gets its final name: a running granite_vio keeps its old files.
 #
-# Usage: cross/pi5/deploy.sh [host]   (default 10.20.10.60)
+# Usage: cross/pi5/deploy.sh [host]   (default uvify@192.168.168.101)
 # Env:   BUILD_ROOT (default ~/cross/pi5-build), DEPLOY_DIR (default deploy/granite, in the home folder of the Pi)
 set -eu
 HERE=$(cd "$(dirname "$0")" && pwd)
 SRC=$(cd "$HERE/../.." && pwd)
-HOST=${1:-10.20.10.60}
+HOST=${1:-uvify@192.168.168.101}
 D=${DEPLOY_DIR:-deploy/granite}
 G=${BUILD_ROOT:-$HOME/cross/pi5-build}/granite
 BINS="granite_vio granite_pi_cam_imu_vio granite_mono_vio_dataset"

@@ -47,7 +47,7 @@ rule of the health check (vio_mono_health_rot_deg 180), so only the bias rule st
   send_vis_msg, vis_msg_ip, vis_msg_port, vis_msg_image_hz, vis_msg_points_hz, vis_msg_encode,
   vis_msg_jpeg_quality, vis_msg_max_kbps, vis_msg_h264_rate_control, vis_msg_h264_qp
                                         --target live: the visualization messages for a viewer on the ground (UDP,
-                                        doc/granite_vis.proto): on, --vis-msg-ip (default 10.20.10.42),
+                                        doc/granite_vis.proto): on, --vis-msg-ip (default 192.168.168.102),
                                         --vis-msg-port (default 5100), h264 images (bitrate_cap, QP 24 or higher) at most 20 Hz,
                                         landmarks 2 Hz, at most 2000 kbit/s.
   camera.*, imu.*                       the live sensor options of the live app.
@@ -488,7 +488,7 @@ def main():
     ap.add_argument("--downscale", type=int, default=1, help="write the camera at 1/N of the calibrated size (1, 2, 3)")
     ap.add_argument("--calib-out", type=pathlib.Path, required=True, help="Granite calibration JSON to write")
     ap.add_argument("--config-out", type=pathlib.Path, help="Granite VIO config JSON to write")
-    ap.add_argument("--vis-msg-ip", default="10.20.10.42", help="--target live: vis_msg_ip of the config")
+    ap.add_argument("--vis-msg-ip", default="192.168.168.102", help="--target live: vis_msg_ip of the config")
     ap.add_argument("--vis-msg-port", type=int, default=5100, help="--target live: vis_msg_port of the config")
     ap.add_argument("--base", type=pathlib.Path, default=DEFAULT_BASE, help="base VIO config")
     ap.add_argument("--base-calib", type=pathlib.Path, default=DEFAULT_BASE_CALIB,

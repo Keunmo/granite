@@ -487,7 +487,7 @@ Pi 4 모니터에 GUI 띄우기 [미검증]:
 
 | 항목 | 내용 |
 |---|---|
-| 컴패니언 | Raspberry Pi 5, Ubuntu 24.04 (`uvify@10.20.10.60`) |
+| 컴패니언 | Raspberry Pi 5, Ubuntu 24.04 (`uvify@192.168.168.101`) |
 | 카메라 | Kurokesu AR0234. 1920x1200 센서 모드의 가운데 1344x1200을 1/3로 줄인 448x400, 20 fps |
 | IMU | FC(UVify V6X, ArduPilot 4.7.2)의 `HIGHRES_IMU` 200 Hz. FC UART2 ↔ Pi UART0, mavlink-router의 UDP 127.0.0.1:14601 |
 | 출력 | VIO 상태를 같은 링크로 FC에 MAVLink `ODOMETRY`로 보냅니다 |
@@ -516,7 +516,7 @@ python3 eval/scripts/capture_to_granite.py <보정한 capture.yaml> --downscale 
 ```bash
 cd ~/workspace/granite_reliability
 cross/pi5/build.sh                  # ~/cross/pi5-build/granite/
-cross/pi5/deploy.sh 10.20.10.60     # Pi 5의 ~/deploy/granite/
+cross/pi5/deploy.sh uvify@192.168.168.101     # Pi 5의 ~/deploy/granite/
 ```
 
 - `vis_msg_encode h264`를 쓰려면 sysroot에 OpenH264가 있어야 합니다(`cross/pi5/build.sh` 머리말). Pi에는 `libopenh264-7`이 있어야 합니다.
@@ -541,7 +541,7 @@ cross/pi5/deploy.sh 10.20.10.60     # Pi 5의 ~/deploy/granite/
 - **health 검사:** inertial 초기화에도 health 검사를 적용합니다(`HealthMonitor`, `src/vi_estimator/mono_vio.cpp`). 최종 후보는 bias 크기 규칙만 씁니다(`vio_mono_health_rot_deg` 180). 한 번 실패하면 그 실행에서는 송신하지 않습니다. FC는 0.3 s 뒤 arming을 거부합니다.
 - FC 쪽 설정(`VISO_TYPE`, `VISO_POS_X/Y/Z`, `VISO_DELAY_MS`, `EK3_SRC1_*`)은 FC 담당자가 합니다. 설정하기 전에는 FC가 메시지를 무시합니다.
 
-**지상 시각화:** live 설정은 `send_vis_msg`를 켭니다. GUI 요소(pose, 창의 상태, 이미지, keypoint, landmark)를 UDP로 `10.20.10.42:5100`에 보냅니다. 이미지는 h264(기본, 2 Mbit/s 안에서 frame마다) 또는 mjpeg(q80)입니다(`vis_msg_encode`). 평균 전송률은 2 Mbit/s 이하입니다(`vis_msg_max_kbps`). publisher thread는 `SCHED_IDLE`이라서 VIO가 남긴 CPU만 씁니다. 받는 PC에서 UVIFY VIO Viewer(`tools/vio_viewer`, AppImage)를 실행합니다. 키, 메시지 형식(`doc/granite_vis.proto`), 메모리 동작은 `doc/pi5_kurokesu_live_input.md` 10절에 있습니다.
+**지상 시각화:** live 설정은 `send_vis_msg`를 켭니다. GUI 요소(pose, 창의 상태, 이미지, keypoint, landmark)를 UDP로 `192.168.168.102:5100`에 보냅니다. 이미지는 h264(기본, 2 Mbit/s 안에서 frame마다) 또는 mjpeg(q80)입니다(`vis_msg_encode`). 평균 전송률은 2 Mbit/s 이하입니다(`vis_msg_max_kbps`). publisher thread는 `SCHED_IDLE`이라서 VIO가 남긴 CPU만 씁니다. 받는 PC에서 UVIFY VIO Viewer(`tools/vio_viewer`, AppImage)를 실행합니다. 키, 메시지 형식(`doc/granite_vis.proto`), 메모리 동작은 `doc/pi5_kurokesu_live_input.md` 10절에 있습니다.
 
 ### 8.5 부팅 때 자동 실행
 

@@ -11,10 +11,10 @@ Pi의 OS는 Ubuntu 24.04이어야 한다. 아래 순서대로 실행한다. 각 
 1. Pi를 끈다. 카메라를 CAM/DISP 1 포트에 연결한다.
 2. FC와 Pi를 UART로 배선한다. 배선은 [docs/fc-v6x-rpi5-uart-wiring.md](docs/fc-v6x-rpi5-uart-wiring.md)의 4장을 따른다.
 3. Pi를 켠다. Pi를 인터넷에 연결한다.
-4. PC에서 이 폴더를 Pi로 복사한다. `uvify@10.20.10.60`은 Pi의 `user@ip`로 바꾼다.
+4. PC에서 이 폴더를 Pi로 복사한다. `uvify@192.168.168.101`은 Pi의 `user@ip`로 바꾼다.
 
    ```bash
-   rsync -a ~/workspace/ddp-drone/pi5-setup/ uvify@10.20.10.60:~/pi5-setup/
+   rsync -a ~/workspace/ddp-drone/pi5-setup/ uvify@192.168.168.101:~/pi5-setup/
    ```
 
 5. Pi의 터미널에서 이 폴더로 이동한다.
@@ -166,7 +166,7 @@ pi5-setup/
 이 폴더를 Pi의 홈 폴더에 복사한다. 아래 예는 PC에서 실행한다. `PI`는 Pi의 `user@ip`이다.
 
 ```bash
-PI=uvify@10.20.10.60
+PI=uvify@192.168.168.101
 rsync -a ~/workspace/ddp-drone/pi5-setup/ $PI:~/pi5-setup/
 ```
 
@@ -361,7 +361,7 @@ capture, granite, openvio는 모두 14601 포트를 쓴다. 그래서 세 프로
 | 정지 | `systemctl stop`은 SIGINT를 보낸다. `granite_vio`는 결과를 쓰고 끝난다 |
 | 결과 | `~/deploy/granite/runs/<날짜_시각>/`: `run_traj_tum.txt`, `run_states.csv`(`healthy`, `prev_corr_rot` 포함), `run.log` |
 | 로그 | `journalctl -u granite-vio` |
-| 지상 시각화 | GUI 요소(pose, 궤적용 상태, 이미지, keypoint, landmark)를 UDP로 `10.20.10.42:5100`에 보낸다. 이미지는 H.264다(frame마다, 움직임이 크면 화질이 낮아짐). 평균 전송률은 2 Mbit/s 이하다(`vis_msg_max_kbps`). 받는 PC에서 `resources/vio/UVIFY_VIO_Viewer-x86_64.AppImage`를 실행한다 |
+| 지상 시각화 | GUI 요소(pose, 궤적용 상태, 이미지, keypoint, landmark)를 UDP로 `192.168.168.102:5100`에 보낸다. 이미지는 H.264다(frame마다, 움직임이 크면 화질이 낮아짐). 평균 전송률은 2 Mbit/s 이하다(`vis_msg_max_kbps`). 받는 PC에서 `resources/vio/UVIFY_VIO_Viewer-x86_64.AppImage`를 실행한다 |
 
 - 시각화 메시지의 주소를 바꾸려면 `/etc/default/granite-vio`의 `GRANITE_VIO_ARGS`에 `--vis_msg_ip <IP> --vis_msg_port <port>`를 추가한다. 끄려면 `--send_vis_msg 0`을 추가한다. 형식은 granite `doc/granite_vis.proto`와 `doc/pi5_kurokesu_live_input.md` 10절에 있다.
 - 이미지를 JPEG(q80)로 보내려면 `GRANITE_VIO_ARGS`에 `--vis_msg_encode mjpeg`를 추가한다. 화질은 일정하고, 2 Mbit/s 안에서 이미지 수가 줄어든다. H.264의 전송률 상한 없이 화질을 고정하려면 `--vis_msg_h264_rate_control quality`를 추가한다(빠른 장면에서 약 4.7 Mbit/s). H.264는 Pi CPU로 인코딩한다(OpenH264). 시각화 thread는 가장 낮은 우선순위(`SCHED_IDLE`)라서 VIO가 먼저 CPU를 쓴다. Pi에서 CPU 사용량은 측정하지 않았다.

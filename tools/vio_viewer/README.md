@@ -32,7 +32,7 @@ tools/vio_viewer/build_appimage.sh        # tools/vio_viewer/dist/UVIFY_VIO_View
 
 ```bash
 ./UVIFY_VIO_Viewer-x86_64.AppImage                    # listens on 0.0.0.0:5100
-./UVIFY_VIO_Viewer-x86_64.AppImage --ip 10.20.10.42 --port 5100
+./UVIFY_VIO_Viewer-x86_64.AppImage --ip 192.168.168.102 --port 5100
 ```
 
 - The **Listen (UDP)** box sets the IP address and the port. Type the values, then push **Apply** or Enter. 0.0.0.0 listens on all interfaces.

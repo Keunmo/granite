@@ -499,7 +499,7 @@ FC 설정(ArduPilot 4.7.2)입니다. [미검증]
 | 키 (`--config-path`의 JSON) | 명령줄 | 기본값 (코드) | Pi 5 live 설정 | 뜻 |
 |---|---|---|---|---|
 | `send_vis_msg` | `--send_vis_msg` | false | true | 보낼지 |
-| `vis_msg_ip` | `--vis_msg_ip` | 10.20.10.42 | 10.20.10.42 | 받는 PC의 IPv4 주소 |
+| `vis_msg_ip` | `--vis_msg_ip` | 192.168.168.102 | 192.168.168.102 | 받는 PC의 IPv4 주소 |
 | `vis_msg_port` | `--vis_msg_port` | 5100 | 5100 | 받는 PC의 UDP port |
 | `vis_msg_image_hz` | `--vis_msg_image_hz` | 20 | 20 | 이미지 메시지의 최대 비율 [Hz]. 카메라 20 fps에서는 모든 frame입니다. 0이면 이미지 메시지가 없습니다 |
 | `vis_msg_points_hz` | `--vis_msg_points_hz` | 2 | 2 | landmark 3D 점의 최대 비율 [Hz]. 0이면 보내지 않습니다 |

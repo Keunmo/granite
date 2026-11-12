@@ -20,7 +20,7 @@ namespace granite {
 // GraniteVis of doc/granite_vis.proto), for a viewer on the ground.
 struct VisPublisherOptions {
   bool send_vis_msg = false;
-  std::string vis_msg_ip = "10.20.10.42";
+  std::string vis_msg_ip = "192.168.168.102";
   int vis_msg_port = 5100;
   // The camera image with its tracked keypoints goes with at most this many messages per second (0: none). The
   // other messages have the state only (a few hundred bytes).
