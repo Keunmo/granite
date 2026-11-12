@@ -505,7 +505,7 @@ FC 설정(ArduPilot 4.7.2)입니다. [미검증]
 | `vis_msg_points_hz` | `--vis_msg_points_hz` | 2 | 2 | landmark 3D 점의 최대 비율 [Hz]. 0이면 보내지 않습니다 |
 | `vis_msg_encode` | `--vis_msg_encode` | h264 | h264 | 이미지 압축. `h264`(OpenH264가 있는 빌드만) 또는 `mjpeg`(이미지마다 회색 JPEG) |
 | `vis_msg_jpeg_quality` | `--vis_msg_jpeg_quality` | 80 | 80 | mjpeg의 JPEG 품질 (1-100) |
-| `vis_msg_max_kbps` | `--vis_msg_max_kbps` | 2000 | 2000 | 평균 전송률의 상한 [kbit/s]. 상태 메시지는 항상 갑니다. 0이면 상한이 없습니다 |
+| `vis_msg_max_kbps` | `--vis_msg_max_kbps` | 2000 | 1700 | 평균 전송률의 상한 [kbit/s]. 상태 메시지는 항상 갑니다. 0이면 상한이 없습니다 |
 | `vis_msg_h264_rate_control` | `--vis_msg_h264_rate_control` | bitrate_cap | bitrate_cap | h264 rate control. `quality`는 QP 고정이고 전송률 상한이 없습니다. `bitrate_cap`은 QP를 `vis_msg_h264_qp` 이상으로 두고 `vis_msg_max_kbps` 상한을 지킵니다 |
 | `vis_msg_h264_qp` | `--vis_msg_h264_qp` | 24 | 24 | h264 QP (0-51, 작을수록 좋음). `bitrate_cap`에서는 QP의 하한입니다 |
 

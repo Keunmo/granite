@@ -361,10 +361,10 @@ capture, granite, openvio는 모두 14601 포트를 쓴다. 그래서 세 프로
 | 정지 | `systemctl stop`은 SIGINT를 보낸다. `granite_vio`는 결과를 쓰고 끝난다 |
 | 결과 | `~/deploy/granite/runs/<날짜_시각>/`: `run_traj_tum.txt`, `run_states.csv`(`healthy`, `prev_corr_rot` 포함), `run.log` |
 | 로그 | `journalctl -u granite-vio` |
-| 지상 시각화 | GUI 요소(pose, 궤적용 상태, 이미지, keypoint, landmark)를 UDP로 `192.168.168.102:5100`에 보낸다. 이미지는 H.264다(frame마다, 움직임이 크면 화질이 낮아짐). 평균 전송률은 2 Mbit/s 이하다(`vis_msg_max_kbps`). 받는 PC에서 `resources/vio/UVIFY_VIO_Viewer-x86_64.AppImage`를 실행한다 |
+| 지상 시각화 | GUI 요소(pose, 궤적용 상태, 이미지, keypoint, landmark)를 UDP로 `192.168.168.102:5100`에 보낸다. 이미지는 H.264다(frame마다, 움직임이 크면 화질이 낮아짐). 평균 전송률은 1.7 Mbit/s 이하다(`vis_msg_max_kbps`). 받는 PC에서 `resources/vio/UVIFY_VIO_Viewer-x86_64.AppImage`를 실행한다 |
 
 - 시각화 메시지의 주소를 바꾸려면 `/etc/default/granite-vio`의 `GRANITE_VIO_ARGS`에 `--vis_msg_ip <IP> --vis_msg_port <port>`를 추가한다. 끄려면 `--send_vis_msg 0`을 추가한다. 형식은 granite `doc/granite_vis.proto`와 `doc/pi5_kurokesu_live_input.md` 10절에 있다.
-- 이미지를 JPEG(q80)로 보내려면 `GRANITE_VIO_ARGS`에 `--vis_msg_encode mjpeg`를 추가한다. 화질은 일정하고, 2 Mbit/s 안에서 이미지 수가 줄어든다. H.264의 전송률 상한 없이 화질을 고정하려면 `--vis_msg_h264_rate_control quality`를 추가한다(빠른 장면에서 약 4.7 Mbit/s). H.264는 Pi CPU로 인코딩한다(OpenH264). 시각화 thread는 가장 낮은 우선순위(`SCHED_IDLE`)라서 VIO가 먼저 CPU를 쓴다. Pi에서 CPU 사용량은 측정하지 않았다.
+- 이미지를 JPEG(q80)로 보내려면 `GRANITE_VIO_ARGS`에 `--vis_msg_encode mjpeg`를 추가한다. 화질은 일정하고, 1.7 Mbit/s 안에서 이미지 수가 줄어든다. H.264의 전송률 상한 없이 화질을 고정하려면 `--vis_msg_h264_rate_control quality`를 추가한다(빠른 장면에서 약 4.7 Mbit/s). H.264는 Pi CPU로 인코딩한다(OpenH264). 시각화 thread는 가장 낮은 우선순위(`SCHED_IDLE`)라서 VIO가 먼저 CPU를 쓴다. Pi에서 CPU 사용량은 측정하지 않았다.
 - 뷰어 AppImage는 H.264 디코더(OpenH264)를 갖고 있다. 받는 PC에 패키지를 더 설치하지 않아도 된다(Ubuntu 24.04 이상).
 - 서비스는 카메라와 FC IMU 포트(UDP 14601)를 쓴다. 그래서 서비스가 실행 중이면 xeye capture, 캘리브레이션 캡처, 바탕화면의 granite 아이콘을 실행할 수 없다.
 - VIO는 정지 상태 다음의 움직임에서 초기화한다. 드론을 바닥에 둔 채 전원을 켜고, 그다음 들어 올리거나 이륙하면 초기화한다.

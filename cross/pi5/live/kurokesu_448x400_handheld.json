@@ -65,7 +65,7 @@
         "vis_msg_points_hz": 2.0,
         "vis_msg_encode": "h264",
         "vis_msg_jpeg_quality": 80,
-        "vis_msg_max_kbps": 2000.0,
+        "vis_msg_max_kbps": 1700.0,
         "vis_msg_h264_rate_control": "bitrate_cap",
         "vis_msg_h264_qp": 24,
         "camera.model": "kurokesu_ar0234_pi",

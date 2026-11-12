@@ -49,7 +49,7 @@ rule of the health check (vio_mono_health_rot_deg 180), so only the bias rule st
                                         --target live: the visualization messages for a viewer on the ground (UDP,
                                         doc/granite_vis.proto): on, --vis-msg-ip (default 192.168.168.102),
                                         --vis-msg-port (default 5100), h264 images (bitrate_cap, QP 24 or higher) at most 20 Hz,
-                                        landmarks 2 Hz, at most 2000 kbit/s.
+                                        landmarks 2 Hz, at most 1700 kbit/s.
   camera.*, imu.*                       the live sensor options of the live app.
       camera_v4l2_gen2 node of model kurokesu_ar0234_pi or b0429_pi: camera.<key> for each property key of the node
       with the xeye key names (model, port, width, height, frame_rate, pixel_format gray8, exposure_time, gain, h_flip,
@@ -597,7 +597,7 @@ def main():
         set_key("vis_msg_points_hz", 2.0, reason)
         set_key("vis_msg_encode", "h264", reason)
         set_key("vis_msg_jpeg_quality", 80, reason)
-        set_key("vis_msg_max_kbps", 2000.0, reason)
+        set_key("vis_msg_max_kbps", 1700.0, reason)
         set_key("vis_msg_h264_rate_control", "bitrate_cap", reason)
         set_key("vis_msg_h264_qp", 24, reason)
     base_scale = base_pixels_per_radian(a.base_calib)
