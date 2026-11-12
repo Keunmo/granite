@@ -147,14 +147,14 @@ binning 출력 pixel i는 전체 해상도 pixel 2i와 2i + 1을 덮는다고 �
 
 ## 3. IMU 입력
 
-`mavlinkLoop()`이 PX4의 `HIGHRES_IMU` 메시지를 읽습니다. 동작은 xeye `imu_mavlink` node와 같습니다. [코드 확인]
+`mavlinkLoop()`이 FC의 `HIGHRES_IMU` 메시지를 읽습니다. 동작은 xeye `imu_mavlink` node와 같습니다. [코드 확인]
 
 1. mavlink-router의 UDP endpoint 주소(기본 `127.0.0.1:14601`)에 bind합니다. `imu.port`를 주면 UDP 대신 serial port를 엽니다(8N1, flow control 없음).
 2. `HEARTBEAT`에서 autopilot의 system id와 component id를 찾습니다.
 3. `MAV_CMD_SET_MESSAGE_INTERVAL`로 `HIGHRES_IMU`를 `imu.freq_hz` [Hz](기본 400)로 요청합니다. ACK가 올 때까지 2초마다 다시 보냅니다. `imu.freq_hz: 0`이면 요청하지 않고 FC의 설정 rate를 씁니다.
 4. FC가 요청을 거부하면 경고를 내고 FC의 rate를 씁니다.
 5. 3초 동안 `HIGHRES_IMU`가 없으면 rate를 다시 요청합니다. FC 시각이 1초보다 많이 뒤로 가면 FC가 재부팅했다고 보고 시각 매핑을 다시 시작합니다.
-6. 각 sample을 `ImuData`로 넘깁니다. gyro [rad/s]와 가속도 [m/s²]는 FC body frame(FRD, PX4 `SENS_BOARD_ROT` 적용 후)입니다. PX4는 EKF2의 bias 추정값을 이미 뺀 값을 보냅니다.
+6. 각 sample을 `ImuData`로 넘깁니다. gyro [rad/s]와 가속도 [m/s²]는 FC body frame(FRD)입니다. ArduPilot은 IMU 값을 `AHRS_ORIENTATION`으로 회전해서 보냅니다.
 
 xeye node 시험 결과입니다. [검증, xeye node, .60, 15초]
 
@@ -405,7 +405,7 @@ granite_vio --live --use-imu 1 --cam-calib calib.json --config-path config.json
 | `pose_covariance`, `velocity_covariance` | 모든 원소가 NaN |
 | `reset_counter` | 9.4절 |
 | `estimator_type` | `MAV_ESTIMATOR_TYPE_VIO` (3) |
-| `quality` | 정상이면 0(unknown). health 검사가 실패하면 −1(failed). 아래의 health 검사를 보십시오 |
+| `quality` | 0(unknown). health 검사가 실패하면 ODOMETRY를 보내지 않습니다. 아래의 health 검사를 보십시오 |
 
 ArduPilot은 다음과 같이 처리합니다.
 
@@ -414,14 +414,16 @@ ArduPilot은 다음과 같이 처리합니다.
 - 속도에 `q`를 곱해 body FRD에서 LOCAL_FRD로 회전합니다.
 - `quality`가 `VISO_QUAL_MIN`(기본 0)보다 작으면 쓰지 않습니다. 그래서 기본 설정에서 −1인 상태는 쓰지 않습니다.
 
-**health 검사:** `sendOdometry()`는 `VioStateData::healthy`가 false이면 `quality` −1을 보냅니다. 두 초기화 방법(`vo_alignment`, `inertial`)은 같은 규칙(`HealthMonitor`, `src/vi_estimator/mono_vio.cpp`)으로 이 값을 정합니다.
+**health 검사:** `sendOdometry()`는 `VioStateData::healthy`가 false이면 ODOMETRY를 보내지 않습니다. 두 초기화 방법(`vo_alignment`, `inertial`)은 같은 규칙(`HealthMonitor`, `src/vi_estimator/mono_vio.cpp`)으로 이 값을 정합니다.
+
+`quality` −1을 보내지 않는 이유: ArduPilot은 −1인 메시지를 EKF에 쓰지 않지만, 수신한 것으로 기록합니다. 그래서 VisualOdom이 healthy로 남고, arming 검사가 arming을 막지 않습니다. 송신이 멈추면 0.3 s 뒤 FC가 "VisualOdom: not healthy"로 arming을 거부합니다. FC 담당이 추가할 예정인 VISO 손실 처리기도 송신 중단을 감지합니다(armed에서 `VISO_LOSS_MS`, 기본 1 s). [FC 담당 답변, 2026-11-12]
 
 | 규칙 | 조건 | 설정 (기본값) |
 |---|---|---|
 | 회전 보정 | 초기화 뒤 settle + window가 지나면 검사합니다. 최근 window 동안 직전 출력 상태의 rms 보정이 회전으로 기준보다 크고, 이동으로 기준보다 작으면 실패입니다(나쁜 초기화 뒤 거의 정지) | `vio_mono_health_settle_s` (3 s), `vio_mono_health_window_s` (2 s), `vio_mono_health_rot_deg` (0.07°), `vio_mono_health_pos_m` (5 mm) |
 | bias 크기 | 초기화 뒤 settle이 지나면 검사합니다. bias 추정값이 기준보다 크면 실패입니다(발산) | `vio_mono_health_max_accel_bias` (2.0 m/s²), `vio_mono_health_max_gyro_bias` (0.1 rad/s) |
 
-- 한 번 실패하면 그 estimator가 끝날 때까지 −1입니다. live 설정의 `inertial` 초기화는 다시 초기화하지 않습니다(9.4절).
+- 한 번 실패하면 그 estimator가 끝날 때까지 송신하지 않습니다. live 설정의 `inertial` 초기화는 다시 초기화하지 않습니다(9.4절). 그래서 그 실행에서는 송신이 다시 시작되지 않습니다. 실패할 때와 healthy로 돌아올 때 stderr에 `ODOMETRY:` 줄을 씁니다.
 - 검사는 상태 시각으로 합니다. 초기화 뒤 처음 3 s는 실패를 알리지 않습니다.
 - 확인한 결과 [데스크톱, 각 1회]:
   - 오검출: Unreal Cam0, Cam3 전체(각 6008 상태)와 EuRoC MH_01-05에서 0회입니다.

@@ -43,7 +43,7 @@ with
 The start rules of the base (excitation 0.3 m/s^2, rest_average_time 0.1 s, max_rest_disparity 2.0 px,
 max_still_disparity 4.35 px at 178.9 px/rad, no moving start) hold for a hand-held rig and for a drone with the
 motors on, so the live config takes them unchanged except for the pixel scale. The base also turns off the rotation
-rule of the health check (vio_mono_health_rot_deg 180), so only the bias rule sends ODOMETRY quality -1.
+rule of the health check (vio_mono_health_rot_deg 180), so only the bias rule stops the ODOMETRY stream.
   send_vis_msg, vis_msg_ip, vis_msg_port, vis_msg_image_hz, vis_msg_points_hz, vis_msg_encode,
   vis_msg_jpeg_quality, vis_msg_max_kbps, vis_msg_h264_rate_control, vis_msg_h264_qp
                                         --target live: the visualization messages for a viewer on the ground (UDP,

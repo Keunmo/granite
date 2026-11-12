@@ -1520,8 +1520,8 @@ void PiCameraImuDevice::mavlinkLoop() {
           if (!host_ns) return;
           ++imu_samples;
           if (!capturing || !imu_data_queue) return;
-          // HIGHRES_IMU of PX4: the FC body frame (FRD after SENS_BOARD_ROT),
-          // with the EKF2 bias estimates already subtracted.
+          // HIGHRES_IMU of ArduPilot: the FC body frame (FRD), rotated by
+          // AHRS_ORIENTATION.
           auto data = std::make_shared<ImuData>();
           data->t_ns = *host_ns;
           data->accel << imu.xacc, imu.yacc, imu.zacc;

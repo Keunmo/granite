@@ -2345,7 +2345,7 @@ class VioDataset {
   Clock::time_point capture_start;
   // imu_send_odometry: the estimate of the last sent state (map and metric
   // estimator of mono VIO). A new estimate increments the reset counter.
-  bool send_odometry = false, odometry_started = false;
+  bool send_odometry = false, odometry_started = false, odometry_healthy = true;
   size_t odometry_map_idx = 0, odometry_metric_run = 0;
   uint8_t odometry_reset_counter = 0;
   // The VIO world to the ODOMETRY world (x: the forward at the first state of
@@ -2475,6 +2475,16 @@ class VioDataset {
   void sendOdometry(const granite::VioStateData& r) {
     if (!send_odometry) return;
     if (!r.state.T_w_i.matrix().allFinite()) return;
+    // An unhealthy estimator sends nothing. ArduPilot treats ODOMETRY with
+    // quality -1 as received, so the VIO would stay healthy for its arming
+    // check and its loss detection; a stopped stream fails both.
+    if (r.healthy != odometry_healthy)
+      std::cerr << "ODOMETRY: "
+                << (r.healthy ? "the VIO is healthy again; sending"
+                              : "the VIO is unhealthy; stopped sending")
+                << std::endl;
+    odometry_healthy = r.healthy;
+    if (!r.healthy) return;
     const bool new_map = odometry_started && r.map_idx != odometry_map_idx;
     if (new_map || (odometry_started && r.metric_run != odometry_metric_run))
       ++odometry_reset_counter;
@@ -2493,7 +2503,7 @@ class VioDataset {
     auto state = r.state;
     state.T_w_i = odometry_T_a_w * state.T_w_i;
     state.vel_w_i = odometry_T_a_w.so3() * state.vel_w_i;
-    device->sendOdometry(state, odometry_reset_counter, r.healthy ? 0 : -1);
+    device->sendOdometry(state, odometry_reset_counter, 0);
   }
 
   void stopLive() {

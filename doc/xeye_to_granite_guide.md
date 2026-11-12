@@ -161,7 +161,7 @@ Unreal의 카메라는 계수가 한 개인 등거리 uwfisheye입니다. 이 �
 
 - 픽셀 노이즈와 셀 크기(`optical_flow_detection_grid_size` 40 px, `vio_obs_std_dev` 등)는 그대로 둡니다. openvio 변환과 같은 규칙입니다.
 - 최종 후보의 시작 규칙(가속 0.3, `rest_average_time` 0.1 s, 정지 이동 2.0, 움직임 4.35, 이동 시작 끔)은 손으로 드는 리그와 모터를 켠 드론에 모두 맞습니다(2.6절). 그래서 live 변환은 이 값을 해상도 비례만 바꿔 씁니다.
-- 최종 후보는 health 검사의 회전 보정 규칙을 끕니다(`vio_mono_health_rot_deg` 180°). bias 크기 규칙만 `quality` −1을 냅니다. 이유는 `pi5_kurokesu_live_input.md` 9.2절에 있습니다.
+- 최종 후보는 health 검사의 회전 보정 규칙을 끕니다(`vio_mono_health_rot_deg` 180°). bias 크기 규칙만 ODOMETRY 송신을 멈춥니다. 이유는 `pi5_kurokesu_live_input.md` 9.2절에 있습니다.
 - 이전의 `--handheld` 옵션은 2026-11-11에 없앴습니다. 그 값(가속 0.3, 정지 이동 2.0)은 최종 후보에 들어 있습니다.
 
 ### 2.5 정지 시작 요구
@@ -534,11 +534,11 @@ cross/pi5/deploy.sh 10.20.10.60     # Pi 5의 ~/deploy/granite/
 | 위치와 자세 | IMU 기준. 첫 상태의 위치가 원점이고, 첫 상태의 기체 앞쪽이 x(yaw 0)입니다. y는 오른쪽, z는 아래쪽입니다 |
 | 속도 | body FRD 기준 |
 | covariance | 모든 원소가 NaN. FC는 `VISO_*_M_NSE`를 씁니다 |
-| `quality` | 정상이면 0. health 검사가 실패하면 −1 |
+| `quality` | 0. health 검사가 실패하면 ODOMETRY를 보내지 않습니다 |
 | component id | `MAV_COMP_ID_VISUAL_INERTIAL_ODOMETRY`(197) |
 
 - **yaw 0 정렬:** VIO world의 x축은 초기화가 정하고, 기체 앞쪽과 맞지 않습니다. FC IMU는 z가 아래쪽이라 그 차이가 실행마다 다릅니다. `src/vio_app.h`의 `sendOdometry()`가 첫 상태에서 world를 z축으로 돌려 이 차이를 없앱니다.
-- **health 검사:** inertial 초기화에도 health 검사를 적용합니다(`HealthMonitor`, `src/vi_estimator/mono_vio.cpp`). 최종 후보는 bias 크기 규칙만 씁니다(`vio_mono_health_rot_deg` 180). 한 번 실패하면 −1이 계속됩니다.
+- **health 검사:** inertial 초기화에도 health 검사를 적용합니다(`HealthMonitor`, `src/vi_estimator/mono_vio.cpp`). 최종 후보는 bias 크기 규칙만 씁니다(`vio_mono_health_rot_deg` 180). 한 번 실패하면 그 실행에서는 송신하지 않습니다. FC는 0.3 s 뒤 arming을 거부합니다.
 - FC 쪽 설정(`VISO_TYPE`, `VISO_POS_X/Y/Z`, `VISO_DELAY_MS`, `EK3_SRC1_*`)은 FC 담당자가 합니다. 설정하기 전에는 FC가 메시지를 무시합니다.
 
 **지상 시각화:** live 설정은 `send_vis_msg`를 켭니다. GUI 요소(pose, 창의 상태, 이미지, keypoint, landmark)를 UDP로 `10.20.10.42:5100`에 보냅니다. 이미지는 h264(기본, 2 Mbit/s 안에서 frame마다) 또는 mjpeg(q80)입니다(`vis_msg_encode`). 평균 전송률은 2 Mbit/s 이하입니다(`vis_msg_max_kbps`). publisher thread는 `SCHED_IDLE`이라서 VIO가 남긴 CPU만 씁니다. 받는 PC에서 UVIFY VIO Viewer(`tools/vio_viewer`, AppImage)를 실행합니다. 키, 메시지 형식(`doc/granite_vis.proto`), 메모리 동작은 `doc/pi5_kurokesu_live_input.md` 10절에 있습니다.
@@ -624,7 +624,7 @@ cross/pi5/deploy.sh 10.20.10.60     # Pi 5의 ~/deploy/granite/
 | `mavlink-router is not active` (Pi 5) | `sudo systemctl start mavlink-router`. 설치는 `pi5-setup/setup_fc_uart_router.sh`입니다. |
 | `IMU: no HIGHRES_IMU for 3 s; requesting it again` (Pi 5) | FC 전원, UART 배선, FC의 `SERIAL3_*` 값을 확인합니다(`pi5-setup/README.md` 6장). |
 | 모터를 켠 뒤 초기화되지 않음 (Pi 5) | 설정에 `vio_mono_init_rest_average_time` 0.1이 있는지 확인합니다(2.6절). 이 값이 없으면 모터 진동이 정지를 막습니다. |
-| FC가 `ODOMETRY`를 쓰지 않음 | `/etc/default/granite-vio`의 `--imu_send_odometry 1`, FC의 `VISO_TYPE` 1, `quality`(−1이면 health 검사 실패)를 확인합니다. |
+| FC가 `ODOMETRY`를 쓰지 않음 | `/etc/default/granite-vio`의 `--imu_send_odometry 1`, FC의 `VISO_TYPE` 1, health 검사(로그의 `ODOMETRY: the VIO is unhealthy` 줄)를 확인합니다. |
 
 ## 10. 에이전트용 요약
 
