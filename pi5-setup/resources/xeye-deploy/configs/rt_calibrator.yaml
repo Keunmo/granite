@@ -1,0 +1,19 @@
+## rt_calibrator.yaml
+capture:
+    key_path: master.mpk
+
+capture_dir: /home/jinha/CLionProjects/multipleye/xeye/cmake-build-capture
+#capture_dir: /home/jinha/Downloads/250114_ATD361_calibration/
+cyclic_quad_cam: true
+one_row_viewer: true
+board_spec: -4,4,-4,4
+
+viewer_height: 460
+viewer_cam_aspect_ratio: 0.5
+viewer_view_height: 2.0
+
+edge_min_mag: 0.02
+blob_color_diff_thr: 30
+
+logtostderr: true
+colorlogtostderr: true

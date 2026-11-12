@@ -1,0 +1,97 @@
+## calibrator.yaml
+
+capture_dir: data/241115_xcalib/241125_xcalib_00
+
+# use_precalibrated_intrinsic: true  # start from intrinsics in capture.yaml
+# fix_precalibrated_intrinsic: true  # keep them fixed during optimization
+
+viewer_height: 960
+viewer_cam_aspect_ratio: 0.5
+viewer_view_height: 2.0
+
+# apriltag_max_dist: 0.8  #Apriltag distance from image center (w.r.t. horz)
+# edge_sig: 1.0  # Gaussian sig for edge detection
+# edge_min_mag: 0.05  # Gaussian sig for edge detection
+# edge_fragment_thr: 3  # Edge fragment size threshold
+# blob_edge_sig: 1.0  # Gaussian sig for blob detection with edges
+# min_blob_size: 10  # Minimum blob size
+# blob_color_diff_thr: 50  # Blob color difference thr
+# adj_blob_size_ratio: 0.5  # Min size ratio of adjacent blobs
+
+## for darker images
+edge_min_mag: 0.02  # Gaussian sig for edge detection
+blob_color_diff_thr: 30  # Blob color difference thr
+
+# curve_edge_win: 30  # Window size for curve expansion
+# curve_edge_min_angle: 30.0  # Min angle between curve and edge dir
+# curve_dist_thr: 2.0  # Distance threshold from curve to edge point
+# curve_cauchy_sig: 3.0  # Cauchy sig for curve fitting
+# curve_num_loop: 1  # Number of iterations of expansion
+# board_grid_size: 0.09  # board grid cell size (m)
+# board_spec: "-4,4,-4,4"  # Board spec: x-,x+,y-,y+
+# min_crossings: 60  # Minumum number of crossings to be valid
+# recompute_curves: false
+# recompute_crossings: false
+
+# calib_cauchy_sig: 3.0  # Cauchy sig for calibration
+
+# dump_result_images: true  # Dump result images
+# dump_apriltag_board_blob_detections: true  # Dump apriltag board
+
+logtostderr: true
+colorlogtostderr: true
+
+# # # # # # # # # # # # # #
+# Rig 2 LiDAR Calibration #
+# # # # # # # # # # # # # #
+# Runs when the capture has a LiDAR node with lidar2rig_pose in capture.yaml.
+lidar_frm_abs_timediff_ms: 50.0    # LiDAR-camera matching window (+-ms)
+calib_lidar_max_plane_dist: 0.05   # max point-to-board-plane distance (m)
+calib_lidar_min_num_pts: 1000      # min board points for a valid observation
+calib_lidar_board_boundary_margin: -1  # board boundary margin (grid cells, -1 = default)
+calib_lidar_cauchy_sig: 0.03       # Cauchy scale (m); smaller = less outlier-sensitive
+
+fix_precalibrated_extrinsic: false # true: skip rig calib, optimize lidar2rig only (uses cam2rig from capture.yaml)
+calib_cam_lidar_jointly: false     # true: joint cam2rig+lidar2rig optimization
+calib_lidar_reflectivity_threshold: -1.0  # use only points above this reflectivity (-1 = all)
+calib_lidar_use_plane_to_plane_residual: true   # plane-to-plane instead of point-to-plane distance
+calib_lidar_use_plane_normal_residual: true     # add board-vs-lidar plane normal residual
+calib_lidar_distance_weight: 1.0   # distance residual weight
+calib_lidar_plane_normal_weight: 10.0  # normal residual weight (tune 1~10)
+calib_lidar_plane_normal_cauchy_sig: 1.0  # normal residual Cauchy scale (~sin(angle))
+calib_lidar_normal_sphere_subdiv: 0  # normal-direction cell balancing: -1 off, 0=20, 1=80, 2=320 dirs
+calib_lidar_plane_ransac_iters: 128
+calib_lidar_plane_ransac_dist: 0.02   # RANSAC inlier distance (m)
+calib_lidar_plane_min_inlier_ratio: 0.5
+
+# # # # # # # # # # # # #
+# Rig 2 Imu Calibration #
+# # # # # # # # # # # # #
+rig2imu:
+    flag: true
+    frame_skip_rate: 1 #  When image frame rate is too high, increase skip rate to 2 ~ 3
+    cauchy_sig: 1.0
+    save_debug_imgs: false # 1.2x ~ 1.3x of storage is used to save images for debug
+    n_workers: 8
+    fix_intrinsic: false # fix intrinsic while calibrating rig2cam extrinsics
+
+    #  Adjust this parameter for handling noisy imu measurements
+    imu_acc_pad_size: 4
+    imu_gyr_pad_size: 2
+    imu_acc_butterworth: true
+    imu_gyr_butterworth: false
+
+    imu_num_for_grav_norm: 100
+    imu_acc_std_thr_for_grav_norm: 0.1
+
+    time_offset_calibrate: true
+    time_offset_method: rotation_fit  # or "angvel_norm_correlation"
+    time_offset_search_sec: 0.15  # search half-width; <= 0 skips it
+    calibrate_tr_ba: true
+
+    # Reject a rig2imu result that fails these; <= 0 disables the gate
+    max_time_offset: 0.2      # s
+    max_bias_gyro: 0.05       # rad/s
+    max_bias_acc: 1.0         # m/s^2
+    max_residual_rot: 2.0     # rad/s
+    max_residual_tr: 5.0      # m/s^2

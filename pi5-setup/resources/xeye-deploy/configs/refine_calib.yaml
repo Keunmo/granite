@@ -1,0 +1,54 @@
+# refine-calib.yaml
+
+board_9x9: &board_9x9
+  spec: "-4,4,-4,4"  # Board spec: x-,x+,y-,y+
+  grid_size: 0.09
+  tag_size: 0.048
+
+board_small_5x5: &board_small_5x5
+  spec: "-2,2,-2,2"
+  grid_size: 0.07
+  tag_size: 0.04
+
+board_large_2x3: &board_large_2x3
+  spec: "-1,1,-2,2"  # Board spec: x-,x+,y-,y+
+  grid_size: 0.22
+  tag_size: 0.12
+  corner_is_white: false
+
+# capture_path: /mnt/storage/data/calib/250515_mmscar_calib2/capture.yaml
+# board: *board_large_2x3
+# min_obs_coverage: 0.1
+
+capture_path: /mnt/storage/data/251015_171554/capture.yaml
+board: *board_small_5x5
+min_obs_coverage: 0.6
+
+# capture_path: /mnt/storage/data/capture_helmet.yaml
+# capture_key_path: ./keys/master.mpk
+
+board_image_width: 400
+crossing_fast_thr: 5
+optimize_intrinsics: false
+calib_cauchy_sig: 3.0  # Cauchy sig for calibration
+reset_extrinsics: false
+
+# new calib's coordinate system
+front_cameras: "0,1"
+compute_upvector_as_plane: true
+compute_center_as_minmax: true
+
+# for recorded data
+capture_batch_process: true
+capture_max_msgq_window_ms: 30000
+
+# imu calibration
+imu_calib:
+  time_offset_method: rotation_fit  # or "angvel_norm_correlation"
+  time_offset_search_sec: 0.15  # search half-width; <= 0 skips it
+
+# vis
+vis: false
+viewer:
+  view_height: 2.0
+

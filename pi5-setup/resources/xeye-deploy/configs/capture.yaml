@@ -1,0 +1,102 @@
+# capture.yaml
+
+# sensor_types:
+#   camera_dc1394, camera_spinnaker, camera_pylon
+#   imu_fsm, imu_xsens, imu_eb, imu_wit,
+#   lidar_velodyne
+#   gps_ublox
+
+logtostderr: true
+colorlogtostderr: true
+
+capture_root: ../data
+sensor_nodes: [quad_cam_bf64]
+
+capture_key_path: ./keys/master.mpk
+save_rgb_as_yuv: yuv411  # NOTE: only applies to raw .bin storage, ignored when saving video
+
+# --- Video storage for camera frames (optional) ---
+# save_video_fmt: mkv          # stored as mkv or mp4 files (H.264) instead of raw .bin
+# save_video_tiled: false      # false (default): one video file per camera,
+#                              # true: all cameras of a node in one tiled file.
+# save_video_crf: 18           # H.264 CRF: 0 = lossless, 18 = default, 51 = worst.
+#                              # Raw Bayer/GRAY8 forces 0 unless save_video_debayer.
+# save_video_preset: medium    # x264 speed preset (ultrafast..placebo)
+# save_video_debayer: false    # convert Bayer to colour / GRAY8 to luma-only YUV420
+#                              # so save_video_crf applies (NOT recoverable)
+# save_video_encoder: x264     # x264 (software, default) | nvenc | vaapi.
+#                              # Hardware encoders need the capture[video-nvenc] /
+#                              # capture[video-vaapi] build features
+# capture_data_writer_max_queue_size: -1  # data writer queue bound;
+#                                          # <= 0 (default) = unbounded
+# capture_data_writer_can_drop: false      # with a bounded queue: true drops the
+#                                          # oldest queued data when full, false
+#                                          # blocks the sensor callback
+# Storable: GRAY8 / 8-bit Bayer (lossless unless save_video_debayer); YUV420;
+# RGB8 / YUV411 / YUV422 (-> YUV420, lossy). GRAY16/10/12 fall back to raw .bin.
+
+viewer_reduce_image_size: true
+viewer_image_debayer_stride: 2
+viewer_height: 720
+
+quad_cam_bf64:
+  type: multi_camera
+  fps: 10.0
+  trigger_type: main_camera # [software, hardware, main_camera]
+  trigger_source: 2 # 3 for legacy hardware (different pin between main and sub)
+  sensor_nodes: [cam1, cam2, cam3, cam4]
+  cam1:
+    type: camera_spinnaker
+    guid: 22131585
+  cam2:
+    type: camera_spinnaker
+    guid: 22131580
+  cam3:
+    type: camera_spinnaker
+    guid: 22145360
+  cam4:
+    type: camera_spinnaker
+    guid: 22131569
+  master_guid: 22145360
+  preset_yaml_file: camera_control_presets.yaml
+  preset_name: default_ff3
+
+# imu:
+#   type: imu_fsm
+#   freq_hz: 250
+
+# lidar:
+#   type: lidar_velodyne
+#   port: 2368
+#   product: vlp16
+
+# gps_ublox:
+#   type: gps_ublox
+#   port: /dev/ttyACM0
+#   baudrate: 115200
+#   hz: 10
+#   ntrip:
+#     host: ntrip.hi-rtk.io
+#     # host: ntrip.ndgps.go.kr
+#     port: 2101
+#     user: multipleye
+#     password: multipleye
+#     # user: nmpnt
+#     # password: nmpnt
+#     mountpoint: MULTI_AUTO
+#     # mountpoint: SOCH_RTCM32
+#     gga_interval_sec: 1
+
+
+
+# gps_nmea:
+#   type: gps_nmea
+#   port: /dev/ttyACM0
+#   baudrate: 115200  # or product: m8n | m9n | f9p
+#   hz: 10  # 1 | 2 | 4 | 5 | 10 | 20 | 25 | 50 | 100
+
+# gps_septentrio:
+#   type: gps_septentrio
+#   port: /dev/ttyACM1
+#   baudrate: 115200
+#   hz: 10  # 1 | 2 | 4 | 5 | 10 | 20 | 25 | 50 | 100

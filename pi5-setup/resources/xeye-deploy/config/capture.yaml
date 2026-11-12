@@ -1,0 +1,71 @@
+# capture.yaml for a Raspberry Pi 5 with a Kurokesu AR0234 on CAM/DISP 1 and
+# the IMU of a PX4 flight controller (UVify V6X FMU) on USB.
+#
+# The camera needs the Kurokesu ar0234 driver and `dtoverlay=ar0234` in
+# /boot/firmware/config.txt. `port` is the rp1-cfe-csi2_ch0 video node of the
+# rp1-cfe media graph that has the ar0234 entity (see `media-ctl -p -d
+# /dev/mediaN`).
+#
+# mavlink-routerd owns the FC USB port (/dev/ttyACM0) and forwards the FC
+# messages to 127.0.0.1:14601, so other MAVLink clients can run together with
+# capture. Without the router, replace `udp` with `port: /dev/ttyACM0` (needs
+# the dialout group and exclusive access to the port).
+#
+#   ./bin/capture config/capture_kurokesu_ar0234_pi.yaml --disable_gui \
+#     --start_capture_immediately --auto_stop_after_sec 10 \
+#     --capture_root data/kurokesu
+
+sensor_nodes: [cam0, imu_fc]
+
+cam0:
+  type: camera_v4l2_gen2
+  port: /dev/video0
+  model: kurokesu_ar0234_pi
+  property:
+    # gray8: the demosaiced gray for VIO. bayer8, bayer10, gray16: raw Bayer.
+    pixel_format: gray8
+    width: 1920                # [960, 1280, 1920, 1920]
+    height: 1200               # [600, 720, 1080, 1200]
+    frame_rate: 20
+    exposure_time: 3.0        # [ms], the start value of auto_exposure
+    gain: 40                  # analog gain control of the driver [13, 64]
+    h_flip: true
+    v_flip: true
+    crop: [288, 0, 1344, 1200]      # in the sensor frame, even values
+    # gray8 and bayer8: WB of the non-green pixels above black_level. fused_wb
+    # takes the gains from the previous frame.
+    auto_white_balance: false
+    fused_wb: true
+    black_level: 42           # [10-bit], measured on Helios AR0234
+    enable_gamma: true
+    auto_exposure: true
+    auto_gain: true
+    auto_exposure_circle: [665, 646, 660]
+    auto_exposure_range: [0.1, 8.0]  # [ms]
+    # auto_gain_range: [4.5, 24.1]    # [dB], default: the driver range
+    auto_exp_prior: exposure
+    target_gray_value: 20.0   # [%] of the full scale, linear
+
+imu_fc:
+  type: imu_mavlink
+  udp: 127.0.0.1:14601
+  freq_hz: 200
+  imu2rig_pose: [0.0079919039917334955, 2.2248122660804066, 2.1669388041119677, 0.090966600774109785, 0.0017183899389688925, -0.14053050500800146]
+  property:
+    calibrated: true
+    bias_gyro: [-0.00090709251983964873, -0.0010392035144196803, -0.00042214726572595111]
+    bias_acc: [-0.099561326668461819, 0.039279377213444183, -0.001137995592358553]
+    time_offset: 0.013727200443578997
+
+calib:
+  cam0:
+    cam_id: 0
+    model: uwfisheye
+    image_size: [1344, 1200]
+    cam2rig_pose: [0, 0, 0, 0, 0, 0]
+    max_theta: 106.91401821622543
+    poly: [10, 0.94939727708604726, -0.0022872941897272106, 0.0029966793776345069, 0.053929792278218924, -0.071509567248123282, 0.041221986193534801, -0.017460217540394948, 0.0028816445707191959, 1.0094899840096691e-07, 0]
+    inv_poly: [16, 1.041139696237551, 0.72558411381039023, -15.839243061804533, 180.3324331151662, -1242.2178910664777, 5622.6493643212998, -17605.46310821033, 39382.475381413744, -64147.337576353224, 76737.150244970107, -67335.131460621007, 42805.446698505591, -19174.49149572201, 5736.7150112558456, -1028.5753036275739, 83.562870824940276]
+    intrinsic: [396.84067581466803, 665.4282039271294, 645.97451668561655]
+  imu_fc:
+    imu2rig_pose: [0.0079919039917334955, 2.2248122660804066, 2.1669388041119677, 0.090966600774109785, 0.0017183899389688925, -0.14053050500800146]
