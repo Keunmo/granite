@@ -1,0 +1,26 @@
+#!/bin/sh
+# SPDX-License-Identifier: GPL-2.0-only
+# Copyright (c) 2026, UAB Kurokesu. All rights reserved.
+#
+# DKMS post-install: build and install device tree overlay to /boot
+
+set -e
+
+# Status line formatter (matches Makefile's PRINT)
+print() { printf '  %-7s %s\n' "$1" "$2"; }
+
+cd "$(dirname "$0")"
+
+# Keep build artifacts out of dpkg-owned source tree
+BUILD_DIR=$(mktemp -d)
+trap 'rm -rf "$BUILD_DIR"' EXIT
+make dtbo BUILD_DIR="$BUILD_DIR"
+
+# Ubuntu has no /boot/overlays. Its firmware reads /boot/firmware/overlays.
+OVERLAY_DIR=/boot/overlays
+if [ ! -d "$OVERLAY_DIR" ] && [ -d /boot/firmware/overlays ]; then
+	OVERLAY_DIR=/boot/firmware/overlays
+fi
+
+print INSTALL "$OVERLAY_DIR/$(basename "$BUILD_DIR"/*.dtbo)"
+install -m 644 "$BUILD_DIR"/*.dtbo "$OVERLAY_DIR/"

@@ -1,0 +1,10 @@
+# Options of granite-vio.service (installed as /etc/default/granite-vio).
+# After a change: sudo systemctl restart granite-vio
+
+# TBB worker threads of granite_vio.
+GRANITE_THREADS=3
+
+# Options of pi5_live_kurokesu_vio.sh and granite_vio:
+#   --imu_send_odometry 1   send each VIO state to the FC as MAVLink ODOMETRY
+#   --no-record             do not record the camera and the IMU. Remove it to record EuRoC data in runs/.
+GRANITE_VIO_ARGS="--no-record --imu_send_odometry 1"

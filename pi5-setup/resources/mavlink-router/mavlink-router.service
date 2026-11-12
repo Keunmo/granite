@@ -1,0 +1,14 @@
+[Unit]
+Description=MAVLink router (flight controller TELEM1 <-> local UDP)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/mavlink-routerd -c /etc/mavlink-router/main.conf
+Restart=always
+RestartSec=2
+DynamicUser=yes
+SupplementaryGroups=dialout
+
+[Install]
+WantedBy=multi-user.target

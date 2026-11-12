@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Granite Live VIO (Kurokesu)
+Comment=Live mono VIO with the Kurokesu AR0234 and the FC IMU (granite_vio --live)
+Exec=gnome-terminal --title="Granite Live VIO (Kurokesu)" -- env GRANITE_PAUSE=1 /home/uvify/deploy/granite/scripts/pi5_live_kurokesu_vio.sh
+Icon=/home/uvify/deploy/granite/scripts/pi5_live_kurokesu_vio.svg
+Terminal=false
+Categories=Science;

@@ -1,0 +1,1573 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * A V4L2 driver for onsemi AR0234 cameras.
+ *
+ * Copyright (C) 2021, Raspberry Pi (Trading) Ltd
+ * Copyright (C) 2025-2026, UAB Kurokesu
+ *
+ * Based on Sony imx219 camera driver
+ * Copyright (C) 2019, Raspberry Pi (Trading) Ltd
+ *
+ */
+
+#include <linux/clk.h>
+#include <linux/delay.h>
+#include <linux/gpio/consumer.h>
+#include <linux/module.h>
+#include <linux/version.h>
+#include <linux/of.h>
+#include <linux/pm_runtime.h>
+#include <linux/regulator/consumer.h>
+
+#include <media/v4l2-cci.h>
+#include <media/v4l2-ctrls.h>
+#include <media/v4l2-event.h>
+#include <media/v4l2-fwnode.h>
+#include <media/v4l2-subdev.h>
+
+static int trigger_mode;
+module_param(trigger_mode, int, 0644);
+MODULE_PARM_DESC(trigger_mode,
+		 "Set trigger mode: 0=off, 1=external-trigger, 2=sync-sink");
+
+/* Registers */
+#define AR0234_REG_CHIP_ID CCI_REG16(0x3000)
+#define AR0234_REG_Y_ADDR_START CCI_REG16(0x3002)
+#define AR0234_REG_X_ADDR_START CCI_REG16(0x3004)
+#define AR0234_REG_Y_ADDR_END CCI_REG16(0x3006)
+#define AR0234_REG_X_ADDR_END CCI_REG16(0x3008)
+#define AR0234_REG_FRAME_LENGTH_LINES CCI_REG16(0x300A)
+#define AR0234_REG_EXPOSURE_COARSE CCI_REG16(0x3012)
+#define AR0234_REG_RESET CCI_REG16(0x301A)
+#define AR0234_REG_MODE_SELECT CCI_REG8(0x301C)
+#define AR0234_REG_IMAGE_ORIENTATION CCI_REG8(0x301D)
+#define AR0234_REG_GROUPED_PARAMETER_HOLD CCI_REG8(0x3022)
+#define AR0234_REG_VT_PIX_CLK_DIV CCI_REG16(0x302A)
+#define AR0234_REG_VT_SYS_CLK_DIV CCI_REG16(0x302C)
+#define AR0234_REG_PRE_PLL_CLK_DIV CCI_REG16(0x302E)
+#define AR0234_REG_PLL_MULTIPLIER CCI_REG16(0x3030)
+#define AR0234_REG_OP_PIX_CLK_DIV CCI_REG16(0x3036)
+#define AR0234_REG_OP_SYS_CLK_DIV CCI_REG16(0x3038)
+#define AR0234_REG_READ_MODE CCI_REG16(0x3040)
+#define AR0234_REG_DIGITAL_GAIN CCI_REG16(0x305E)
+#define AR0234_REG_ANALOG_GAIN CCI_REG16(0x3060)
+#define AR0234_REG_SMIA_TEST CCI_REG16(0x3064)
+#define AR0234_REG_DATAPATH_SELECT CCI_REG16(0x306E)
+#define AR0234_REG_TEST_PATTERN_MODE CCI_REG16(0x3070)
+#define AR0234_REG_TEST_DATA_RED CCI_REG16(0x3072)
+#define AR0234_REG_TEST_DATA_GREENR CCI_REG16(0x3074)
+#define AR0234_REG_TEST_DATA_BLUE CCI_REG16(0x3076)
+#define AR0234_REG_TEST_DATA_GREENB CCI_REG16(0x3078)
+#define AR0234_REG_OPERATION_MODE_CTRL CCI_REG16(0x3082)
+#define AR0234_REG_SEQ_DATA_PORT CCI_REG16(0x3086)
+#define AR0234_REG_SEQ_CTRL_PORT CCI_REG16(0x3088)
+#define AR0234_REG_X_ODD_INC CCI_REG16(0x30A2)
+#define AR0234_REG_Y_ODD_INC CCI_REG16(0x30A6)
+#define AR0234_REG_DIGITAL_TEST CCI_REG16(0x30B0)
+#define AR0234_REG_TEMPSENS_CTRL CCI_REG16(0x30B4)
+#define AR0234_REG_MFR_30BA CCI_REG16(0x30BA)
+#define AR0234_REG_GRR_CONTROL1 CCI_REG16(0x30CE)
+#define AR0234_REG_AE_LUMA_TARGET CCI_REG16(0x3102)
+#define AR0234_REG_DELTA_DK_CONTROL CCI_REG16(0x3180)
+#define AR0234_REG_DATA_FORMAT_BITS CCI_REG16(0x31AC)
+#define AR0234_REG_SERIAL_FORMAT CCI_REG16(0x31AE)
+#define AR0234_REG_FRAME_PREAMBLE CCI_REG16(0x31B0)
+#define AR0234_REG_LINE_PREAMBLE CCI_REG16(0x31B2)
+#define AR0234_REG_MIPI_TIMING_0 CCI_REG16(0x31B4)
+#define AR0234_REG_MIPI_TIMING_1 CCI_REG16(0x31B6)
+#define AR0234_REG_MIPI_TIMING_2 CCI_REG16(0x31B8)
+#define AR0234_REG_MIPI_TIMING_3 CCI_REG16(0x31BA)
+#define AR0234_REG_MIPI_TIMING_4 CCI_REG16(0x31BC)
+#define AR0234_REG_COMPANDING CCI_REG16(0x31D0)
+#define AR0234_REG_PIX_DEF_ID CCI_REG16(0x31E0)
+#define AR0234_REG_LED_FLASH_CONTROL CCI_REG16(0x3270)
+#define AR0234_REG_MIPI_CNTRL CCI_REG16(0x3354)
+
+/* Chip ID */
+#define AR0234_CHIP_ID 0x0A56
+#define AR0234_CHIP_ID_MONO 0x1A56
+
+/* Sensor frequencies */
+#define AR0234_FREQ_EXTCLK 24000000
+#define AR0234_FREQ_PIXCLK_45MHZ 45000000
+#define AR0234_FREQ_PIXCLK_90MHZ 90000000
+
+/*
+ * AR0234 uses different link frequencies depending on
+ * output bit depth. 360 MHz for 8-bit, 450 MHz for 10-bit.
+ */
+#define AR0234_FREQ_LINK_8BIT 360000000
+#define AR0234_FREQ_LINK_10BIT 450000000
+
+/* Frame timing */
+#define AR0234_FLL_OVERHEAD 5
+#define AR0234_FLL_MAX (0xFFFF + AR0234_FLL_OVERHEAD)
+#define AR0234_VBLANK_MIN (16 + AR0234_FLL_OVERHEAD)
+#define AR0234_LINE_LENGTH_PCK_DEF 612
+
+/* AR0234_REG_RESET Bits */
+#define AR0234_RESET_DEFAULT 0x2058
+#define AR0234_RESET_STREAM BIT(2)
+#define AR0234_RESET_GPI_EN BIT(8)
+#define AR0234_RESET_FORCED_PLL_ON BIT(11)
+
+/* AR0234_REG_GRR_CONTROL1 Bits */
+#define AR0234_GRR_SLAVE_SH_SYNC BIT(8)
+
+/* AR0234_REG_LED_FLASH_CONTROL Bits */
+#define AR0234_FLASH_ENABLE BIT(8)
+
+/* Exposure control */
+#define AR0234_EXPOSURE_MIN 2
+#define AR0234_EXPOSURE_STEP 1
+
+/* Analog gain control */
+#define AR0234_ANA_GAIN_MIN 0x0D
+#define AR0234_ANA_GAIN_MAX 0x40
+#define AR0234_ANA_GAIN_STEP 1
+#define AR0234_ANA_GAIN_DEFAULT 0x0E
+#define AR0234_MFR_30BA_GAIN_BITS(_val) (0x7620 | (_val))
+#define AR0234_MFR_30BA_DEFAULT AR0234_MFR_30BA_GAIN_BITS(2)
+
+/* Digital gain control */
+#define AR0234_DGTL_GAIN_MIN 0x0080
+#define AR0234_DGTL_GAIN_MAX 0x07FF
+#define AR0234_DGTL_GAIN_DEFAULT 0x0080
+#define AR0234_DGTL_GAIN_STEP 1
+
+/* Test Patterns */
+#define AR0234_TEST_PATTERN_COLOR_MIN 0
+#define AR0234_TEST_PATTERN_COLOR_MAX 0x03FF
+#define AR0234_TEST_PATTERN_COLOR_STEP 1
+
+#define AR0234_TEST_PATTERN_DISABLED 0
+#define AR0234_TEST_PATTERN_SOLID_COLOR 1
+#define AR0234_TEST_PATTERN_COLOR_BARS 2
+#define AR0234_TEST_PATTERN_FADE_TO_GREY 3
+#define AR0234_TEST_PATTERN_WALKING_1S 256
+
+/* Trigger modes */
+#define AR0234_TRIGGER_MODE_OFF 0
+#define AR0234_TRIGGER_MODE_SLAVE_SYNC 2
+
+#define AR0234_NATIVE_WIDTH 1940U
+#define AR0234_NATIVE_HEIGHT 1220U
+#define AR0234_PIXEL_ARRAY_LEFT 8U
+#define AR0234_PIXEL_ARRAY_TOP 8U
+#define AR0234_PIXEL_ARRAY_WIDTH 1920U
+#define AR0234_PIXEL_ARRAY_HEIGHT 1200U
+
+/* Embedded metadata stream buffer size (padding every 4 bytes) */
+#define AR0234_MD_PADDING_BYTES (AR0234_PIXEL_ARRAY_WIDTH / 4)
+#define AR0234_EMBEDDED_LINE_WIDTH \
+	(AR0234_PIXEL_ARRAY_WIDTH + AR0234_MD_PADDING_BYTES)
+#define AR0234_NUM_EMBEDDED_LINES 2
+
+/* RESET GPIO */
+#define AR0234_RESET_DELAY_MIN_US 6200
+#define AR0234_RESET_DELAY_RANGE_US 1000
+
+/* Register address size in bits */
+#define AR0234_REG_ADDRESS_BITS 16
+
+/* 1 format code for selected link frequency */
+#define AR0234_NUM_FMT_CODES 1
+
+#define AR0234_NUM_SUPPLIES ARRAY_SIZE(ar0234_supply_names)
+
+enum pad_types {
+	IMAGE_PAD,
+	METADATA_PAD,
+	NUM_PADS,
+};
+
+struct ar0234_reg_sequence {
+	unsigned int num_regs;
+	const struct cci_reg_sequence *regs;
+};
+
+enum ar0234_lane_count_id {
+	AR0234_LANE_COUNT_ID_2LANE = 0,
+	AR0234_LANE_COUNT_ID_4LANE,
+};
+
+/* Sensor mode: resolution, crop and register sequence */
+struct ar0234_mode {
+	/* Frame width */
+	unsigned int width;
+	/* Frame height */
+	unsigned int height;
+	/* Analog crop rectangle. */
+	struct v4l2_rect crop;
+
+	struct ar0234_reg_sequence reg_sequence;
+};
+
+/*
+ * PLL config for:
+ * External clock - 24MHz
+ * Link frequency - 360MHz
+ * Bit depth      - 8bit
+ */
+static const struct cci_reg_sequence ar0234_pll_config_24_360_8bit[] = {
+	{ AR0234_REG_VT_PIX_CLK_DIV, 0x0008 },
+	{ AR0234_REG_VT_SYS_CLK_DIV, 0x0001 },
+	{ AR0234_REG_PRE_PLL_CLK_DIV, 0x0001 },
+	{ AR0234_REG_PLL_MULTIPLIER, 0x001E },
+	{ AR0234_REG_OP_PIX_CLK_DIV, 0x0008 },
+	{ AR0234_REG_OP_SYS_CLK_DIV, 0x0002 },
+	{ AR0234_REG_FRAME_PREAMBLE, 0x0080 },
+	{ AR0234_REG_LINE_PREAMBLE, 0x005C },
+	{ AR0234_REG_MIPI_TIMING_0, 0x5248 },
+	{ AR0234_REG_MIPI_TIMING_1, 0x4258 },
+	{ AR0234_REG_MIPI_TIMING_2, 0x904C },
+	{ AR0234_REG_MIPI_TIMING_3, 0x028B },
+	{ AR0234_REG_MIPI_TIMING_4, 0x0D89 },
+	{ AR0234_REG_MIPI_CNTRL, 0x002A },
+	{ AR0234_REG_DATA_FORMAT_BITS, 0x0808 }, /* 8-bit in/out */
+};
+
+/*
+ * PLL config for:
+ * External clock - 24MHz
+ * Link frequency - 450MHz
+ * Bit depth      - 10bit
+ */
+static const struct cci_reg_sequence ar0234_pll_config_24_450_10bit[] = {
+	{ AR0234_REG_VT_PIX_CLK_DIV, 0x0005 },
+	{ AR0234_REG_VT_SYS_CLK_DIV, 0x0001 },
+	{ AR0234_REG_PRE_PLL_CLK_DIV, 0x0008 },
+	{ AR0234_REG_PLL_MULTIPLIER, 0x0096 },
+	{ AR0234_REG_OP_PIX_CLK_DIV, 0x000A },
+	{ AR0234_REG_OP_SYS_CLK_DIV, 0x0001 },
+	{ AR0234_REG_FRAME_PREAMBLE, 0x0082 },
+	{ AR0234_REG_LINE_PREAMBLE, 0x005C },
+	{ AR0234_REG_MIPI_TIMING_0, 0x4248 },
+	{ AR0234_REG_MIPI_TIMING_1, 0x4258 },
+	{ AR0234_REG_MIPI_TIMING_2, 0x904B },
+	{ AR0234_REG_MIPI_TIMING_3, 0x030B },
+	{ AR0234_REG_MIPI_TIMING_4, 0x0D89 },
+	{ AR0234_REG_MIPI_CNTRL, 0x002B },
+	{ AR0234_REG_DATA_FORMAT_BITS, 0x0A0A }, /* 10-bit in/out */
+};
+
+static const struct cci_reg_sequence common_init[] = {
+	{ AR0234_REG_DIGITAL_TEST, 0x0028 },
+	{ AR0234_REG_DATAPATH_SELECT, 0x9010 },
+	{ AR0234_REG_OPERATION_MODE_CTRL, 0x0003 },
+	{ AR0234_REG_COMPANDING, 0x0000 },
+	{ AR0234_REG_SEQ_CTRL_PORT, 0x8050 },
+	{ AR0234_REG_SEQ_DATA_PORT, 0x9237 },
+	{ CCI_REG16(0x3096), 0x0280 },
+	{ AR0234_REG_PIX_DEF_ID, 0x0003 },
+	{ CCI_REG16(0x3F4C), 0x121F },
+	{ CCI_REG16(0x3F4E), 0x121F },
+	{ CCI_REG16(0x3F50), 0x0B81 },
+	{ CCI_REG16(0x3ED2), 0xFA96 },
+	{ AR0234_REG_DELTA_DK_CONTROL, 0x824F },
+	{ CCI_REG16(0x3ECC), 0x0C42 },
+	{ CCI_REG16(0x3ECC), 0x0C42 },
+	{ CCI_REG16(0x30F0), 0x2283 },
+	{ AR0234_REG_AE_LUMA_TARGET, 0x5000 },
+	{ AR0234_REG_TEMPSENS_CTRL, 0x0011 },
+	{ AR0234_REG_SMIA_TEST, 0x1982 },
+};
+
+/* Recommended manufacturer settings for 45MHz pixel clock */
+static const struct cci_reg_sequence pixclk_45mhz_mfr_settings[] = {
+	{ AR0234_REG_SEQ_CTRL_PORT, 0x81BA },
+	{ AR0234_REG_SEQ_DATA_PORT, 0x3D02 },
+};
+
+/* Full sensor resolution */
+static const struct cci_reg_sequence ar0234_1920x1200_config[] = {
+	{ AR0234_REG_Y_ADDR_START, 0x0008 },
+	{ AR0234_REG_X_ADDR_START, 0x0008 },
+	{ AR0234_REG_Y_ADDR_END, 0x04B7 },
+	{ AR0234_REG_X_ADDR_END, 0x0787 },
+	{ AR0234_REG_X_ODD_INC, 0x0001 },
+	{ AR0234_REG_Y_ODD_INC, 0x0001 },
+};
+
+static const struct cci_reg_sequence ar0234_1080p_config[] = {
+	{ AR0234_REG_Y_ADDR_START, 0x0044 },
+	{ AR0234_REG_X_ADDR_START, 0x0008 },
+	{ AR0234_REG_Y_ADDR_END, 0x047B },
+	{ AR0234_REG_X_ADDR_END, 0x0787 },
+	{ AR0234_REG_X_ODD_INC, 0x0001 },
+	{ AR0234_REG_Y_ODD_INC, 0x0001 },
+};
+
+static const struct cci_reg_sequence ar0234_720p_config[] = {
+	{ AR0234_REG_Y_ADDR_START, 0x00F8 },
+	{ AR0234_REG_X_ADDR_START, 0x0148 },
+	{ AR0234_REG_Y_ADDR_END, 0x03C7 },
+	{ AR0234_REG_X_ADDR_END, 0x0647 },
+	{ AR0234_REG_X_ODD_INC, 0x0001 },
+	{ AR0234_REG_Y_ODD_INC, 0x0001 },
+};
+
+/* Binned 2x2 */
+static const struct cci_reg_sequence ar0234_960x600_config[] = {
+	{ AR0234_REG_Y_ADDR_START, 0x0008 },
+	{ AR0234_REG_X_ADDR_START, 0x0008 },
+	{ AR0234_REG_Y_ADDR_END, 0x04B7 },
+	{ AR0234_REG_X_ADDR_END, 0x0787 },
+	{ AR0234_REG_X_ODD_INC, 0x0003 },
+	{ AR0234_REG_Y_ODD_INC, 0x0003 },
+	{ AR0234_REG_READ_MODE, 0x3000 },
+};
+
+static const char *const ar0234_test_pattern_menu[] = {
+	"Disabled",
+	"Solid Color",
+	"Vertical Color Bars",
+	"Fade to Grey Color Bars",
+	"Walking 1s",
+};
+
+static const unsigned int ar0234_test_pattern_val[] = {
+	AR0234_TEST_PATTERN_DISABLED, /* Disabled */
+	AR0234_TEST_PATTERN_SOLID_COLOR, /* Solid Color */
+	AR0234_TEST_PATTERN_COLOR_BARS, /* Vertical Color Bars */
+	AR0234_TEST_PATTERN_FADE_TO_GREY, /* Fade to Grey Color Bars */
+	AR0234_TEST_PATTERN_WALKING_1S, /* Walking 1s */
+};
+
+/* regulator supplies */
+static const char *const ar0234_supply_names[] = {
+	/* Supplies can be enabled in any order */
+	"vana", /* Analog (2.8V) supply */
+	"vdig", /* Digital Core (1.8V) supply */
+	"vddl", /* IF (1.2V) supply */
+};
+
+/* Format configs */
+static const struct ar0234_mode ar0234_modes[] = {
+	{
+		.width = 1920,
+		.height = 1200,
+		.crop = {
+			.left = AR0234_PIXEL_ARRAY_LEFT,
+			.top = AR0234_PIXEL_ARRAY_TOP,
+			.width = 1920,
+			.height = 1200,
+		},
+		.reg_sequence = {
+			.regs = ar0234_1920x1200_config,
+			.num_regs = ARRAY_SIZE(ar0234_1920x1200_config),
+		},
+	},
+	{
+		.width = 1920,
+		.height = 1080,
+		.crop = {
+			.left = AR0234_PIXEL_ARRAY_LEFT,
+			.top = AR0234_PIXEL_ARRAY_TOP + 60,
+			.width = 1920,
+			.height = 1080,
+		},
+		.reg_sequence = {
+			.regs = ar0234_1080p_config,
+			.num_regs = ARRAY_SIZE(ar0234_1080p_config),
+		},
+	},
+	{
+		.width = 1280,
+		.height = 720,
+		.crop = {
+			.left = AR0234_PIXEL_ARRAY_LEFT + 320,
+			.top = AR0234_PIXEL_ARRAY_TOP + 240,
+			.width = 1280,
+			.height = 720,
+		},
+		.reg_sequence = {
+			.regs = ar0234_720p_config,
+			.num_regs = ARRAY_SIZE(ar0234_720p_config),
+		},
+	},
+	{
+		.width = 960,
+		.height = 600,
+		.crop = {
+			.left = AR0234_PIXEL_ARRAY_LEFT,
+			.top = AR0234_PIXEL_ARRAY_TOP,
+			.width = 1920,
+			.height = 1200,
+		},
+		.reg_sequence = {
+			.regs = ar0234_960x600_config,
+			.num_regs = ARRAY_SIZE(ar0234_960x600_config),
+		},
+	},
+};
+
+struct ar0234_fmt_codes {
+	u32 bayer;
+	u32 mono;
+};
+
+struct ar0234_pll_config {
+	s64 freq_link;
+	u32 freq_extclk;
+	struct ar0234_reg_sequence regs_pll;
+	struct ar0234_fmt_codes fmt_codes;
+};
+
+static const struct ar0234_pll_config ar0234_pll_configs[] = {
+	{
+		.freq_link = AR0234_FREQ_LINK_8BIT,
+		.freq_extclk = AR0234_FREQ_EXTCLK,
+		.regs_pll = {
+			.regs = ar0234_pll_config_24_360_8bit,
+			.num_regs = ARRAY_SIZE(ar0234_pll_config_24_360_8bit),
+		},
+		.fmt_codes = {
+			.bayer = MEDIA_BUS_FMT_SGRBG8_1X8,
+			.mono = MEDIA_BUS_FMT_Y8_1X8,
+		},
+	},
+	{
+		.freq_link = AR0234_FREQ_LINK_10BIT,
+		.freq_extclk = AR0234_FREQ_EXTCLK,
+		.regs_pll = {
+			.regs = ar0234_pll_config_24_450_10bit,
+			.num_regs = ARRAY_SIZE(ar0234_pll_config_24_450_10bit),
+		},
+		.fmt_codes = {
+			.bayer = MEDIA_BUS_FMT_SGRBG10_1X10,
+			.mono = MEDIA_BUS_FMT_Y10_1X10,
+		},
+	},
+};
+
+/* Pixel clock frequencies are based on lane count */
+static const u32 ar0234_freq_pixclk[] = {
+	[AR0234_LANE_COUNT_ID_2LANE] = AR0234_FREQ_PIXCLK_45MHZ,
+	[AR0234_LANE_COUNT_ID_4LANE] = AR0234_FREQ_PIXCLK_90MHZ,
+};
+
+struct ar0234_hw_config {
+	struct clk *extclk;
+	struct regulator_bulk_data supplies[AR0234_NUM_SUPPLIES];
+	struct gpio_desc *gpio_reset;
+	unsigned int num_data_lanes;
+	enum ar0234_lane_count_id lane_count_id;
+	int trigger_mode;
+	bool flash_enable;
+	s8 flash_delay;
+};
+
+struct ar0234 {
+	struct device *dev;
+	struct ar0234_hw_config hw_config;
+	struct ar0234_pll_config const *pll_config;
+
+	struct regmap *regmap;
+
+	struct v4l2_subdev sd;
+	struct media_pad pad[NUM_PADS];
+
+	bool monochrome;
+
+	struct v4l2_ctrl_handler ctrl_handler;
+	/* V4L2 Controls */
+	struct v4l2_ctrl *exposure;
+	struct v4l2_ctrl *vflip;
+	struct v4l2_ctrl *hflip;
+	struct v4l2_ctrl *vblank;
+	struct v4l2_ctrl *hblank;
+
+	u16 mfr_30ba;
+};
+
+static inline struct ar0234 *to_ar0234(struct v4l2_subdev *_sd)
+{
+	return container_of(_sd, struct ar0234, sd);
+}
+
+static u32 ar0234_get_format_code(struct ar0234 *ar0234)
+{
+	u32 code;
+
+	if (ar0234->monochrome)
+		code = ar0234->pll_config->fmt_codes.mono;
+	else
+		code = ar0234->pll_config->fmt_codes.bayer;
+
+	return code;
+}
+
+static const struct ar0234_mode *
+ar0234_state_get_mode(struct v4l2_subdev_state *state)
+{
+	struct v4l2_mbus_framefmt *fmt;
+
+	fmt = v4l2_subdev_state_get_format(state, IMAGE_PAD);
+
+	return v4l2_find_nearest_size(ar0234_modes, ARRAY_SIZE(ar0234_modes),
+				      width, height, fmt->width, fmt->height);
+}
+
+static void ar0234_adjust_exposure_range(struct ar0234 *ar0234,
+					 const struct ar0234_mode *mode)
+{
+	int exposure_max =
+		mode->height + ar0234->vblank->val - AR0234_FLL_OVERHEAD - 1;
+
+	__v4l2_ctrl_modify_range(ar0234->exposure, ar0234->exposure->minimum,
+				 exposure_max, ar0234->exposure->step,
+				 exposure_max);
+}
+
+static int ar0234_set_analog_gain(struct ar0234 *ar0234, u8 analog_gain)
+{
+	int ret;
+	u16 mfr_30ba_val;
+
+	/*
+	 * 0x30BA register value lookup based on PIXCLK frequency
+	 * and analog gain level.
+	 */
+	if (ar0234_freq_pixclk[ar0234->hw_config.lane_count_id] ==
+	    AR0234_FREQ_PIXCLK_45MHZ) {
+		if (analog_gain < 0x36)
+			mfr_30ba_val = AR0234_MFR_30BA_GAIN_BITS(6);
+		else
+			mfr_30ba_val = AR0234_MFR_30BA_GAIN_BITS(0);
+	} else {
+		if (analog_gain < 0x20)
+			mfr_30ba_val = AR0234_MFR_30BA_GAIN_BITS(2);
+		else if (analog_gain < 0x3A)
+			mfr_30ba_val = AR0234_MFR_30BA_GAIN_BITS(1);
+		else
+			mfr_30ba_val = AR0234_MFR_30BA_GAIN_BITS(0);
+	}
+
+	/* Use grouped parameter hold when 0x30BA needs to be updated. */
+	if (ar0234->mfr_30ba != mfr_30ba_val) {
+		ret = cci_write(ar0234->regmap,
+				AR0234_REG_GROUPED_PARAMETER_HOLD, true, NULL);
+		ret = cci_write(ar0234->regmap, AR0234_REG_MFR_30BA,
+				mfr_30ba_val, &ret);
+		ret = cci_write(ar0234->regmap, AR0234_REG_ANALOG_GAIN,
+				analog_gain, &ret);
+		ret = cci_write(ar0234->regmap,
+				AR0234_REG_GROUPED_PARAMETER_HOLD, false, &ret);
+
+		/* Update cached value */
+		ar0234->mfr_30ba = mfr_30ba_val;
+	} else {
+		ret = cci_write(ar0234->regmap, AR0234_REG_ANALOG_GAIN,
+				analog_gain, NULL);
+	}
+
+	return ret;
+}
+
+static int ar0234_set_ctrl(struct v4l2_ctrl *ctrl)
+{
+	struct ar0234 *ar0234 =
+		container_of(ctrl->handler, struct ar0234, ctrl_handler);
+	struct i2c_client *client = v4l2_get_subdevdata(&ar0234->sd);
+	struct v4l2_subdev_state *state;
+	const struct ar0234_mode *mode;
+	int ret = 0;
+
+	state = v4l2_subdev_get_locked_active_state(&ar0234->sd);
+	mode = ar0234_state_get_mode(state);
+
+	if (ctrl->id == V4L2_CID_VBLANK)
+		ar0234_adjust_exposure_range(ar0234, mode);
+
+	/*
+	 * Applying V4L2 control value only happens
+	 * when power is up for streaming
+	 */
+	if (pm_runtime_get_if_in_use(&client->dev) == 0)
+		return 0;
+
+	switch (ctrl->id) {
+	case V4L2_CID_ANALOGUE_GAIN:
+		ret = ar0234_set_analog_gain(ar0234, ctrl->val);
+		break;
+	case V4L2_CID_EXPOSURE:
+		ret = cci_write(ar0234->regmap, AR0234_REG_EXPOSURE_COARSE,
+				ctrl->val, NULL);
+		break;
+	case V4L2_CID_DIGITAL_GAIN:
+		ret = cci_write(ar0234->regmap, AR0234_REG_DIGITAL_GAIN,
+				ctrl->val, NULL);
+		break;
+	case V4L2_CID_TEST_PATTERN:
+		ret = cci_write(ar0234->regmap, AR0234_REG_TEST_PATTERN_MODE,
+				ar0234_test_pattern_val[ctrl->val], NULL);
+		break;
+	case V4L2_CID_TEST_PATTERN_RED:
+		ret = cci_write(ar0234->regmap, AR0234_REG_TEST_DATA_RED,
+				ctrl->val, NULL);
+		break;
+	case V4L2_CID_TEST_PATTERN_GREENR:
+		ret = cci_write(ar0234->regmap, AR0234_REG_TEST_DATA_GREENR,
+				ctrl->val, NULL);
+		break;
+	case V4L2_CID_TEST_PATTERN_BLUE:
+		ret = cci_write(ar0234->regmap, AR0234_REG_TEST_DATA_BLUE,
+				ctrl->val, NULL);
+		break;
+	case V4L2_CID_TEST_PATTERN_GREENB:
+		ret = cci_write(ar0234->regmap, AR0234_REG_TEST_DATA_GREENB,
+				ctrl->val, NULL);
+		break;
+	case V4L2_CID_HFLIP:
+	case V4L2_CID_VFLIP:
+		ret = cci_write(ar0234->regmap, AR0234_REG_IMAGE_ORIENTATION,
+				(ar0234->vflip->val << 1) | ar0234->hflip->val,
+				NULL);
+		break;
+	case V4L2_CID_VBLANK:
+		ret = cci_write(ar0234->regmap, AR0234_REG_FRAME_LENGTH_LINES,
+				mode->height + ctrl->val - AR0234_FLL_OVERHEAD,
+				NULL);
+		break;
+	case V4L2_CID_HBLANK:
+		/* Read only, line length is set with mode registers. */
+		break;
+	default:
+		dev_info(&client->dev,
+			 "ctrl(id:0x%x,val:0x%x) is not handled\n", ctrl->id,
+			 ctrl->val);
+		ret = -EINVAL;
+		break;
+	}
+
+	pm_runtime_mark_last_busy(&client->dev);
+	pm_runtime_put_autosuspend(&client->dev);
+
+	return ret;
+}
+
+static const struct v4l2_ctrl_ops ar0234_ctrl_ops = {
+	.s_ctrl = ar0234_set_ctrl,
+};
+
+static int ar0234_enum_mbus_code(struct v4l2_subdev *sd,
+				 struct v4l2_subdev_state *sd_state,
+				 struct v4l2_subdev_mbus_code_enum *code)
+{
+	struct ar0234 *ar0234 = to_ar0234(sd);
+
+	if (code->pad >= NUM_PADS)
+		return -EINVAL;
+
+	if (code->pad == IMAGE_PAD) {
+		if (code->index >= AR0234_NUM_FMT_CODES)
+			return -EINVAL;
+
+		code->code = ar0234_get_format_code(ar0234);
+	} else {
+		if (code->index > 0)
+			return -EINVAL;
+
+		code->code = MEDIA_BUS_FMT_SENSOR_DATA;
+	}
+
+	return 0;
+}
+
+static int ar0234_enum_frame_size(struct v4l2_subdev *sd,
+				  struct v4l2_subdev_state *sd_state,
+				  struct v4l2_subdev_frame_size_enum *fse)
+{
+	struct ar0234 *ar0234 = to_ar0234(sd);
+
+	if (fse->pad >= NUM_PADS)
+		return -EINVAL;
+
+	if (fse->pad == IMAGE_PAD) {
+		if (fse->index >= ARRAY_SIZE(ar0234_modes))
+			return -EINVAL;
+
+		if (fse->code != ar0234_get_format_code(ar0234))
+			return -EINVAL;
+
+		fse->min_width = ar0234_modes[fse->index].width;
+		fse->max_width = fse->min_width;
+		fse->min_height = ar0234_modes[fse->index].height;
+		fse->max_height = fse->min_height;
+	} else {
+		if (fse->code != MEDIA_BUS_FMT_SENSOR_DATA || fse->index > 0)
+			return -EINVAL;
+
+		fse->min_width = AR0234_EMBEDDED_LINE_WIDTH;
+		fse->max_width = fse->min_width;
+		fse->min_height = AR0234_NUM_EMBEDDED_LINES;
+		fse->max_height = fse->min_height;
+	}
+
+	return 0;
+}
+
+static void ar0234_reset_colorspace(struct v4l2_mbus_framefmt *fmt)
+{
+	fmt->colorspace = V4L2_COLORSPACE_RAW;
+	fmt->ycbcr_enc = V4L2_MAP_YCBCR_ENC_DEFAULT(fmt->colorspace);
+	fmt->quantization = V4L2_MAP_QUANTIZATION_DEFAULT(true, fmt->colorspace,
+							  fmt->ycbcr_enc);
+	fmt->xfer_func = V4L2_MAP_XFER_FUNC_DEFAULT(fmt->colorspace);
+}
+
+static void ar0234_update_image_pad_format(const struct ar0234_mode *mode,
+					   struct v4l2_subdev_format *fmt)
+{
+	fmt->format.width = mode->width;
+	fmt->format.height = mode->height;
+	fmt->format.field = V4L2_FIELD_NONE;
+	ar0234_reset_colorspace(&fmt->format);
+}
+
+static void ar0234_update_metadata_pad_format(struct v4l2_subdev_format *fmt)
+{
+	fmt->format.width = AR0234_EMBEDDED_LINE_WIDTH;
+	fmt->format.height = AR0234_NUM_EMBEDDED_LINES;
+	fmt->format.code = MEDIA_BUS_FMT_SENSOR_DATA;
+	fmt->format.field = V4L2_FIELD_NONE;
+}
+
+static void ar0234_set_framing_limits(struct ar0234 *ar0234,
+				      const struct ar0234_mode *mode)
+{
+	int hblank;
+
+	/* Update limits and set FPS to default */
+	__v4l2_ctrl_modify_range(ar0234->vblank, AR0234_VBLANK_MIN,
+				 AR0234_FLL_MAX - mode->height,
+				 ar0234->vblank->step, AR0234_VBLANK_MIN);
+
+	/* Setting this will adjust the exposure limits as well */
+	__v4l2_ctrl_s_ctrl(ar0234->vblank, AR0234_VBLANK_MIN);
+
+	/* Virtual, negative, keeps width + hblank at true line length */
+	hblank = AR0234_LINE_LENGTH_PCK_DEF - mode->width;
+	__v4l2_ctrl_modify_range(ar0234->hblank, hblank, hblank, 1, hblank);
+}
+
+static int ar0234_set_pad_format(struct v4l2_subdev *sd,
+				 struct v4l2_subdev_state *sd_state,
+				 struct v4l2_subdev_format *fmt)
+{
+	struct ar0234 *ar0234 = to_ar0234(sd);
+	const struct ar0234_mode *mode;
+
+	if (fmt->pad >= NUM_PADS)
+		return -EINVAL;
+
+	if (fmt->pad == METADATA_PAD) {
+		/* Only one embedded data mode is supported */
+		ar0234_update_metadata_pad_format(fmt);
+		*v4l2_subdev_state_get_format(sd_state, METADATA_PAD) =
+			fmt->format;
+
+		return 0;
+	}
+
+	fmt->format.code = ar0234_get_format_code(ar0234);
+
+	mode = v4l2_find_nearest_size(ar0234_modes, ARRAY_SIZE(ar0234_modes),
+				      width, height, fmt->format.width,
+				      fmt->format.height);
+	ar0234_update_image_pad_format(mode, fmt);
+
+	*v4l2_subdev_state_get_format(sd_state, IMAGE_PAD) = fmt->format;
+
+	*v4l2_subdev_state_get_crop(sd_state, IMAGE_PAD) = mode->crop;
+
+	if (fmt->which == V4L2_SUBDEV_FORMAT_ACTIVE)
+		ar0234_set_framing_limits(ar0234, mode);
+
+	return 0;
+}
+
+static int ar0234_get_selection(struct v4l2_subdev *sd,
+				struct v4l2_subdev_state *sd_state,
+				struct v4l2_subdev_selection *sel)
+{
+	if (sel->pad != IMAGE_PAD)
+		return -EINVAL;
+
+	switch (sel->target) {
+	case V4L2_SEL_TGT_CROP:
+		sel->r = *v4l2_subdev_state_get_crop(sd_state, IMAGE_PAD);
+
+		return 0;
+
+	case V4L2_SEL_TGT_NATIVE_SIZE:
+		sel->r.top = 0;
+		sel->r.left = 0;
+		sel->r.width = AR0234_NATIVE_WIDTH;
+		sel->r.height = AR0234_NATIVE_HEIGHT;
+
+		return 0;
+
+	case V4L2_SEL_TGT_CROP_DEFAULT:
+	case V4L2_SEL_TGT_CROP_BOUNDS:
+		sel->r.top = AR0234_PIXEL_ARRAY_TOP;
+		sel->r.left = AR0234_PIXEL_ARRAY_LEFT;
+		sel->r.width = AR0234_PIXEL_ARRAY_WIDTH;
+		sel->r.height = AR0234_PIXEL_ARRAY_HEIGHT;
+
+		return 0;
+	}
+
+	return -EINVAL;
+}
+
+static int ar0234_soft_reset(struct ar0234 *ar0234)
+{
+	int ret;
+
+	/* 20ms */
+	usleep_range(20000, 21000);
+
+	ret = cci_write(ar0234->regmap, AR0234_REG_RESET, 0x0001, NULL);
+
+	/* 200ms */
+	usleep_range(200000, 201000);
+
+	return cci_write(ar0234->regmap, AR0234_REG_RESET, AR0234_RESET_DEFAULT,
+			 &ret);
+}
+
+static inline int
+ar0234_reg_seq_write(struct regmap *regmap,
+		     struct ar0234_reg_sequence const *reg_sequence)
+{
+	return cci_multi_reg_write(regmap, reg_sequence->regs,
+				   reg_sequence->num_regs, NULL);
+}
+
+static int ar0234_pixclk_config(struct ar0234 *ar0234)
+{
+	int ret = 0;
+
+	if (ar0234_freq_pixclk[ar0234->hw_config.lane_count_id] ==
+	    AR0234_FREQ_PIXCLK_45MHZ) {
+		ret = cci_multi_reg_write(ar0234->regmap,
+					  pixclk_45mhz_mfr_settings,
+					  ARRAY_SIZE(pixclk_45mhz_mfr_settings),
+					  NULL);
+
+		ret = cci_write(ar0234->regmap, AR0234_REG_MFR_30BA,
+				AR0234_MFR_30BA_GAIN_BITS(6), &ret);
+
+		ar0234->mfr_30ba = AR0234_MFR_30BA_GAIN_BITS(6);
+	} else {
+		/*
+		 * Default value after reset. No need to write to register.
+		 * Just update the cached value.
+		 */
+		ar0234->mfr_30ba = AR0234_MFR_30BA_DEFAULT;
+	}
+
+	return ret;
+}
+
+static inline int ar0234_mode_select(struct ar0234 *ar0234, bool stream_on)
+{
+	return cci_write(ar0234->regmap, AR0234_REG_MODE_SELECT, stream_on,
+			 NULL);
+}
+
+static int ar0234_stream_on(struct ar0234 *ar0234)
+{
+	int ret = 0;
+	int tm;
+
+	tm = (ar0234->hw_config.trigger_mode >= 0) ?
+		     ar0234->hw_config.trigger_mode :
+		     trigger_mode;
+
+	if (tm == AR0234_TRIGGER_MODE_OFF) {
+		ret = ar0234_mode_select(ar0234, true);
+	} else {
+		u16 reset_val = AR0234_RESET_DEFAULT | AR0234_RESET_GPI_EN |
+				AR0234_RESET_FORCED_PLL_ON;
+
+		if (tm == AR0234_TRIGGER_MODE_SLAVE_SYNC) {
+			reset_val |= AR0234_RESET_STREAM;
+			ret = cci_write(ar0234->regmap, AR0234_REG_GRR_CONTROL1,
+					AR0234_GRR_SLAVE_SH_SYNC, NULL);
+		}
+
+		cci_write(ar0234->regmap, AR0234_REG_RESET, reset_val, &ret);
+	}
+
+	return ret;
+}
+
+static int ar0234_enable_streams(struct v4l2_subdev *sd,
+				 struct v4l2_subdev_state *state, u32 pad,
+				 u64 streams_mask)
+{
+	struct ar0234 *ar0234 = to_ar0234(sd);
+	struct device *dev = ar0234->dev;
+	const struct ar0234_mode *mode;
+	int ret;
+
+	/* Image and metadata pads stream together, start hardware once */
+	if (v4l2_subdev_is_streaming(sd))
+		return 0;
+
+	ret = pm_runtime_resume_and_get(dev);
+	if (ret < 0)
+		return ret;
+
+	/* Reset */
+	ret = ar0234_soft_reset(ar0234);
+	if (ret < 0) {
+		dev_err(dev, "%s failed to reset\n", __func__);
+		goto err_rpm_put;
+	}
+
+	/* PLL and MIPI config */
+	ret = ar0234_reg_seq_write(ar0234->regmap,
+				   &ar0234->pll_config->regs_pll);
+	if (ret < 0) {
+		dev_err(dev, "%s failed to configure pll/mipi settings\n",
+			__func__);
+		goto err_rpm_put;
+	}
+
+	/* Configure lane count */
+	ret = cci_write(ar0234->regmap, AR0234_REG_SERIAL_FORMAT,
+			(0x0200 | ar0234->hw_config.num_data_lanes), NULL);
+	if (ret < 0) {
+		dev_err(dev, "%s failed to configure lane count\n", __func__);
+		goto err_rpm_put;
+	}
+
+	/* Common */
+	ret = cci_multi_reg_write(ar0234->regmap, common_init,
+				  ARRAY_SIZE(common_init), NULL);
+	if (ret < 0) {
+		dev_err(dev, "%s failed to set common settings\n", __func__);
+		goto err_rpm_put;
+	}
+
+	/* Configure recommended pixclk settings */
+	ret = ar0234_pixclk_config(ar0234);
+	if (ret < 0) {
+		dev_err(dev, "%s failed to apply recommended pixclk settings\n",
+			__func__);
+		goto err_rpm_put;
+	}
+
+	/* Apply default values of current frame format */
+	mode = ar0234_state_get_mode(state);
+	ret = ar0234_reg_seq_write(ar0234->regmap, &mode->reg_sequence);
+	if (ret < 0) {
+		dev_err(dev, "%s failed to set frame format\n", __func__);
+		goto err_rpm_put;
+	}
+
+	/* Configure flash output if enabled */
+	if (ar0234->hw_config.flash_enable) {
+		u16 flash_val = AR0234_FLASH_ENABLE |
+				(u8)ar0234->hw_config.flash_delay;
+
+		ret = cci_write(ar0234->regmap, AR0234_REG_LED_FLASH_CONTROL,
+				flash_val, NULL);
+		if (ret < 0) {
+			dev_err(dev, "%s failed to configure flash\n",
+				__func__);
+			goto err_rpm_put;
+		}
+	}
+
+	/* Apply customized values from user */
+	ret = __v4l2_ctrl_handler_setup(ar0234->sd.ctrl_handler);
+	if (ret)
+		goto err_rpm_put;
+
+	ret = ar0234_stream_on(ar0234);
+	if (ret)
+		goto err_rpm_put;
+
+	/* vflip and hflip cannot change during streaming */
+	__v4l2_ctrl_grab(ar0234->vflip, true);
+	__v4l2_ctrl_grab(ar0234->hflip, true);
+
+	return 0;
+
+err_rpm_put:
+	pm_runtime_mark_last_busy(dev);
+	pm_runtime_put_autosuspend(dev);
+
+	return ret;
+}
+
+static int ar0234_disable_streams(struct v4l2_subdev *sd,
+				  struct v4l2_subdev_state *state, u32 pad,
+				  u64 streams_mask)
+{
+	struct ar0234 *ar0234 = to_ar0234(sd);
+	struct device *dev = ar0234->dev;
+	int ret;
+
+	/* Stop hardware only when the last enabled pad goes */
+	if (sd->enabled_pads & ~BIT_ULL(pad))
+		return 0;
+
+	ret = cci_write(ar0234->regmap, AR0234_REG_RESET, AR0234_RESET_DEFAULT,
+			NULL);
+	if (ret < 0)
+		dev_err(dev, "%s failed to stop streaming\n", __func__);
+
+	__v4l2_ctrl_grab(ar0234->vflip, false);
+	__v4l2_ctrl_grab(ar0234->hflip, false);
+
+	pm_runtime_mark_last_busy(dev);
+	pm_runtime_put_autosuspend(dev);
+
+	return ret;
+}
+
+/* Power/clock management functions */
+static int ar0234_power_on(struct device *dev)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct v4l2_subdev *sd = i2c_get_clientdata(client);
+	struct ar0234 *ar0234 = to_ar0234(sd);
+	int ret;
+
+	ret = regulator_bulk_enable(AR0234_NUM_SUPPLIES,
+				    ar0234->hw_config.supplies);
+	if (ret) {
+		dev_err(dev, "%s: failed to enable regulators\n", __func__);
+		return ret;
+	}
+
+	ret = clk_prepare_enable(ar0234->hw_config.extclk);
+	if (ret) {
+		dev_err(dev, "%s: failed to enable clock\n", __func__);
+		goto reg_off;
+	}
+
+	gpiod_set_value_cansleep(ar0234->hw_config.gpio_reset, 1);
+	usleep_range(AR0234_RESET_DELAY_MIN_US,
+		     AR0234_RESET_DELAY_MIN_US + AR0234_RESET_DELAY_RANGE_US);
+
+	return 0;
+
+reg_off:
+	regulator_bulk_disable(AR0234_NUM_SUPPLIES, ar0234->hw_config.supplies);
+
+	return ret;
+}
+
+static int ar0234_power_off(struct device *dev)
+{
+	struct i2c_client *client = to_i2c_client(dev);
+	struct v4l2_subdev *sd = i2c_get_clientdata(client);
+	struct ar0234 *ar0234 = to_ar0234(sd);
+
+	gpiod_set_value_cansleep(ar0234->hw_config.gpio_reset, 0);
+	regulator_bulk_disable(AR0234_NUM_SUPPLIES, ar0234->hw_config.supplies);
+	clk_disable_unprepare(ar0234->hw_config.extclk);
+
+	return 0;
+}
+
+/* Verify chip ID */
+static int ar0234_identify_module(struct ar0234 *ar0234)
+{
+	int ret;
+	u64 reg_val;
+
+	ret = cci_read(ar0234->regmap, AR0234_REG_CHIP_ID, &reg_val, NULL);
+	if (ret < 0)
+		return dev_err_probe(ar0234->dev, ret,
+				     "failed to read chip id\n");
+
+	if (reg_val == AR0234_CHIP_ID_MONO)
+		ar0234->monochrome = true;
+	else if (reg_val != AR0234_CHIP_ID)
+		return dev_err_probe(ar0234->dev, -EIO,
+				     "Invalid chip id: 0x%x\n", (u16)reg_val);
+
+	dev_info(ar0234->dev, "Success reading chip id: 0x%x\n", (u16)reg_val);
+
+	return ret;
+}
+
+static int ar0234_init_state(struct v4l2_subdev *sd,
+			     struct v4l2_subdev_state *state)
+{
+	struct v4l2_subdev_format fmt = {
+		.which = V4L2_SUBDEV_FORMAT_TRY,
+		.pad = IMAGE_PAD,
+		.format = {
+			.width = ar0234_modes[0].width,
+			.height = ar0234_modes[0].height,
+		},
+	};
+	struct v4l2_subdev_format meta_fmt = {
+		.which = V4L2_SUBDEV_FORMAT_TRY,
+		.pad = METADATA_PAD,
+	};
+
+	ar0234_set_pad_format(sd, state, &fmt);
+	ar0234_set_pad_format(sd, state, &meta_fmt);
+
+	return 0;
+}
+
+static const struct v4l2_subdev_core_ops ar0234_core_ops = {
+	.subscribe_event = v4l2_ctrl_subdev_subscribe_event,
+	.unsubscribe_event = v4l2_event_subdev_unsubscribe,
+};
+
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
+/*
+ * Before kernel 6.11, v4l2_subdev_s_stream_helper() builds the stream mask
+ * from the routing table only. This subdev has no routing table, so the
+ * mask is zero and the sensor does not start. Call the stream ops directly.
+ */
+static int ar0234_s_stream(struct v4l2_subdev *sd, int enable)
+{
+	struct v4l2_subdev_state *state;
+	int ret;
+
+	state = v4l2_subdev_lock_and_get_active_state(sd);
+	if (enable)
+		ret = ar0234_enable_streams(sd, state, 0, BIT_ULL(0));
+	else
+		ret = ar0234_disable_streams(sd, state, 0, BIT_ULL(0));
+	v4l2_subdev_unlock_state(state);
+
+	return ret;
+}
+#endif
+
+static const struct v4l2_subdev_video_ops ar0234_video_ops = {
+#if LINUX_VERSION_CODE < KERNEL_VERSION(6, 11, 0)
+	.s_stream = ar0234_s_stream,
+#else
+	.s_stream = v4l2_subdev_s_stream_helper,
+#endif
+};
+
+static const struct v4l2_subdev_pad_ops ar0234_pad_ops = {
+	.enum_mbus_code = ar0234_enum_mbus_code,
+	.get_fmt = v4l2_subdev_get_fmt,
+	.set_fmt = ar0234_set_pad_format,
+	.get_selection = ar0234_get_selection,
+	.enum_frame_size = ar0234_enum_frame_size,
+	.enable_streams = ar0234_enable_streams,
+	.disable_streams = ar0234_disable_streams,
+};
+
+static const struct v4l2_subdev_ops ar0234_subdev_ops = {
+	.core = &ar0234_core_ops,
+	.video = &ar0234_video_ops,
+	.pad = &ar0234_pad_ops,
+};
+
+static const struct v4l2_subdev_internal_ops ar0234_internal_ops = {
+	.init_state = ar0234_init_state,
+};
+
+/* Initialize control handlers */
+static int ar0234_init_controls(struct ar0234 *ar0234)
+{
+	struct i2c_client *client = v4l2_get_subdevdata(&ar0234->sd);
+	const struct ar0234_mode *mode = &ar0234_modes[0];
+	struct v4l2_fwnode_device_properties props;
+	struct v4l2_ctrl_handler *ctrl_hdlr;
+	struct v4l2_ctrl *ctrl;
+	unsigned int pixel_rate;
+	int exposure_max, hblank;
+	int i, ret;
+
+	ctrl_hdlr = &ar0234->ctrl_handler;
+	ret = v4l2_ctrl_handler_init(ctrl_hdlr, 16);
+	if (ret)
+		return ret;
+
+	/* By default, PIXEL_RATE is read only */
+	pixel_rate = ar0234_freq_pixclk[ar0234->hw_config.lane_count_id];
+	ctrl = v4l2_ctrl_new_std(ctrl_hdlr, &ar0234_ctrl_ops,
+				 V4L2_CID_PIXEL_RATE, pixel_rate, pixel_rate, 1,
+				 pixel_rate);
+	if (ctrl)
+		ctrl->flags |= V4L2_CTRL_FLAG_READ_ONLY;
+
+	/* Seed limits from default mode, subdev state does not exist yet */
+	ar0234->vblank = v4l2_ctrl_new_std(ctrl_hdlr, &ar0234_ctrl_ops,
+					   V4L2_CID_VBLANK, AR0234_VBLANK_MIN,
+					   AR0234_FLL_MAX - mode->height, 1,
+					   AR0234_VBLANK_MIN);
+
+	hblank = AR0234_LINE_LENGTH_PCK_DEF - mode->width;
+	ar0234->hblank = v4l2_ctrl_new_std(ctrl_hdlr, &ar0234_ctrl_ops,
+					   V4L2_CID_HBLANK, hblank, hblank, 1,
+					   hblank);
+	if (ar0234->hblank)
+		ar0234->hblank->flags |= V4L2_CTRL_FLAG_READ_ONLY;
+
+	exposure_max =
+		mode->height + AR0234_VBLANK_MIN - AR0234_FLL_OVERHEAD - 1;
+	ar0234->exposure = v4l2_ctrl_new_std(ctrl_hdlr, &ar0234_ctrl_ops,
+					     V4L2_CID_EXPOSURE,
+					     AR0234_EXPOSURE_MIN, exposure_max,
+					     AR0234_EXPOSURE_STEP,
+					     exposure_max);
+
+	v4l2_ctrl_new_std(ctrl_hdlr, &ar0234_ctrl_ops, V4L2_CID_ANALOGUE_GAIN,
+			  AR0234_ANA_GAIN_MIN, AR0234_ANA_GAIN_MAX,
+			  AR0234_ANA_GAIN_STEP, AR0234_ANA_GAIN_DEFAULT);
+
+	v4l2_ctrl_new_std(ctrl_hdlr, &ar0234_ctrl_ops, V4L2_CID_DIGITAL_GAIN,
+			  AR0234_DGTL_GAIN_MIN, AR0234_DGTL_GAIN_MAX,
+			  AR0234_DGTL_GAIN_STEP, AR0234_DGTL_GAIN_DEFAULT);
+
+	ar0234->hflip = v4l2_ctrl_new_std(ctrl_hdlr, &ar0234_ctrl_ops,
+					  V4L2_CID_HFLIP, 0, 1, 1, 0);
+
+	ar0234->vflip = v4l2_ctrl_new_std(ctrl_hdlr, &ar0234_ctrl_ops,
+					  V4L2_CID_VFLIP, 0, 1, 1, 0);
+
+	v4l2_ctrl_new_std_menu_items(ctrl_hdlr, &ar0234_ctrl_ops,
+				     V4L2_CID_TEST_PATTERN,
+				     ARRAY_SIZE(ar0234_test_pattern_menu) - 1,
+				     0, 0, ar0234_test_pattern_menu);
+	for (i = 0; i < 4; i++) {
+		/*
+		 * The assumption is that
+		 * V4L2_CID_TEST_PATTERN_GREENR == V4L2_CID_TEST_PATTERN_RED + 1
+		 * V4L2_CID_TEST_PATTERN_BLUE   == V4L2_CID_TEST_PATTERN_RED + 2
+		 * V4L2_CID_TEST_PATTERN_GREENB == V4L2_CID_TEST_PATTERN_RED + 3
+		 */
+		v4l2_ctrl_new_std(ctrl_hdlr, &ar0234_ctrl_ops,
+				  V4L2_CID_TEST_PATTERN_RED + i,
+				  AR0234_TEST_PATTERN_COLOR_MIN,
+				  AR0234_TEST_PATTERN_COLOR_MAX,
+				  AR0234_TEST_PATTERN_COLOR_STEP,
+				  AR0234_TEST_PATTERN_COLOR_MAX);
+		/* The "Solid color" pattern is white by default */
+	}
+
+	ctrl = v4l2_ctrl_new_int_menu(ctrl_hdlr, &ar0234_ctrl_ops,
+				      V4L2_CID_LINK_FREQ, 0, 0,
+				      &ar0234->pll_config->freq_link);
+	if (ctrl)
+		ctrl->flags |= V4L2_CTRL_FLAG_READ_ONLY;
+
+	ret = v4l2_fwnode_device_parse(&client->dev, &props);
+	if (!ret)
+		v4l2_ctrl_new_fwnode_properties(ctrl_hdlr, &ar0234_ctrl_ops,
+						&props);
+
+	if (ctrl_hdlr->error) {
+		ret = ctrl_hdlr->error;
+		dev_err(&client->dev, "%s control init failed (%d)\n", __func__,
+			ret);
+		goto error;
+	}
+
+	ar0234->sd.ctrl_handler = ctrl_hdlr;
+
+	return 0;
+
+error:
+	v4l2_ctrl_handler_free(ctrl_hdlr);
+
+	return ret;
+}
+
+static void ar0234_free_controls(struct ar0234 *ar0234)
+{
+	v4l2_ctrl_handler_free(ar0234->sd.ctrl_handler);
+}
+
+static int ar0234_parse_hw_config(struct ar0234 *ar0234)
+{
+	struct device *dev = ar0234->dev;
+	struct v4l2_fwnode_endpoint ep_cfg = {
+		.bus_type = V4L2_MBUS_CSI2_DPHY,
+	};
+	struct fwnode_handle *endpoint;
+	struct ar0234_hw_config *hw_config = &ar0234->hw_config;
+	unsigned long extclk_frequency;
+	int ret = -EINVAL;
+	unsigned int i, tm;
+
+	for (i = 0; i < AR0234_NUM_SUPPLIES; i++)
+		hw_config->supplies[i].supply = ar0234_supply_names[i];
+
+	ret = devm_regulator_bulk_get(dev, AR0234_NUM_SUPPLIES,
+				      hw_config->supplies);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to get regulators\n");
+
+	/* Get optional reset pin */
+	hw_config->gpio_reset =
+		devm_gpiod_get_optional(dev, "reset", GPIOD_OUT_HIGH);
+
+	/* Get input clock (extclk) */
+	hw_config->extclk = devm_clk_get(dev, "extclk");
+	if (IS_ERR(hw_config->extclk))
+		return dev_err_probe(dev, PTR_ERR(hw_config->extclk),
+				     "failed to get extclk\n");
+
+	endpoint = fwnode_graph_get_next_endpoint(dev_fwnode(dev), NULL);
+	if (!endpoint)
+		return dev_err_probe(dev, -ENXIO, "endpoint node not found\n");
+
+	ret = v4l2_fwnode_endpoint_alloc_parse(endpoint, &ep_cfg);
+	fwnode_handle_put(endpoint);
+	if (ret)
+		return dev_err_probe(dev, ret, "failed to parse endpoint\n");
+
+	/* Check the number of MIPI CSI2 data lanes */
+	switch (ep_cfg.bus.mipi_csi2.num_data_lanes) {
+	case 2:
+		hw_config->lane_count_id = AR0234_LANE_COUNT_ID_2LANE;
+		break;
+	case 4:
+		hw_config->lane_count_id = AR0234_LANE_COUNT_ID_4LANE;
+		break;
+	default:
+		ret = dev_err_probe(dev, -EINVAL,
+				    "invalid number of CSI2 data lanes %d\n",
+				    ep_cfg.bus.mipi_csi2.num_data_lanes);
+		goto error_out;
+	}
+
+	hw_config->num_data_lanes = ep_cfg.bus.mipi_csi2.num_data_lanes;
+
+	/* Check the link frequency set in device tree */
+	if (!ep_cfg.nr_of_link_frequencies) {
+		ret = dev_err_probe(dev, -EINVAL,
+				    "link-frequency not found in DT\n");
+		goto error_out;
+	}
+
+	extclk_frequency = clk_get_rate(hw_config->extclk);
+
+	/*
+	 * Check if there exists a sensor mode defined for current EXTCLK
+	 * and given lane rate.
+	 */
+	for (i = 0; i < ARRAY_SIZE(ar0234_pll_configs); i++) {
+		if (ar0234_pll_configs[i].freq_extclk == extclk_frequency &&
+		    ar0234_pll_configs[i].freq_link ==
+			    ep_cfg.link_frequencies[0])
+			break;
+	}
+
+	if (i == ARRAY_SIZE(ar0234_pll_configs)) {
+		ret = dev_err_probe(dev, -EINVAL,
+				    "no PLL config for %lu/%llu Hz\n",
+				    extclk_frequency,
+				    ep_cfg.link_frequencies[0]);
+		goto error_out;
+	}
+
+	ar0234->pll_config = &ar0234_pll_configs[i];
+
+	ret = of_property_read_u32(dev->of_node, "trigger-mode", &tm);
+	ar0234->hw_config.trigger_mode = (ret == 0) ? tm : -1;
+
+	hw_config->flash_enable = of_property_read_bool(dev->of_node, "flash");
+
+	if (hw_config->flash_enable) {
+		u32 lead = 0, lag = 0;
+
+		of_property_read_u32(dev->of_node, "flash-lead", &lead);
+		of_property_read_u32(dev->of_node, "flash-lag", &lag);
+
+		if (lead)
+			hw_config->flash_delay = -(s8)lead;
+		else if (lag)
+			hw_config->flash_delay = (s8)lag;
+	}
+
+	dev_info(dev, "extclk: %luHz, link: %lluHz, lanes: %d\n",
+		 extclk_frequency, ep_cfg.link_frequencies[0],
+		 hw_config->num_data_lanes);
+	dev_dbg(dev, "trigger_mode: %d, flash: %s%s\n", hw_config->trigger_mode,
+		hw_config->flash_enable ? "enabled" : "disabled",
+		(hw_config->flash_enable && hw_config->flash_delay) ?
+			((hw_config->flash_delay < 0) ? " (lead)" : " (lag)") :
+			"");
+
+	ret = 0;
+
+error_out:
+	v4l2_fwnode_endpoint_free(&ep_cfg);
+
+	return ret;
+}
+
+static int ar0234_probe(struct i2c_client *client)
+{
+	struct ar0234 *ar0234;
+	int ret;
+
+	ar0234 = devm_kzalloc(&client->dev, sizeof(*ar0234), GFP_KERNEL);
+	if (!ar0234)
+		return -ENOMEM;
+
+	ar0234->dev = &client->dev;
+
+	v4l2_i2c_subdev_init(&ar0234->sd, client, &ar0234_subdev_ops);
+
+	/* Check the hardware configuration in device tree */
+	ret = ar0234_parse_hw_config(ar0234);
+	if (ret)
+		return ret;
+
+	ar0234->regmap =
+		devm_cci_regmap_init_i2c(client, AR0234_REG_ADDRESS_BITS);
+	if (IS_ERR(ar0234->regmap))
+		return PTR_ERR(ar0234->regmap);
+
+	/*
+	 * Enable power management. The driver supports runtime PM, but needs to
+	 * work when runtime PM is disabled in the kernel. To that end, power
+	 * the sensor on manually here, identify it, and fully initialize it.
+	 */
+	ret = ar0234_power_on(ar0234->dev);
+	if (ret)
+		return ret;
+
+	pm_runtime_set_active(ar0234->dev);
+	pm_runtime_get_noresume(ar0234->dev);
+	pm_runtime_enable(ar0234->dev);
+	pm_runtime_set_autosuspend_delay(ar0234->dev, 1000);
+	pm_runtime_use_autosuspend(ar0234->dev);
+
+	ret = ar0234_identify_module(ar0234);
+	if (ret)
+		goto error_power_off;
+
+	/*
+	 * Sensor doesn't enter LP-11 state upon power up until and unless
+	 * streaming is started, so upon power up switch the modes to:
+	 * streaming -> standby
+	 */
+	ret = ar0234_mode_select(ar0234, true);
+	if (ret < 0)
+		goto error_power_off;
+	usleep_range(100, 110);
+
+	/* put sensor back to standby mode */
+	ret = ar0234_mode_select(ar0234, false);
+	if (ret < 0)
+		goto error_power_off;
+	usleep_range(100, 110);
+
+	ret = ar0234_init_controls(ar0234);
+	if (ret)
+		goto error_power_off;
+
+	/* Initialize subdev */
+	ar0234->sd.internal_ops = &ar0234_internal_ops;
+	ar0234->sd.flags |= V4L2_SUBDEV_FL_HAS_DEVNODE |
+			    V4L2_SUBDEV_FL_HAS_EVENTS;
+	ar0234->sd.entity.function = MEDIA_ENT_F_CAM_SENSOR;
+
+	/* Initialize source pads */
+	ar0234->pad[IMAGE_PAD].flags = MEDIA_PAD_FL_SOURCE;
+	ar0234->pad[METADATA_PAD].flags = MEDIA_PAD_FL_SOURCE;
+
+	ret = media_entity_pads_init(&ar0234->sd.entity, NUM_PADS, ar0234->pad);
+	if (ret) {
+		dev_err(ar0234->dev, "failed to init entity pads: %d\n", ret);
+		goto error_handler_free;
+	}
+
+	ar0234->sd.state_lock = ar0234->ctrl_handler.lock;
+	ret = v4l2_subdev_init_finalize(&ar0234->sd);
+	if (ret) {
+		dev_err(ar0234->dev, "failed to finalize subdev init: %d\n",
+			ret);
+		goto error_media_entity;
+	}
+
+	ret = v4l2_async_register_subdev_sensor(&ar0234->sd);
+	if (ret < 0) {
+		dev_err(ar0234->dev,
+			"failed to register sensor sub-device: %d\n", ret);
+		goto error_subdev_cleanup;
+	}
+
+	/*
+	 * Finally, enable autosuspend and decrease the usage count. The device
+	 * will get suspended after the autosuspend delay, turning the power
+	 * off.
+	 */
+	pm_runtime_mark_last_busy(ar0234->dev);
+	pm_runtime_put_autosuspend(ar0234->dev);
+
+	return 0;
+
+error_subdev_cleanup:
+	v4l2_subdev_cleanup(&ar0234->sd);
+
+error_media_entity:
+	media_entity_cleanup(&ar0234->sd.entity);
+
+error_handler_free:
+	ar0234_free_controls(ar0234);
+
+error_power_off:
+	pm_runtime_disable(ar0234->dev);
+	pm_runtime_put_noidle(ar0234->dev);
+	ar0234_power_off(ar0234->dev);
+
+	return ret;
+}
+
+static void ar0234_remove(struct i2c_client *client)
+{
+	struct v4l2_subdev *sd = i2c_get_clientdata(client);
+	struct ar0234 *ar0234 = to_ar0234(sd);
+
+	v4l2_async_unregister_subdev(sd);
+	v4l2_subdev_cleanup(sd);
+	media_entity_cleanup(&sd->entity);
+	ar0234_free_controls(ar0234);
+
+	pm_runtime_disable(&client->dev);
+	if (!pm_runtime_status_suspended(&client->dev))
+		ar0234_power_off(&client->dev);
+	pm_runtime_set_suspended(&client->dev);
+}
+
+static const struct of_device_id ar0234_dt_ids[] = {
+	{ .compatible = "onnn,ar0234cs" },
+	{ /* sentinel */ }
+};
+MODULE_DEVICE_TABLE(of, ar0234_dt_ids);
+
+static DEFINE_RUNTIME_DEV_PM_OPS(ar0234_pm_ops, ar0234_power_off,
+				 ar0234_power_on, NULL);
+
+static struct i2c_driver ar0234_i2c_driver = {
+	.driver = {
+		.name = "ar0234",
+		.of_match_table	= ar0234_dt_ids,
+		.pm = pm_ptr(&ar0234_pm_ops),
+	},
+	.probe = ar0234_probe,
+	.remove = ar0234_remove,
+};
+
+module_i2c_driver(ar0234_i2c_driver);
+
+MODULE_AUTHOR("Dave Stevenson <dave.stevenson@raspberrypi.com>");
+MODULE_AUTHOR("Danius Kalvaitis <danius@kurokesu.com>");
+MODULE_DESCRIPTION("onsemi AR0234 sensor driver");
+MODULE_LICENSE("GPL");

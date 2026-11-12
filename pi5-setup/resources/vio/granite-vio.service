@@ -1,0 +1,26 @@
+# granite live mono VIO at boot. setup_vio_service.sh writes the user and the deployment folder.
+[Unit]
+Description=granite live mono VIO (Kurokesu AR0234, FC IMU, ODOMETRY to the FC)
+Wants=mavlink-router.service
+After=mavlink-router.service
+
+[Service]
+Type=simple
+User=@USER@
+SupplementaryGroups=video
+Environment=GRANITE_DEPLOY=@DEPLOY@
+# 672x600 (2x2 sensor binning). renew-config.sh writes these files from a new calibration.
+Environment=GRANITE_CALIB=@DEPLOY@/config/service/kurokesu_672x600_calib.json
+Environment=GRANITE_CONFIG=@DEPLOY@/config/service/kurokesu_672x600_handheld.json
+EnvironmentFile=-/etc/default/granite-vio
+# The camera node can appear after the service starts. Wait up to 30 s.
+ExecStartPre=/bin/sh -c 'i=0; while [ ! -e /dev/video0 ] && [ $$i -lt 30 ]; do sleep 1; i=$$((i + 1)); done; [ -e /dev/video0 ]'
+ExecStart=@DEPLOY@/scripts/pi5_live_kurokesu_vio.sh --no-gui $GRANITE_VIO_ARGS
+# SIGINT: granite_vio writes its results, and the tee of the script keeps the log.
+KillSignal=SIGINT
+TimeoutStopSec=30
+# One VIO run for each boot: a restart starts a new origin and yaw.
+Restart=no
+
+[Install]
+WantedBy=multi-user.target
