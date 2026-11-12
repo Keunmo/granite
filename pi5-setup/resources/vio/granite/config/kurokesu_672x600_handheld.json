@@ -76,7 +76,7 @@
         "camera.height": 1200,
         "camera.pixel_format": "gray8",
         "camera.exposure_time": 3.0,
-        "camera.gain": 50,
+        "camera.gain": 40,
         "camera.h_flip": true,
         "camera.v_flip": true,
         "camera.crop": [
@@ -86,12 +86,24 @@
             1200
         ],
         "camera.auto_white_balance": false,
-        "camera.fused_wb": false,
-        "camera.enable_gamma": false,
-        "camera.auto_exposure": false,
-        "camera.auto_gain": false,
+        "camera.fused_wb": true,
+        "camera.enable_gamma": true,
+        "camera.auto_exposure": true,
+        "camera.auto_gain": true,
         "imu.type": "imu_mavlink",
         "imu.udp": "127.0.0.1:14601",
-        "imu.freq_hz": 200
+        "imu.freq_hz": 200,
+        "camera.black_level": 42,
+        "camera.auto_exposure_range": [
+            0.1,
+            4.0
+        ],
+        "camera.auto_exposure_circle": [
+            665,
+            646,
+            660
+        ],
+        "camera.auto_exp_prior": "exposure",
+        "camera.target_gray_value": 20.0
     }
 }
