@@ -2416,11 +2416,21 @@ class VioDataset {
     start_imu = device->imu_samples.load();
     device->enableCapture();
     capture_start = Clock::now();
-    // The estimator expects its first IMU measurement to be present.
+    // The estimator expects its first IMU measurement to be present. An FC that
+    // boots together with the Pi can take a long time before it streams; the
+    // device requests the stream again until the FC answers.
+    auto next_notice = capture_start + std::chrono::seconds(5);
     while (imu_data_queue.empty() && !device->failed && !granite_vio_interrupted &&
-           Clock::now() - capture_start < std::chrono::seconds(5))
+           Clock::now() - capture_start < std::chrono::seconds(60)) {
       std::this_thread::sleep_for(std::chrono::milliseconds(5));
-    if (imu_data_queue.empty()) throw std::runtime_error("The IMU did not deliver data");
+      if (Clock::now() >= next_notice) {
+        std::cout << "Waiting for the IMU data ("
+                  << std::chrono::duration_cast<std::chrono::seconds>(Clock::now() - capture_start).count()
+                  << " s)" << std::endl;
+        next_notice += std::chrono::seconds(5);
+      }
+    }
+    if (imu_data_queue.empty()) throw std::runtime_error("The IMU did not deliver data in 60 s");
   }
 
   void liveForwardLoop() {
