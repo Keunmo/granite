@@ -51,6 +51,8 @@ constexpr size_t kMaxTrajectory = 400000;
 constexpr size_t kMaxDrawnSegments = 20000;
 // Samples kept for the plots (20 minutes at 20 Hz)
 constexpr size_t kMaxPlotSamples = 24000;
+// Time span of the plots [s]: a fixed x range that moves with the newest sample
+constexpr double kPlotSeconds = 30.0;
 // Without a message for this time the viewer marks the data as old [s]
 constexpr double kStaleSeconds = 1.0;
 
@@ -791,19 +793,27 @@ class Viewer {
     const float half = 0.5f * ImGui::GetContentRegionAvail().x - 4.0f;
     const float height = ImGui::GetContentRegionAvail().y;
     std::lock_guard<std::mutex> lock(shared->mutex);
-    const int n = static_cast<int>(shared->plot_t.size());
+    const auto& t = shared->plot_t;
+    const double t_end = std::max(kPlotSeconds, t.empty() ? 0.0 : static_cast<double>(t.back()));
+    const double t_begin = t_end - kPlotSeconds;
+    const int first = static_cast<int>(std::lower_bound(t.begin(), t.end(), static_cast<float>(t_begin)) - t.begin());
+    const int n = static_cast<int>(t.size()) - first;
+    // RangeFit: the y axis fits the samples in the x range only.
+    const ImPlotAxisFlags y_flags = ImPlotAxisFlags_AutoFit | ImPlotAxisFlags_RangeFit;
     if (ImPlot::BeginPlot("speed", ImVec2(half, height))) {
-      ImPlot::SetupAxes("time [s]", "speed [m/s]", ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
-      if (n > 0) ImPlot::PlotLine("|v|", shared->plot_t.data(), shared->plot_speed.data(), n);
+      ImPlot::SetupAxes("time [s]", "speed [m/s]", ImPlotAxisFlags_None, y_flags);
+      ImPlot::SetupAxisLimits(ImAxis_X1, t_begin, t_end, ImPlotCond_Always);
+      if (n > 0) ImPlot::PlotLine("|v|", t.data() + first, shared->plot_speed.data() + first, n);
       ImPlot::EndPlot();
     }
     ImGui::SameLine();
     if (ImPlot::BeginPlot("position", ImVec2(half, height))) {
-      ImPlot::SetupAxes("time [s]", "position [m]", ImPlotAxisFlags_AutoFit, ImPlotAxisFlags_AutoFit);
+      ImPlot::SetupAxes("time [s]", "position [m]", ImPlotAxisFlags_None, y_flags);
+      ImPlot::SetupAxisLimits(ImAxis_X1, t_begin, t_end, ImPlotCond_Always);
       if (n > 0) {
-        ImPlot::PlotLine("x", shared->plot_t.data(), shared->plot_x.data(), n);
-        ImPlot::PlotLine("y", shared->plot_t.data(), shared->plot_y.data(), n);
-        ImPlot::PlotLine("z", shared->plot_t.data(), shared->plot_z.data(), n);
+        ImPlot::PlotLine("x", t.data() + first, shared->plot_x.data() + first, n);
+        ImPlot::PlotLine("y", t.data() + first, shared->plot_y.data() + first, n);
+        ImPlot::PlotLine("z", t.data() + first, shared->plot_z.data() + first, n);
       }
       ImPlot::EndPlot();
     }
