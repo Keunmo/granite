@@ -4,6 +4,7 @@
 #
 # Usage: pi5_live_kurokesu_vio.sh [--no-record] [--no-gui] [--threads N] [extra granite_vio options]
 # Env:   GRANITE_DEPLOY (default ~/deploy/granite), GRANITE_THREADS (default 3: the TBB worker limit)
+#        GRANITE_CALIB, GRANITE_CONFIG (default the 448x400 files in $GRANITE_DEPLOY/config)
 #
 # Outputs in $GRANITE_DEPLOY/runs/<date_time>/: run_traj_tum.txt, run_states.csv, run.log, euroc/ (recording).
 # Ctrl-C or closing the window ends the run and writes the results. A second Ctrl-C ends the program at once.
@@ -12,8 +13,8 @@ set -u
 E=${GRANITE_DEPLOY:-$HOME/deploy/granite}
 B=$E/bin
 C=$E/config
-CALIB=$C/kurokesu_448x400_calib.json
-CONFIG=$C/kurokesu_448x400_handheld.json
+CALIB=${GRANITE_CALIB:-$C/kurokesu_448x400_calib.json}
+CONFIG=${GRANITE_CONFIG:-$C/kurokesu_448x400_handheld.json}
 
 record=1
 gui=1
