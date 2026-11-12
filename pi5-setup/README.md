@@ -107,7 +107,8 @@ pi5-setup/
 ├── renew-config.sh              9단계: 새 xeye 캘리브레이션으로 서비스의 캘리브와 config 갱신
 ├── lib/bootcfg.sh               config.txt, cmdline.txt 편집 함수
 ├── docs/
-│   └── fc-v6x-rpi5-uart-wiring.md   1단계: 배선
+│   ├── fc-v6x-rpi5-uart-wiring.md   1단계: 배선
+│   └── vio-drone-operation.md       현장 운용: 노트북 연결, VIO 시작과 정지, 상태 확인
 └── resources/
     ├── SOURCES.md               각 파일의 출처, 버전, SHA256
     ├── ar0234-rpi-driver/       드라이버 소스(브랜치 rpi5-ubuntu2404)
